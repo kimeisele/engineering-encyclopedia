@@ -139,7 +139,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     if args.arm == "treatment":
         pack = yaml.safe_load((PACKS_DIR / f"{args.task}.yaml").read_text(encoding="utf-8"))
-        entry["pack_hash"] = pack["context_pack_hash"]
+        entry["pack_hash"] = pack.get("context_pack_hash") if isinstance(pack, dict) else None
     with open(manifest_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
     print(
@@ -161,13 +161,45 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     manifest_path = fixtures / "manifest.jsonl"
     rows = []
     if manifest_path.is_file():
-        for line in manifest_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(json.loads(line))
+        for lineno, line in enumerate(
+            manifest_path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                print(
+                    f"manifest {manifest_path}:{lineno}: invalid JSON, skipping",
+                    file=sys.stderr,
+                )
+                continue
+            # the manifest is self-written but may be tampered or merge-
+            # damaged; treat every field as untrusted
+            if (
+                not isinstance(row, dict)
+                or row.get("task") not in RUBRIC_FILES
+                or row.get("arm") not in ARMS
+                or not isinstance(row.get("output"), str)
+            ):
+                print(
+                    f"manifest {manifest_path}:{lineno}: malformed entry, skipping",
+                    file=sys.stderr,
+                )
+                continue
+            out = Path(row["output"])
+            if not out.is_file():  # regular file only: no FIFOs/devices/hangs
+                print(
+                    f"manifest {manifest_path}:{lineno}: output not a regular "
+                    f"file, skipping: {out}",
+                    file=sys.stderr,
+                )
+                continue
+            rows.append(row)
     if not rows:
         print(
-            f"No recorded completions found in {fixtures} (no manifest.jsonl). "
-            "Run `runner.py run` first.",
+            f"No usable recorded completions found in {fixtures} "
+            "(no valid manifest entries). Run `runner.py run` first.",
             file=sys.stderr,
         )
         _write_results(args.out, None)

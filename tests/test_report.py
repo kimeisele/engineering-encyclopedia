@@ -271,6 +271,24 @@ class TestVerifyReport(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "unreadable" for f in failures))
 
+    # -- untrusted-YAML denial guards ----------------------------------------
+
+    def test_oversized_report_rejected_cleanly(self):
+        # > 2 MiB report must fail with a clean error, not exhaust memory.
+        self.report_path.write_text("x" * (2 * 1024 * 1024 + 1), encoding="utf-8")
+        ok, failures = verify_report(self.report_path, self.pack_path, self.nodes)
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "unreadable" for f in failures))
+
+    def test_deeply_nested_report_rejected_cleanly(self):
+        # deep nesting must surface as a clean validation failure, not an
+        # uncaught RecursionError traceback.
+        self.report_path.write_text("[" * 10_000 + "]" * 10_000, encoding="utf-8")
+        ok, failures = verify_report(self.report_path, self.pack_path, self.nodes)
+        self.assertFalse(ok)
+        codes = [f["code"] for f in failures]
+        self.assertTrue(any(c in ("unreadable", "invalid_yaml") for c in codes), codes)
+
 
 if __name__ == "__main__":
     unittest.main()

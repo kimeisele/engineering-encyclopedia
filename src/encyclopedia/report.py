@@ -17,15 +17,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .canonical import canonical_bytes, sha256_prefix
-from .loader import Node
+from .loader import Node, load_yaml_file
 from .words import count_words
 
 MAX_ANSWER_WORDS = 40
 
 
 def _load_yaml(path: Path) -> Optional[Any]:
-    with open(path, "r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+    """Load report/pack YAML with the shared size and complexity guards."""
+    return load_yaml_file(path)
 
 
 def _fail(failures: List[Dict[str, str]], code: str, detail: str) -> None:
@@ -48,9 +48,9 @@ def verify_report(
     try:
         report = _load_yaml(report_path)
         pack = _load_yaml(pack_path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return False, [{"code": "unreadable", "detail": str(exc)}]
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, RecursionError) as exc:
         return False, [{"code": "invalid_yaml", "detail": str(exc)}]
 
     if not isinstance(report, dict) or not isinstance(report.get("application_report"), dict):

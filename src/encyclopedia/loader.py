@@ -54,6 +54,31 @@ TAXONOMY_DIR = Path(
     os.environ.get("ENCYCLOPEDIA_TAXONOMY_DIR", str(REPO_ROOT / "taxonomy"))
 )
 
+# Denial-of-service guards for imported YAML: imported YAML is data, but a
+# hostile or corrupted file must fail cleanly instead of exhausting the
+# process (deep nesting raises RecursionError; alias expansion and huge
+# documents scale memory and CPU without bound).
+MAX_YAML_BYTES = 2 * 1024 * 1024
+MAX_YAML_NODES = 1_000_000
+
+
+class CappedSafeLoader(yaml.SafeLoader):
+    """SafeLoader that rejects documents beyond a node budget.
+
+    ``SafeLoader`` never constructs executable types; this only adds a
+    complexity ceiling on top.
+    """
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._nodes = 0
+
+    def construct_object(self, node, deep=False):
+        self._nodes += 1
+        if self._nodes > MAX_YAML_NODES:
+            raise yaml.YAMLError("document too complex")
+        return super().construct_object(node, deep)
+
 
 @dataclass(frozen=True)
 class Node:
@@ -73,13 +98,27 @@ class Node:
     path: Path
 
 
-def load_yaml_file(path: Path) -> Any:
+def load_yaml_file(path: Path, max_bytes: int = MAX_YAML_BYTES) -> Any:
     """Load a YAML file with ``yaml.safe_load`` only.
 
-    Imported YAML is data, never configuration, never executable.
+    Imported YAML is data, never configuration, never executable. Files are
+    capped in size and node count so a malformed or hostile document fails
+    cleanly (``yaml.YAMLError`` / ``ValueError``) instead of exhausting the
+    process.
     """
+    try:
+        if path.stat().st_size > max_bytes:
+            raise ValueError(
+                f"YAML file too large: {path} ({path.stat().st_size} bytes, "
+                f"max {max_bytes})"
+            )
+    except OSError:
+        raise
     with open(path, "r", encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
+        try:
+            return yaml.load(handle, Loader=CappedSafeLoader)
+        except RecursionError as exc:
+            raise yaml.YAMLError("document too deeply nested") from exc
 
 
 def load_nodes(knowledge_dir: Path = KNOWLEDGE_DIR) -> List[Node]:
