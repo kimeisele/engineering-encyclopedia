@@ -75,3 +75,19 @@ the experiment (the tasks are written after the nodes, not alongside them).
   (DEVIATIONS D10). Edits to those eight nodes, or a new corpus change,
   require a conscious decision to regenerate `experiments/packs/` and the
   `-treatment` prompts; the frozen-pack test enforces this.
+
+## Out-of-sample status (judged with the repaired instrument)
+
+The rule was tested out-of-sample with two later nodes
+(`reliability.circuit-breaker`, `observability.correlation-id`). The first
+out-of-sample pass found a defect in the measurement, not in the knowledge
+(a rubric pattern — see `experiments/RESULTS.md`, instrument-repair section);
+this is the second time the project caught its own instrument.
+
+With the repaired rubrics, the out-of-sample result is: **three of four
+cells positive (+3.20, +0.40, +0.20), one flat at a 5.60/6.00 control
+ceiling, none negative.** Judgment: the rule **survives out-of-sample in
+direction**; the support is modest (only e4-Mistral is a large delta; the
+others are within n=5 spread), so the rule remains supported, not proven,
+and the flat cell is the plainest reminder that a node is only testable
+when its task's control arm has headroom.
