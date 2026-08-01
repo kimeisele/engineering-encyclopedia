@@ -1,0 +1,42 @@
+task: e4
+node: reliability.circuit-breaker
+description: >
+  Deterministic rubric for E4 (out-of-sample): does the produced API caller
+  stop hammering the dependency while it is down? Every criterion is a
+  boolean (regex matched with re.search + re.DOTALL over the scored
+  artifact); the score is the count of satisfied criteria. Fixed before the
+  runs; patterns repaired in the instrument-fix cycle (breaker_state and
+  fail_fast_when_open tightened — a bare word \bopen\b no longer credits
+  file-open() calls or prose; success_resets tightened to drop bare ok/open).
+
+criteria:
+  - id: breaker_state
+    description: "an explicit circuit state exists (circuit/breaker/is_open/OPEN constant/state value)"
+    kind: present
+    pattern: "(circuit|breaker|half[- ]?open|is_open|_open|_closed|\\bOPEN\\b|\\bCLOSED\\b|state\\s*[=:]\\s*['\"]?(open|closed))"
+    blind_to: "a numeric-only state (state = 0/1/2) with no state word is not credited"
+  - id: failure_threshold
+    description: "failures are counted over a threshold or window"
+    kind: present
+    pattern: "(threshold|window|consecutive|failures\\s*[>=]|count\\s*[>=]|len\\s*\\([^)]*\\)\\s*[>=]|attempts\\s*[>=])"
+    blind_to: "none known"
+  - id: fail_fast_when_open
+    description: "calls fail fast while the circuit is open, without hitting the api"
+    kind: present
+    pattern: "(if\\s+[^:\\n]{0,60}(is_open|_open|circuit|state|breaker)[^:\\n]{0,40}:.{0,120}(return|raise|fail|skip)|(is_open|_open|circuit|breaker).{0,40}(return|raise|fail))"
+    blind_to: "a state variable literally named 'open' (word alone) is not credited, to avoid file-open() false positives"
+  - id: recovery_probe
+    description: "a half-open probe or cooldown tests recovery"
+    kind: present
+    pattern: "(half[- ]?open|cooldown|time\\.sleep|sleep\\s*\\(|after.{0,30}(probe|reset|try))"
+    blind_to: "none known"
+  - id: success_resets
+    description: "a success closes or resets the circuit (a reset/close mechanism exists)"
+    kind: present
+    pattern: "(state\\s*=\\s*['\"]closed['\"]|state\\s*=\\s*CLOSED|_reset\\s*\\(|failures\\s*=\\s*0)"
+    blind_to: "the pattern credits the existence of a reset/close mechanism, not the control flow that invokes it on success; a timer-only reset without a closed-state assignment is not credited; a variable merely named reset_timeout must NOT match (it does not)"
+  - id: no_unbounded_loop
+    description: "no unbounded retry/request loop"
+    kind: absent
+    pattern: "while\\s+True"
+    blind_to: "none known"

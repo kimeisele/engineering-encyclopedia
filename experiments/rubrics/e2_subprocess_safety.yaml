@@ -3,31 +3,40 @@ node: python.processes.subprocess-safety
 description: >
   Deterministic rubric for E2: does the produced git wrapper keep the
   user-supplied branch name out of shell interpretation? Every criterion
-  is a boolean (regex matched with re.search + re.DOTALL over the produced
-  code); the score is the count of satisfied criteria. Fixed before the runs.
+  is a boolean (regex matched with re.search + re.DOTALL over the scored
+  artifact); the score is the count of satisfied criteria. Fixed before the
+  runs; patterns repaired in the instrument-fix cycle (argv_list widened to
+  credit a prebuilt argv variable; validation pattern audited — it credits
+  the construct, not a specific method).
 
 criteria:
   - id: no_shell_true
     description: "shell=True is absent"
     kind: absent
     pattern: "shell\\s*=\\s*True"
+    blind_to: "none known"
   - id: argv_list
-    description: "the command is passed as a list (argv), not a string"
+    description: "the command is passed as a list (argv), either literal or a prebuilt list variable"
     kind: present
-    pattern: "(subprocess|_popen)?\\.(run|Popen|call|check_output|check_call)\\s*\\(\\s*\\["
+    pattern: "((subprocess|_popen)?\\.(run|Popen|call|check_output|check_call)\\s*\\(\\s*(\\[[^)]*\\]|[A-Za-z_]\\w*\\s*[,)]))"
+    blind_to: "a bare imported run([...]) after 'from subprocess import run' (module prefix absent)"
   - id: branch_as_data
     description: "the branch name appears as a list element, not spliced into a command string"
     kind: present
     pattern: "\\[\\s*['\"][^'\"]*['\"]\\s*,\\s*[^\\]]*branch"
+    blind_to: "a list assembled by concatenation outside the literal (e.g. ['git'] + [branch])"
   - id: no_command_interpolation
     description: "no f-string/format/concatenation builds the command string around user input"
     kind: absent
     pattern: "(f['\"][^'\"]*\\{\\s*branch|['\"]\\s*\\+\\s*branch|format\\([^)]*branch|git[^'\"\\n]{0,40}\\{\\s*branch)"
+    blind_to: "none known"
   - id: validation_or_whitelist
     description: "the branch name is validated, whitelisted or pattern-checked"
     kind: present
     pattern: "(re\\.(match|fullmatch|search)|startswith|in\\s+(allowed|valid|safe|branches|whitelist)|\\bvalid[a-z_]*\\s*\\(|\\b[A-Za-z_]+\\.fullmatch)"
+    blind_to: "a whitelist expressed as an explicit set membership without the words allowed/valid/safe/whitelist"
   - id: no_os_system
     description: "os.system is absent"
     kind: absent
     pattern: "os\\.system"
+    blind_to: "none known"

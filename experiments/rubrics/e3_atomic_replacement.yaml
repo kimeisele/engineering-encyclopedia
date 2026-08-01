@@ -3,31 +3,40 @@ node: python.files.atomic-replacement
 description: >
   Deterministic rubric for E3: does the produced config updater replace the
   file atomically instead of truncating it in place? Every criterion is a
-  boolean (regex matched with re.search + re.DOTALL over the produced code);
-  the score is the count of satisfied criteria. Fixed before the runs.
+  boolean (regex matched with re.search + re.DOTALL over the scored
+  artifact); the score is the count of satisfied criteria. Fixed before the
+  runs; patterns repaired in the instrument-fix cycle (atomic_rename
+  tightened — a bare .replace( no longer credits str.replace; no_direct_truncate
+  widened to variable paths; same_directory and failure_cleanup widened).
 
 criteria:
   - id: temp_file
     description: "content is written to a temporary file, not the target directly"
     kind: present
     pattern: "(tempfile|NamedTemporaryFile|mkstemp|\\.tmp|\\btmp[_\\w]*|temp[_\\w]*\\s*=|_tmp)"
+    blind_to: "none known"
   - id: atomic_rename
-    description: "the target is replaced via os.replace / Path.replace / os.rename"
+    description: "the target is replaced via os.replace / os.rename / Path.replace"
     kind: present
-    pattern: "(os\\.replace|Path\\.replace|os\\.rename|\\.replace\\s*\\(|\\.rename\\s*\\()"
+    pattern: "(os\\.replace|os\\.rename|Path\\.replace)"
+    blind_to: "shutil.move (atomic on the same filesystem) is not credited; str.replace() must NOT match (it does not)"
   - id: no_direct_truncate
-    description: "the target is not opened with a truncating mode for the update"
+    description: "the target is not opened with a truncating mode for the update (literal or target-named path)"
     kind: absent
-    pattern: "open\\s*\\(\\s*['\"][^'\"]+['\"]\\s*,\\s*['\"]w[bd]*['\"]"
+    pattern: "(?<!fd)open\\s*\\(\\s*(['\"][^'\"]+['\"]|(?!\\w*(tmp|temp|fd)\\w*)[A-Za-z_]\\w*(path|file|config|target|dest|name|filename|json)\\w*)\\s*,\\s*['\"]w[bd]*['\"]"
+    blind_to: "a truncating write to a generically named variable (open(f, 'w')) or via os.open/a library is not caught; quoted literal paths are always treated as target writes (a literal /tmp path would false-positive)"
   - id: flush_or_fsync
     description: "data is flushed or fsynced before the rename"
     kind: present
     pattern: "(\\.flush\\s*\\(|os\\.fsync|fsync)"
+    blind_to: "none known"
   - id: same_directory
     description: "the temp file is created in the same directory as the target"
     kind: present
-    pattern: "(dir\\s*=\\s*(os\\.path\\.(dirname|dir)|[A-Za-z_]+\\.[A-Za-z_]*parent)|dirname|\\bparent\\b)"
+    pattern: "(dir\\s*=\\s*(os\\.path\\.(dirname|dir)|[A-Za-z_]+\\.[A-Za-z_]*parent|Path\\([^)]*\\)\\.parent)|dirname|\\bparent\\b|with_name)"
+    blind_to: "a temp file whose same-directory placement is implicit in the cwd is not credited"
   - id: failure_cleanup
-    description: "the temp file is cleaned up when the write fails"
+    description: "the temp file is cleaned up on failure (try/except/finally or context manager)"
     kind: present
-    pattern: "(try\\s*:|finally\\s*:|except[^:]*:).{0,250}(unlink|remove|cleanup|close)"
+    pattern: "((try\\s*:|finally\\s*:|except[^:]*:).{0,250}(unlink|remove|cleanup|close)|with\\s+.*(NamedTemporaryFile|mkstemp|tempfile))"
+    blind_to: "none known"

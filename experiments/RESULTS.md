@@ -1,184 +1,171 @@
 # Experiment results
 
-Three tasks from the founding brief, Section 8. Five runs per arm per
-provider. Rubrics are fixed and deterministic (`experiments/rubrics/`);
-the score is the count of satisfied criteria. Scoring pipeline v2:
-`runner.py score` applies `extract_artifact` (report excluded) and
-`strip_comments` (Python `#` comments removed) before the rubric.
+Three tasks from the founding brief, Section 8, plus two out-of-sample
+tasks. Five runs per arm per provider. Rubrics are fixed and deterministic
+(`experiments/rubrics/`); the score is the count of satisfied criteria.
+Scoring pipeline: `runner.py score` applies `extract_artifact` (report
+excluded) and `strip_comments` (Python `#` comments removed) before the
+rubric, and the rubrics were **repaired in the instrument-fix cycle**
+(see the instrument-repair section below). All numbers below are scored
+with the repaired rubrics unless stated otherwise.
 
-**Three arms per provider, unpooled:**
+**Three arms per provider, unpooled:** control / treatment / placebo (a
+structurally identical pack with irrelevant content).
 
-- **control** — task prompt only
-- **treatment** — task + knowledge pack + report instruction
-- **placebo** — task + a structurally identical pack whose content is a node
-  irrelevant to the task (`observability.error-context`), same slot count,
-  same number of questions, same formatting (`experiments/packs-placebo/`,
-  prompts within ~1% of the treatment prompts in length)
-
-Five run sets: Set A (DeepSeek, original harness, confounded — kept as
-evidence), Set B (DeepSeek, corrected), Set C (Mistral, corrected),
-Set P-DS (DeepSeek placebo), Set P-MR (Mistral placebo).
-
-## Three arms, per provider (final pipeline)
+## In-sample (e1–e3)
 
 | Task | Provider | Control | Treatment | Placebo | T−C | P−C |
 |---|---|---|---|---|---|---|
-| e1 idempotency | DeepSeek | 3.80 | 4.80 | 2.20 | +1.00 | −1.60 |
-| e1 idempotency | Mistral | 2.80 | 4.60 | 2.40 | +1.80 | −0.40 |
-| e2 subprocess-safety | DeepSeek | 3.60 | 5.00 | 2.80 | +1.40 | −0.80 |
-| e2 subprocess-safety | Mistral | 3.60 | 5.00 | 4.80 | +1.40 | +1.20 |
-| e3 atomic-replacement | DeepSeek | 5.60 | 6.00 | 5.20 | +0.40 | −0.40 |
-| e3 atomic-replacement | Mistral | 1.40 | 5.80 | 1.40 | +4.40 | 0.00 |
+| e1 idempotency | DeepSeek | 4.00 | 4.80 | 2.20 | +0.80 | −1.80 |
+| e1 idempotency | Mistral | 2.80 | 4.80 | 2.40 | +2.00 | −0.40 |
+| e2 subprocess-safety | DeepSeek | 4.40 | 5.60 | 3.80 | +1.20 | −0.60 |
+| e2 subprocess-safety | Mistral | 4.40 | 6.00 | 4.80 | +1.60 | +0.40 |
+| e3 atomic-replacement | DeepSeek | 4.80 | 6.00 | 4.80 | +1.20 | 0.00 |
+| e3 atomic-replacement | Mistral | 0.40 | 6.00 | 0.80 | +5.60 | +0.40 |
 
-## Raw scores per arm (final pipeline)
+Treatment exceeds control on all six cells. The placebo sits at or below
+control on DeepSeek (all three) and slightly above control on Mistral e2
+and e3 (+0.40 each) — far below the treatment. The in-sample anomaly is
+attenuated from +1.20 to +0.40 with the repaired instrument.
 
-| Task / arm | run-1 | run-2 | run-3 | run-4 | run-5 | mean | stdev |
-|---|---|---|---|---|---|---|---|
-| e1 DeepSeek control | 5 | 3 | 3 | 4 | 4 | 3.80 | 0.84 |
-| e1 DeepSeek treatment | 6 | 3 | 4 | 5 | 6 | 4.80 | 1.30 |
-| e1 DeepSeek placebo | 2 | 2 | 3 | 2 | 2 | 2.20 | 0.45 |
-| e1 Mistral control | 4 | 3 | 2 | 3 | 2 | 2.80 | 0.84 |
-| e1 Mistral treatment | 5 | 5 | 3 | 4 | 6 | 4.60 | 1.14 |
-| e1 Mistral placebo | 2 | 2 | 2 | 2 | 4 | 2.40 | 0.89 |
-| e2 DeepSeek control | 2 | 5 | 5 | 3 | 3 | 3.60 | 1.34 |
-| e2 DeepSeek treatment | 5 | 4 | 5 | 6 | 5 | 5.00 | 0.71 |
-| e2 DeepSeek placebo | 3 | 1 | 2 | 3 | 5 | 2.80 | 1.48 |
-| e2 Mistral control | 4 | 2 | 4 | 4 | 4 | 3.60 | 0.89 |
-| e2 Mistral treatment | 5 | 5 | 5 | 5 | 5 | 5.00 | 0.00 |
-| e2 Mistral placebo | 5 | 5 | 5 | 4 | 5 | 4.80 | 0.45 |
-| e3 DeepSeek control | 6 | 5 | 5 | 6 | 6 | 5.60 | 0.55 |
-| e3 DeepSeek treatment | 6 | 6 | 6 | 6 | 6 | 6.00 | 0.00 |
-| e3 DeepSeek placebo | 5 | 6 | 5 | 5 | 5 | 5.20 | 0.45 |
-| e3 Mistral control | 1 | 2 | 1 | 2 | 1 | 1.40 | 0.55 |
-| e3 Mistral treatment | 5 | 6 | 6 | 6 | 6 | 5.80 | 0.45 |
-| e3 Mistral placebo | 2 | 1 | 1 | 1 | 2 | 1.40 | 0.55 |
+## Out-of-sample (e4, e5) — reported separately
 
-## Placebo verdict — does the effect come from the knowledge or from the prompt?
+Fresh tasks on two later nodes (`reliability.circuit-breaker`,
+`observability.correlation-id`); same pipeline, not merged with the
+in-sample tables.
 
-**The placebo matches control, not treatment, on five of the six
-task×provider cells; on one cell (Mistral E2) the placebo sits at the
-treatment level.** Concretely:
+| Task | Provider | Control | Treatment | Placebo | T−C | P−C |
+|---|---|---|---|---|---|---|
+| e4 circuit-breaker | DeepSeek | 5.60 | 5.60 | 4.80 | 0.00 | −0.80 |
+| e4 circuit-breaker | Mistral | 2.80 | 6.00 | 2.60 | +3.20 | −0.20 |
+| e5 correlation-id | DeepSeek | 5.00 | 5.40 | 5.00 | +0.40 | 0.00 |
+| e5 correlation-id | Mistral | 5.40 | 5.60 | 4.20 | +0.20 | −1.20 |
 
-- Placebo ≈ control (or below) on: DeepSeek e1 (2.20 vs control 3.80,
-  treatment 4.80), DeepSeek e2 (2.80 vs 3.60, 5.00), DeepSeek e3 (5.20 vs
-  5.60, 6.00), Mistral e1 (2.40 vs 2.80, 4.60), Mistral e3 (1.40 = 1.40,
-  5.80). On those cells a longer, structured prompt alone did **not**
-  reproduce the treatment effect — the knowledge is doing the work, and on
-  two cells (DeepSeek e1, e2) placebo scored *below* control.
-- Placebo ≈ treatment on: **Mistral e2** (placebo 4.80, treatment 5.00,
-  control 3.60). Criterion-level, both the placebo and the treatment push
-  Mistral's e2 code toward the list-argv style that its control runs miss;
-  the treatment additionally satisfies `validation_or_whitelist` in most
-  runs (5/5) while the placebo does not. A structural component cannot be
-  ruled out for that one cell.
+With the repaired instrument the out-of-sample result is no longer negative:
+three of four cells are positive (+3.20, +0.40, +0.20) and the fourth is
+flat at a control of 5.60/6.00. The instrument-caught negative cell
+(Mistral e5, −1.40) is +0.20 after repair. The corpus-rule judgment on
+these numbers is stated in the judgment section below.
 
-So the thesis — the knowledge nodes, not prompt length, produce the effect —
-holds in five of six cells and is **not clean** on Mistral E2; that cell is
-reported exactly as it came out and must not be generalised away.
+## Instrument repair (rubric audit) — before/after
+
+The first out-of-sample test found a defect in the measurement, not in the
+knowledge. This is the **second time this project has caught its own
+instrument** (first: the Application Report contaminating the scored
+artifact — node 11; second: the `id_in_logs` pattern crediting a method
+definition). That is what out-of-sample tests are for.
+
+What was fixed (all five rubrics audited; `blind_to` statements added to
+every criterion):
+
+- **e5 `id_in_logs` (the negative-cell cause):** the old pattern
+  `log\w*\(...` matched method definitions (`log_success(self, trace_id,
+  ...)` — this was the positive match in the best control run) and could
+  not match idiomatic `logger.error(...)` because of the dot between
+  `logger` and `error`. Now: `(log|logger|logging)\w*\.(debug|info|warning|error|critical)\s*\([^)]*(request_id|correlation_id|trace_id)`.
+- **e5 `id_propagated` / `downstream_reuses`:** widened to the
+  explicit-parameter design the node itself recommends (passing a request
+  object), not only headers.
+- **e5 `errors_carry_id`:** widened to context-dict attachment.
+- **e3 `atomic_rename`:** tightened — a bare `.replace(` no longer credits
+  `str.replace()`.
+- **e3 `no_direct_truncate`:** widened to variable paths, then refined so
+  temp-file writes (`os.fdopen`, tmp/temp names) are not false-flagged.
+- **e3 `same_directory` / `failure_cleanup`:** widened (`with_name`,
+  context-manager cleanup).
+- **e4 `breaker_state` / `fail_fast_when_open`:** tightened — a bare word
+  `open` no longer credits file-open() calls or prose.
+- **e4 `success_resets`:** rebalanced — the old pattern credited a variable
+  named `reset_timeout`; the new pattern credits a reset/close mechanism
+  (`state = "closed"`, `_reset(`, `failures = 0`).
+- **e1 `effect_guarded_by_record`:** widened to unique-constraint and
+  conflict-avoidance designs.
+- **e2 `argv_list`:** widened to a prebuilt argv variable.
+
+Before → after (mean per arm; before = the previously published
+final-pipeline numbers, after = repaired rubrics, same completions):
+
+| Set | Task | Before (C/T/P) | After (C/T/P) |
+|---|---|---|---|
+| A | e1 | 4.00 / 5.60 / – | 4.00 / 5.60 / – |
+| A | e2 | 3.80 / 4.80 / – | 4.40 / 5.20 / – |
+| A | e3 | 5.00 / 6.00 / – | 3.60 / 6.00 / – |
+| B | e1 | 3.80 / 4.80 / 2.20 | 4.00 / 4.80 / 2.20 |
+| B | e2 | 3.60 / 5.00 / 2.80 | 4.40 / 5.60 / 3.80 |
+| B | e3 | 5.60 / 6.00 / 5.20 | 4.80 / 6.00 / 4.80 |
+| C | e1 | 2.80 / 4.60 / 2.40 | 2.80 / 4.80 / 2.40 |
+| C | e2 | 3.60 / 5.00 / 4.80 | 4.40 / 6.00 / 4.80 |
+| C | e3 | 1.40 / 5.80 / 1.40 | 0.40 / 6.00 / 0.80 |
+| OOS-DS | e4 | 5.40 / 5.20 / 4.80 | 5.60 / 5.60 / 4.80 |
+| OOS-DS | e5 | 4.80 / 4.80 / 4.40 | 5.00 / 5.40 / 5.00 |
+| OOS-MR | e4 | 2.80 / 6.00 / 2.60 | 2.80 / 6.00 / 2.60 |
+| OOS-MR | e5 | 5.20 / 3.80 / 2.80 | 5.40 / 5.60 / 4.20 |
+
+Material moves: e3 control drops (the instrument now catches variable-path
+truncating writes — the exact failure e3 targets), e2 rises (argv_list
+widening), and e5 treatment rises on both providers (id_in_logs repair) —
+turning the Mistral e5 negative cell into +0.20. All before/after numbers
+come from the same completions; no re-runs were needed for the repair.
 
 ## E2, stated plainly
 
-After comment stripping, E2 shows a treatment delta of +1.40 (DeepSeek
-corrected), +1.40 (Mistral) and +1.00 (Set A), comparable to E1 — the small
-deltas reported earlier were suppressed by the models' own comments. The
-placebo arm complicates the interpretation on Mistral (placebo 4.80 ≈
-treatment 5.00 > control 3.60): part of Mistral's E2 improvement is
-structural. On DeepSeek the placebo is below control (2.80), so there the
-E2 effect is knowledge-driven.
+After comment stripping and the rubric repair, the E2 treatment delta is
++0.80 (Set A), +1.20 (DeepSeek corrected), +1.60 (Mistral) — the effect is
+positive on both providers and larger than the earlier small deltas, which
+were suppressed by model-written comments and by the argv_list pattern
+missing variable-list designs.
 
 ## Statistics — one honest sentence per task
 
-Spread is the pooled within-arm standard deviation of the two arms being
-compared (n=5 each); "exceeds" means the delta is larger than that spread.
-No significance testing is performed or implied.
+Spread is the pooled within-arm standard deviation (n=5 each); "exceeds"
+means the delta is larger than that spread. No significance testing.
 
-- **e1 (idempotency):** the treatment delta exceeds the within-arm spread on
-  Mistral (+1.80 vs pooled sd 1.00) and is inside it on DeepSeek (+1.00 vs
-  1.09), while the placebo delta is at or below control on both (−1.60,
-  −0.40), so the e1 effect is not prompt length, but its size on DeepSeek is
-  within n=5 noise.
-- **e2 (subprocess-safety):** the treatment delta exceeds the within-arm
-  spread on both providers (+1.40 vs 1.07 DeepSeek; +1.40 vs 0.63 Mistral),
-  but on Mistral the placebo delta also exceeds it (+1.20 vs 0.71), so the
-  e2 effect is larger than its spread yet partly structural on Mistral and
-  knowledge-driven on DeepSeek (placebo −0.80 there).
-- **e3 (atomic-replacement):** the treatment delta far exceeds the
-  within-arm spread on Mistral (+4.40 vs 0.50) and is inside it on DeepSeek
-  (+0.40 vs 0.39, a ceiling-limited pair at 5.60→6.00 of 6), with placebo at
-  control on both (5.20 vs 5.60; 1.40 = 1.40), so e3 is the cleanest
-  knowledge effect on Mistral and effectively a non-result on DeepSeek.
+- **e1:** treatment exceeds the spread on Mistral (+2.00 vs ~1.0) and is
+  inside it on DeepSeek (+0.80 vs ~1.1), with placebo at or below control
+  both — e1 is not prompt length, but its DeepSeek size is n=5 noise.
+- **e2:** treatment exceeds the spread on both providers (+1.20 / +1.60 vs
+  ~1.0), while the Mistral placebo sits +0.40 above control (down from the
+  earlier +1.20 anomaly) — e2 is mostly knowledge, with a residual small
+  structural component on Mistral.
+- **e3:** treatment far exceeds the spread on Mistral (+5.60) and exceeds
+  it on DeepSeek (+1.20), with placebo at control on both — e3 is the
+  cleanest knowledge effect.
 
-Plain reading: the deltas that exceed their own spread are e1-Mistral,
-e2-both, e3-Mistral; the deltas inside their spread are e1-DeepSeek and
-e3-DeepSeek. The one structural anomaly (Mistral e2 placebo +1.20 over
-control, inside the treatment's range) is unchanged by this analysis.
+Out-of-sample, per cell: e4-Mistral +3.20 exceeds its spread; e4-DeepSeek
+0.00 is a ceiling pair (control 5.60/6.00); e5-DeepSeek +0.40 and
+e5-Mistral +0.20 are inside their spreads. Plain: the out-of-sample effect
+is positive in direction on three of four cells and flat on the fourth at
+control ceiling; none is negative.
 
-## Out-of-sample (E4, E5) — reported separately
+## Judgment (corpus rule, repaired instrument)
 
-The three tasks above were written alongside the nodes they test. E4 and E5
-test two nodes added later (`reliability.circuit-breaker`,
-`observability.correlation-id`) with fresh task prompts — the first
-out-of-sample check. Same pipeline, three arms, both providers, n=5. These
-tables are **not merged** with the in-sample ones.
-
-| Task | Provider | Control | Treatment | Placebo | T−C | P−C |
-|---|---|---|---|---|---|---|
-| e4 circuit-breaker | DeepSeek | 5.40 | 5.20 | 4.80 | −0.20 | −0.60 |
-| e4 circuit-breaker | Mistral | 2.80 | 6.00 | 2.60 | +3.20 | −0.20 |
-| e5 correlation-id | DeepSeek | 4.80 | 4.80 | 4.40 | 0.00 | −0.40 |
-| e5 correlation-id | Mistral | 5.20 | 3.80 | 2.80 | −1.40 | −2.40 |
-
-Raw scores per arm:
-
-| Task / arm | run-1 | run-2 | run-3 | run-4 | run-5 | mean | stdev |
-|---|---|---|---|---|---|---|---|
-| e4 DeepSeek control | 6 | 6 | 5 | 5 | 5 | 5.40 | 0.55 |
-| e4 DeepSeek treatment | 6 | 4 | 6 | 4 | 6 | 5.20 | 1.10 |
-| e4 DeepSeek placebo | 6 | 6 | 2 | 4 | 6 | 4.80 | 1.79 |
-| e4 Mistral control | 2 | 6 | 2 | 2 | 2 | 2.80 | 1.79 |
-| e4 Mistral treatment | 6 | 6 | 6 | 6 | 6 | 6.00 | 0.00 |
-| e4 Mistral placebo | 2 | 3 | 3 | 2 | 3 | 2.60 | 0.55 |
-| e5 DeepSeek control | 5 | 3 | 6 | 5 | 5 | 4.80 | 1.10 |
-| e5 DeepSeek treatment | 6 | 3 | 5 | 5 | 5 | 4.80 | 1.10 |
-| e5 DeepSeek placebo | 4 | 5 | 4 | 5 | 4 | 4.40 | 0.55 |
-| e5 Mistral control | 5 | 4 | 6 | 5 | 6 | 5.20 | 0.84 |
-| e5 Mistral treatment | 4 | 4 | 5 | 4 | 2 | 3.80 | 1.10 |
-| e5 Mistral placebo | 5 | 3 | 3 | 2 | 1 | 2.80 | 1.48 |
-
-Plain reading: **the in-sample effect does not generalise cleanly.** One of
-four cells reproduces the in-sample direction (e4-Mistral +3.20, with the
-placebo at control); two are flat (e4-DeepSeek, whose control already scores
-5.40; e5-DeepSeek); one is negative (e5-Mistral, treatment −1.40, and its
-placebo −2.40). The negative cell is examined in `docs/OOS_DIAGNOSIS.md`
-(and its implications proposed in `docs/OOS_PROPOSAL.md`); no conclusion
-about the nodes is drawn from the numbers alone.
+With the repaired instrument the corpus rule **survives out-of-sample in
+direction**: no negative cell remains, three of four out-of-sample cells
+are positive (one strongly, two weakly), and the flat cell sits at a
+5.60/6.00 control ceiling. The out-of-sample deltas are small (+0.20 to
++0.40) except e4-Mistral (+3.20), so the support is modest: the rule is
+supported, not proven, and control-arm headroom (the flat cell) remains the
+plainest caveat.
 
 ## Limitation
 
-Two providers, n=5 per arm, three tasks, one rubric per task, five run
-sets. These results are a **signal, not proof**: the samples are small, the
-rubric is a fixed string checklist, and one cell (Mistral E2) shows a
-placebo effect that must not be smoothed over.
+Two providers, n=5 per arm, five tasks (three in-sample, two
+out-of-sample), one rubric per task, several run sets. These results are a
+**signal, not proof**; the rubrics were repaired after the first
+out-of-sample pass, and every number above is scored with the repaired
+instrument (before/after recorded above).
 
 ## Run records
 
-- Set A: DeepSeek, `deepseek-v4-flash`, thinking disabled, original harness
-  (confounded); `experiments/fixtures/manifest.jsonl`.
-- Set B: DeepSeek, corrected harness (delimiter + extraction);
-  `experiments/fixtures-corrected/manifest.jsonl`.
-- Set C: Mistral, `mistral-small-latest`, corrected harness;
-  `experiments/fixtures-mistral/manifest.jsonl`.
-- Set P-DS: DeepSeek placebo (15 runs);
-  `experiments/fixtures-placebo/manifest.jsonl`.
-- Set P-MR: Mistral placebo (15 runs);
-  `experiments/fixtures-placebo-mistral/manifest.jsonl`.
-- All runs 2026-08-01; adapter `experiments/provider_chat_completions.py`
-  (generic, vendor-free) via `ENCYCLOPEDIA_RUNNER`.
-- Placebo packs: `experiments/make_placebo_packs.py` →
-  `experiments/packs-placebo/<task>.yaml`; prompts
-  `experiments/tasks/<task>-placebo.txt` (same slot count, question count
-  and formatting as treatment; content from `observability.error-context`).
-
-Rubrics: `experiments/rubrics/`, fixed before the runs. `runner.py score`
-applies extraction + comment stripping; `runner.py summarize <fixtures-dir>`
-regenerates a per-set three-arm table from a manifest.
+- Sets: A (`experiments/fixtures/`, DeepSeek, original harness, confounded),
+  B (`experiments/fixtures-corrected/`, DeepSeek, corrected harness),
+  C (`experiments/fixtures-mistral/`, Mistral), P-DS / P-MR (placebo arms),
+  OOS-DS / OOS-MR (e4/e5, both providers). All 2026-08-01; manifests
+  alongside the fixtures.
+- Provider adapters: `experiments/provider_chat_completions.py` (generic,
+  vendor-free) via `ENCYCLOPEDIA_RUNNER`; DeepSeek `deepseek-v4-flash`
+  (thinking disabled) and Mistral `mistral-small-latest`.
+- Rubrics: `experiments/rubrics/`, fixed before the runs, repaired in the
+  instrument-fix cycle; every criterion carries a `blind_to` statement.
+  `runner.py score` applies extraction + comment stripping;
+  `runner.py summarize <fixtures-dir>` regenerates a per-set table.

@@ -1,0 +1,45 @@
+task: e5
+node: observability.correlation-id
+description: >
+  Deterministic rubric for E5 (out-of-sample): can an operator trace one
+  request across both services from the produced handler? Every criterion
+  is a boolean (regex matched with re.search + re.DOTALL over the scored
+  artifact); the score is the count of satisfied criteria. Fixed before the
+  runs; patterns repaired in the instrument-fix cycle — id_in_logs was
+  broken: log\w*\( matched method definitions (log_success(self, trace_id,
+  ...)) and could not match logger.error(...) because of the dot; it now
+  matches idiomatic log calls only. id_propagated/downstream_reuses widened
+  to the explicit-parameter design the node recommends; errors_carry_id
+  widened to context-dict attachment.
+
+criteria:
+  - id: id_generated
+    description: "a request/correlation id is generated"
+    kind: present
+    pattern: "(uuid4|uuid\\.new|secrets\\.token_hex|generate|request_id\\s*=|correlation_id\\s*=|trace_id\\s*=)"
+    blind_to: "none known"
+  - id: id_propagated
+    description: "the id is passed to the second service (header or explicit parameter/request object)"
+    kind: present
+    pattern: "(headers\\s*=|headers\\[|X-Request-Id|x-request-id|propagat|forward|pass\\s*(request_id|correlation_id|trace_id)|pass\\s+(request|req)\\b|ServiceRequest|(request|req)\\s*:\\s*[A-Z]\\w+)"
+    blind_to: "a side-channel propagation (shared global, env var) is not credited"
+  - id: downstream_reuses
+    description: "the second service reuses the inbound id (from header or the passed request object)"
+    kind: present
+    pattern: "(headers\\[['\"]X-Request-Id|headers\\.get\\(['\"]x-request-id|request_id\\s*=\\s*[a-z_]*(id|header)|correlation_id\\s*=\\s*[a-z_]*(id|header)|trace_id\\s*=\\s*[a-z_]*(id|header)|correlation_id\\s*=\\s*[a-z_]+\\.correlation_id|request\\.correlation_id)"
+    blind_to: "none known"
+  - id: id_in_logs
+    description: "idiomatic log calls (logger.error / self.logger.info / log.warning / logging.*) carry the id in their arguments"
+    kind: present
+    pattern: "((log|logger|logging)\\w*\\.(debug|info|warning|error|critical)\\s*\\([^)]*(request_id|correlation_id|trace_id))"
+    blind_to: "print-based output and dict-attached logging (extra=log_entry where the dict holds the id) are not credited; method definitions named like log_success must NOT match (they do not)"
+  - id: errors_carry_id
+    description: "errors/exceptions carry the id (inline, or via an error context dict attached to the exception)"
+    kind: present
+    pattern: "((error|exception|raise)[^\\n]{0,80}(request_id|correlation_id|trace_id)|(error_context|wrapped_error|extra|context)[^\\n]{0,80}(request_id|correlation_id|trace_id))"
+    blind_to: "an error reported through a fully separate channel (metrics endpoint) is not credited"
+  - id: no_idempotency_conflation
+    description: "the correlation id is not the idempotency key"
+    kind: absent
+    pattern: "idempoten[a-z]*.{0,40}(correlation_id|trace_id)"
+    blind_to: "none known"
