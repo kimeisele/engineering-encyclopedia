@@ -1,0 +1,119 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any
+
+
+def update_json_config(filepath: str, new_config: dict[str, Any]) -> None:
+    """Atomically update a JSON config file.
+
+    Args:
+        filepath: Path to the JSON config file.
+        new_config: The new configuration to write.
+
+    Raises:
+        ValueError: If the new_config is not a JSON-serializable dict.
+        OSError: If the file cannot be written or renamed.
+    """
+    # Validate input structure before touching the filesystem.
+    if not isinstance(new_config, dict):
+        raise ValueError("Configuration must be a dictionary.")
+    try:
+        serialized = json.dumps(new_config, indent=2, sort_keys=True)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid JSON configuration: {exc}")
+
+    directory = os.path.dirname(os.path.abspath(filepath))
+    os.makedirs(directory, exist_ok=True)
+
+    # Create the temp file in the *same* directory as the target so the
+    # final rename is atomic (same filesystem).
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Replace the target. Atomic on POSIX.
+        os.replace(tmp_path, filepath)
+
+        # Flush the directory so the rename itself is durable.
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+    except BaseException:
+        # Clean up the temp file on any failure (including Ctrl-C).
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, `tempfile.mkstemp(dir=directory)` uses the target's directory, ensuring same-filesystem rename."
+          location: "update_json_config:29"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, `f.flush()` then `os.fsync(f.fileno())` guarantees data reaches disk before `os.replace`."
+          location: "update_json_config:33-34"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The `except BaseException` block unlinks `tmp_path`, cleaning up any leftover temp file without affecting the original."
+          location: "update_json_config:48-52"
+        - question: "Can two writers both rename over the target?"
+          answer: "Both can rename, but each rename is atomic; last writer wins and readers never see a partial file."
+          location: "update_json_config:37"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared state is the config file on disk. It is mutated only by the atomic `os.replace`, never by partial writes."
+          location: "update_json_config:37"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, read and write are separate operations. However, readers see either old or new content due to atomic rename."
+          location: "update_json_config:37"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "The function does not implement claiming; it performs blind replacement. Concurrent last-writer-wins is the behavior."
+          location: "update_json_config:37"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "No check-then-act is performed; each call writes independently, so interleaving only affects final file content."
+          location: "update_json_config:37"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The boundary is at this function's entry. We validate `new_config` is a dict before any filesystem operation."
+          location: "update_json_config:17"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Only a `dict` that serializes to valid JSON is accepted; `ValueError` rejects non-dicts and unserializable values."
+          location: "update_json_config:17-21"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The validated and serialized form (`serialized` string) is written to disk; no raw input is used downstream."
+          location: "update_json_config:21"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, the serialized JSON is written as bytes; no interpretation or execution of the content occurs."
+          location: "update_json_config:31"
+      unanswered: []
+  not_applied:
+    - node: testing.coverage-limitations
+      reason: "No tests were requested; the function itself is not test code, and no test assertions were authored to analyze."
+    - node: reliability.idempotency
+      reason: "Update is a blind overwrite, inherently idempotent; repetition with same config yields identical result, no dedup needed."
+```

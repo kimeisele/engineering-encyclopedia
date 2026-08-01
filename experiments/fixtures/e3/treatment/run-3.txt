@@ -1,0 +1,107 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Callable, Dict
+
+def update_json_config(
+    filepath: str, 
+    mutator: Callable[[Dict[str, Any]], Dict[str, Any]],
+    validator: Callable[[Dict[str, Any]], bool] = lambda data: True
+) -> None:
+    """
+    Atomically update a JSON config file.
+    
+    The function applies `mutator` to the current config content, validates
+    the result, writes it to a temp file in the same directory, fsyncs,
+    and renames over the target. This ensures readers see either old or new
+    content, never a partial write.
+    """
+    # Read current content
+    with open(filepath, 'r') as f:
+        current = json.load(f)
+    
+    # Apply mutation and validate result
+    new_data = mutator(current)
+    if not validator(new_data):
+        raise ValueError("Mutation produced invalid config")
+    
+    # Write to temp file in same directory for atomic rename
+    dir_path = os.path.dirname(os.path.abspath(filepath))
+    fd, temp_path = tempfile.mkstemp(dir=dir_path, prefix='.config.tmp.', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(new_data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # Ensure data hits disk before rename
+        
+        # Atomic rename - same filesystem guarantees atomicity on POSIX
+        os.replace(temp_path, filepath)
+    except:
+        # Clean up temp file on any failure
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, tempfile.mkstemp uses dir_path from the target's absolute path, ensuring same filesystem."
+          location: "update_json_config:32"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() then os.fsync on the file descriptor before os.replace is called."
+          location: "update_json_config:35-36"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The except block unlinks the temp file, and with statement closes the fd, preventing leftovers."
+          location: "update_json_config:39-44"
+        - question: "Can two writers both rename over the target?"
+          answer: "No, os.replace is atomic on POSIX; last rename wins, but readers never see a partial file."
+          location: "update_json_config:38"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The config file is shared state. It's mutated atomically via temp file + os.replace in the same directory."
+          location: "update_json_config:28-38"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but the write is atomic. Concurrent reads see old or new data, never a partial file."
+          location: "update_json_config:36-38"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Not applicable - this is a file update, not a claim workflow. Both writes succeed atomically."
+          location: "update_json_config:38"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "There's no check-then-act here. The mutation is applied in-memory, then atomically persisted."
+          location: "update_json_config:28-38"
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The config file content is untrusted. Validation happens via validator callback after mutation at the boundary."
+          location: "update_json_config:30-31"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Caller provides a validator callable. It must return True for accepted config shapes, False otherwise."
+          location: "update_json_config:16"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Only the validated new_data is written to disk. The raw input is never persisted."
+          location: "update_json_config:34"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, readers of the config should validate before use. This function only ensures the write is valid."
+          location: "update_json_config:30"
+  not_applied:
+    - node: testing.coverage-limitations
+      reason: "Function implementation only; no test suite is written here to demonstrate coverage considerations."
+    - node: reliability.idempotency
+      reason: "The mutator's idempotency is caller's concern. The function itself is atomic but doesn't enforce idempotent mutations."
+```

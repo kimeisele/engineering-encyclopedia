@@ -1,0 +1,149 @@
+```python
+import subprocess
+import re
+from typing import List
+
+def get_git_branch(branch_name: str) -> List[str]:
+    """
+    Safely run a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name: User-supplied branch name to validate and use
+        
+    Returns:
+        List of command output lines
+        
+    Raises:
+        ValueError: If branch name fails validation
+        subprocess.CalledProcessError: If git command fails
+    """
+    # Validate branch name at the trust boundary (security.input-validation)
+    # Git branch names: no spaces, no control chars, no ~^:?*[, no .., 
+    # cannot start with -, cannot be empty or "." or ".."
+    if not branch_name or len(branch_name) > 255:
+        raise ValueError(f"Invalid branch name: {branch_name!r}")
+    
+    if branch_name in ('.', '..'):
+        raise ValueError(f"Invalid branch name: {branch_name!r}")
+    
+    if branch_name.startswith('-'):
+        raise ValueError(f"Branch name cannot start with '-': {branch_name!r}")
+    
+    if not re.match(r'^[a-zA-Z0-9/._-]+$', branch_name):
+        raise ValueError(f"Branch name contains invalid characters: {branch_name!r}")
+    
+    if any(c in branch_name for c in '~^:?*[\\ '):
+        raise ValueError(f"Branch name contains invalid characters: {branch_name!r}")
+    
+    if '..' in branch_name:
+        raise ValueError(f"Branch name cannot contain '..': {branch_name!r}")
+    
+    # Command passed as list, never string interpolation, never shell=True
+    # (python.processes.subprocess-safety)
+    cmd = ['git', 'branch', '--list', branch_name]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10
+        )
+        return result.stdout.strip().split('\n') if result.stdout.strip() else []
+    except subprocess.TimeoutExpired:
+        raise subprocess.CalledProcessError(-1, cmd, "Command timed out")
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: "Is the command passed as a list, with input as elements?"
+          answer: "Yes, the command is built as ['git', 'branch', '--list', branch_name] with branch_name as a list element, never string interpolation."
+          location: "solution.py:53"
+        - question: "Is shell=True present anywhere, even conditionally?"
+          answer: "No, shell=True is never used; subprocess.run is called directly with the argument list."
+          location: "solution.py:57"
+        - question: "Can a user-supplied value change which program runs?"
+          answer: "No, the first argument is fixed as 'git', user input only appears as the final argument position."
+          location: "solution.py:53"
+        - question: "Is the input validated or is it passed as opaque data?"
+          answer: "Input is validated for git branch name rules before being passed to subprocess."
+          location: "solution.py:21-46"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Trust boundary is at function entry; validation occurs on branch_name parameter before any git command is executed."
+          location: "solution.py:21"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable: 1-255 chars, alphanumeric plus /._-, no whitespace, no ~^:?*[\\, no '..', no leading '-', not '.' or '..'."
+          location: "solution.py:21-46"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The same branch_name variable is used, but it has been validated; no transformation occurs before subprocess use."
+          location: "solution.py:53"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, validation is a gate; the value only reaches subprocess as a positional argument, not in shell context."
+          location: "solution.py:53"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The branch name itself identifies the operation; it comes from the user-supplied parameter." 
+          location: "solution.py:5"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Git's own object database records the result; the list operation is inherently read-only and repeatable."
+          location: "solution.py:53"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The command is a read-only git branch listing; no state is modified regardless of success or failure."
+          location: "solution.py:53"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, concurrent calls can both run git branch, but since it is read-only, results are deterministic and safe."
+          location: "solution.py:47-65"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "This node does not apply; the function executes git commands and does not perform file writes or atomic replacements."
+          location: "solution.py:53"
+        - question: "Is the data flushed before the rename?"
+          answer: "This node does not apply; no file I/O, writes, or renames occur in this function."
+          location: "solution.py:53"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "This node does not apply; no temp files are created or managed by this function."
+          location: "solution.py:53"
+        - question: "Can two writers both rename over the target?"
+          answer: "This node does not apply; no file writes or renames are performed, only git command execution."
+          location: "solution.py:53"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "No shared mutable state; the function creates a local command list and calls git as a subprocess."
+          location: "solution.py:53"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "The function performs only a read operation (git branch --list), which git executes atomically for observation."
+          location: "solution.py:53"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes, concurrent invocations may run simultaneously, but since the command is read-only, no race condition exists."
+          location: "solution.py:47-65"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "There is no check-then-act sequence; validation and command execution are sequential and not interdependent with other processes."
+          location: "solution.py:21-53"
+      unanswered: []
+  not_applied: []
+```

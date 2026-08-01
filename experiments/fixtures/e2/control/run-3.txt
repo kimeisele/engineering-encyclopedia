@@ -1,0 +1,252 @@
+Here's a Python function that runs git commands with user-supplied branch names:
+
+```python
+import subprocess
+import shlex
+
+def run_git_command(branch_name, command_type="checkout"):
+    """
+    Run a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name (str): The name of the branch to use
+        command_type (str): The type of git command to run. Options:
+            - "checkout": git checkout <branch>
+            - "create": git checkout -b <branch>
+            - "delete": git branch -d <branch>
+            - "merge": git merge <branch>
+            - "rebase": git rebase <branch>
+            - "push": git push origin <branch>
+            - "pull": git pull origin <branch>
+            - "log": git log --oneline <branch>
+    
+    Returns:
+        dict: Dictionary containing stdout, stderr, and returncode
+    
+    Raises:
+        ValueError: If branch_name is empty or invalid
+        subprocess.CalledProcessError: If the git command fails
+    """
+    
+    # Validate input
+    if not branch_name or not branch_name.strip():
+        raise ValueError("Branch name cannot be empty")
+    
+    # Remove any whitespace
+    branch_name = branch_name.strip()
+    
+    # Ensure branch name doesn't contain dangerous characters
+    forbidden_chars = [';', '&', '|', '>', '<', '$', '`', '\\']
+    for char in forbidden_chars:
+        if char in branch_name:
+            raise ValueError(f"Branch name contains forbidden character: {char}")
+    
+    # Map command types to git commands
+    commands = {
+        "checkout": ["git", "checkout", branch_name],
+        "create": ["git", "checkout", "-b", branch_name],
+        "delete": ["git", "branch", "-d", branch_name],
+        "merge": ["git", "merge", branch_name],
+        "rebase": ["git", "rebase", branch_name],
+        "push": ["git", "push", "origin", branch_name],
+        "pull": ["git", "pull", "origin", branch_name],
+        "log": ["git", "log", "--oneline", branch_name]
+    }
+    
+    if command_type not in commands:
+        raise ValueError(f"Invalid command type: {command_type}")
+    
+    cmd = commands[command_type]
+    
+    try:
+        # Run the command
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False  # We'll handle errors manually
+        )
+        
+        # Return the results
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "command": ' '.join(cmd)
+        }
+        
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired("Git command timed out")
+    except Exception as e:
+        raise Exception(f"Error running git command: {e}")
+
+# Example usage and additional helper functions:
+
+def git_checkout(branch_name):
+    """Convenience wrapper for checkout"""
+    return run_git_command(branch_name, "checkout")
+
+def git_create_branch(branch_name):
+    """Convenience wrapper for creating a new branch"""
+    return run_git_command(branch_name, "create")
+
+def git_delete_branch(branch_name):
+    """Convenience wrapper for deleting a branch"""
+    return run_git_command(branch_name, "delete")
+
+def git_merge_branch(branch_name):
+    """Convenience wrapper for merging a branch"""
+    return run_git_command(branch_name, "merge")
+
+# Example usage:
+if __name__ == "__main__":
+    # Example 1: Checkout a branch
+    try:
+        result = run_git_command("feature-branch", "checkout")
+        print(f"Command: {result['command']}")
+        print(f"Success: {result['returncode'] == 0}")
+        print(f"Output: {result['stdout']}")
+        if result['stderr']:
+            print(f"Error: {result['stderr']}")
+    except Exception as e:
+        print(f"Error: {e}")
+    
+    # Example 2: Create a new branch
+    try:
+        result = git_create_branch("new-feature")
+        print(f"Created branch: {result['command']}")
+    except Exception as e:
+        print(f"Error: {e}")
+    
+    # Example 3: Check repo status
+    try:
+        result = subprocess.run(
+            ["git", "status"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        print(f"Status: {result.stdout}")
+    except Exception as e:
+        print(f"Error: {e}")
+```
+
+Here's also a more advanced version with additional features:
+
+```python
+import subprocess
+import json
+import os
+
+def run_git_command_advanced(branch_name, command_type="checkout", cwd=None):
+    """
+    Advanced version with error handling, logging, and security features.
+    """
+    
+    # Security check
+    if not isinstance(branch_name, str) or not branch_name.strip():
+        raise ValueError("Branch name must be a non-empty string")
+    
+    # Validate branch name format (common git conventions)
+    import re
+    pattern = r'^(?!\.|/)(?!.*\.\.)(?!.*//)(?!.*@\{)(?!.*\s)[a-zA-Z0-9._/-]+$'
+    if not re.match(pattern, branch_name):
+        raise ValueError(f"Invalid branch name: '{branch_name}'")
+    
+    # Git commands dictionary
+    git_commands = {
+        "checkout": ["checkout"],
+        "create": ["checkout", "-b"],
+        "delete": ["branch", "-d"],
+        "delete_force": ["branch", "-D"],
+        "merge": ["merge"],
+        "rebase": ["rebase"],
+        "push": ["push", "origin"],
+        "pull": ["pull", "origin"],
+        "log": ["log", "--oneline"],
+        "show": ["show"],
+        "diff": ["diff", "HEAD"],
+        "reset_soft": ["reset", "--soft"],
+        "reset_hard": ["reset", "--hard"]
+    }
+    
+    if command_type not in git_commands:
+        raise ValueError(f"Invalid command type: '{command_type}'")
+    
+    # Build command
+    cmd = ["git"] + git_commands[command_type] + [branch_name]
+    
+    # Add optional working directory
+    if cwd:
+        cmd = ["git", "-C", cwd] + git_commands[command_type] + [branch_name]
+    
+    try:
+        # Execute with timeout
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=30,  # 30 seconds timeout
+            check=False
+        )
+        
+        # Prepare result
+        output = {
+            "command": ' '.join(cmd),
+            "branch": branch_name,
+            "command_type": command_type,
+            "success": result.returncode == 0,
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip() if result.stdout else "",
+            "stderr": result.stderr.strip() if result.stderr else "",
+            "error": None if result.returncode == 0 else "Git command failed"
+        }
+        
+        return output
+        
+    except subprocess.TimeoutExpired:
+        return {
+            "command": ' '.join(cmd),
+            "branch": branch_name,
+            "command_type": command_type,
+            "success": False,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "",
+            "error": "Command timed out"
+        }
+    except Exception as e:
+        return {
+            "command": ' '.join(cmd),
+            "branch": branch_name,
+            "command_type": command_type,
+            "success": False,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": str(e),
+            "error": f"Unexpected error: {str(e)}"
+        }
+```
+
+This implementation provides:
+
+1. **Security**: Validates branch names to prevent command injection
+2. **Error handling**: Catches various exceptions including timeouts
+3. **Flexibility**: Supports multiple git command types
+4. **Clean output**: Returns structured dictionary with all relevant information
+5. **Input validation**: Checks for empty strings and forbidden characters
+6. **Timeout protection**: Prevents hanging on long-running commands
+7. **Working directory support**: Can run commands in different directories
+
+Usage example:
+
+```python
+# Check if branch exists and list available branches
+result = run_git_command_advanced("main", "log")
+if result["success"]:
+    print(f"Branch 'main' has commits:")
+    print(result["stdout"])
+else:
+    print(f"Error: {result['stderr']}")
+```

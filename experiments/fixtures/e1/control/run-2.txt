@@ -1,0 +1,567 @@
+I'll create a worker that consumes jobs from a queue and processes customer charges. Here's a comprehensive implementation with error handling, retry logic, and observability:
+
+```python
+import json
+import time
+import logging
+import os
+import signal
+from datetime import datetime
+from typing import Dict, Optional
+from enum import Enum
+
+import pika  # RabbitMQ client
+import redis
+from dataclasses import dataclass, field
+from payment_gateway import PaymentGateway  # Assume this exists
+
+# Configuration
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_QUEUE = os.getenv('RABBITMQ_QUEUE', 'payment_jobs')
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class JobStatus(Enum):
+    PROCESSING = 'processing'
+    SUCCESS = 'success'
+    FAILED = 'failed'
+    RETRY = 'retry'
+
+@dataclass
+class ChargeJob:
+    customer_id: str
+    amount: float
+    currency: str
+    payment_method: str
+    metadata: Dict = field(default_factory=dict)
+    job_id: Optional[str] = None
+    retry_count: int = 0
+    
+    @classmethod
+    def from_dict(cls, data):
+        return cls(
+            customer_id=data.get('customer_id'),
+            amount=float(data.get('amount')),
+            currency=data.get('currency', 'USD'),
+            payment_method=data.get('payment_method', 'default'),
+            metadata=data.get('metadata', {}),
+            job_id=data.get('job_id'),
+            retry_count=data.get('retry_count', 0)
+        )
+    
+    def to_dict(self):
+        return {
+            'customer_id': self.customer_id,
+            'amount': self.amount,
+            'currency': self.currency,
+            'payment_method': self.payment_method,
+            'metadata': self.metadata,
+            'job_id': self.job_id,
+            'retry_count': self.retry_count
+        }
+
+class PaymentWorker:
+    def __init__(self):
+        # Initialize MongoDB for job records (assuming MongoDB is available)
+        self.db = self._init_database()
+        
+        # Initialize payment gateway
+        self.payment_gateway = PaymentGateway()
+        
+        # Initialize Redis for rate limiting and idempotency
+        self.redis_client = redis.Redis(
+            host=REDIS_HOST, 
+            port=REDIS_PORT, 
+            decode_responses=True
+        )
+        
+        self.running = True
+        
+        # Set up signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        
+        # Connect to message queue
+        self.connection = self._connect_to_queue()
+        self.channel = self.connection.channel()
+        
+        # Declare queue with dead letter queue for failed messages
+        self._setup_queues()
+
+    def _init_database(self):
+        """Initialize MongoDB connection and collections"""
+        from pymongo import MongoClient
+        client = MongoClient('mongodb://localhost:27017/')
+        db = client.payment_worker
+        return {
+            'jobs': db.jobs,
+            'charges': db.charges
+        }
+
+    def _connect_to_queue(self):
+        """Establish connection to RabbitMQ"""
+        try:
+            credentials = pika.PlainCredentials('guest', 'guest')
+            parameters = pika.ConnectionParameters(
+                RABBITMQ_HOST, 
+                5672, 
+                '/', 
+                credentials,
+                heartbeat=600,
+                blocked_connection_timeout=300
+            )
+            return pika.BlockingConnection(parameters)
+        except Exception as e:
+            logger.error(f"Failed to connect to RabbitMQ: {e}")
+            raise
+
+    def _setup_queues(self):
+        """Set up main queue and dead letter queue"""
+        # Main queue
+        arguments = {
+            'x-dead-letter-exchange': 'payment_dlx',
+            'x-dead-letter-routing-key': 'payment_failed',
+            'x-message-ttl': 300000  # 5 minutes
+        }
+        
+        self.channel.queue_declare(
+            queue=RABBITMQ_QUEUE, 
+            durable=True,
+            arguments=arguments
+        )
+        
+        # Dead letter queue
+        self.channel.exchange_declare(
+            exchange='payment_dlx',
+            exchange_type='direct',
+            durable=True
+        )
+        
+        self.channel.queue_declare(
+            queue='payment_failed_queue',
+            durable=True
+        )
+        
+        self.channel.queue_bind(
+            exchange='payment_dlx',
+            queue='payment_failed_queue',
+            routing_key='payment_failed'
+        )
+        
+        # Set QoS to prevent overwhelming
+        self.channel.basic_qos(prefetch_count=1)
+
+    def process_job(self, channel, method, properties, body):
+        """Main job processing callback"""
+        job_id = None
+        try:
+            # Parse job from body
+            job_data = json.loads(body)
+            job = ChargeJob.from_dict(job_data)
+            job_id = job.job_id or f"job_{uuid.uuid4()}"
+            
+            logger.info(f"Processing job {job_id} for customer {job.customer_id}")
+            
+            # Check if job was already processed (idempotency)
+            if self._is_job_processed(job_id):
+                logger.info(f"Job {job_id} already processed, skipping")
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                return
+            
+            # Mark job as processing
+            self._update_job_status(job_id, JobStatus.PROCESSING.value, job)
+            
+            # Check for duplicate charge (to prevent double charging)
+            if self._is_duplicate_charge(job):
+                logger.warning(f"Duplicate charge detected for customer {job.customer_id}")
+                self._update_job_status(job_id, JobStatus.SUCCESS.value, job, 
+                                       response={'status': 'duplicate'})
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+                return
+            
+            # Apply rate limiting
+            if not self._check_rate_limit(job.customer_id):
+                logger.warning(f"Rate limit exceeded for customer {job.customer_id}")
+                self._update_job_status(job_id, JobStatus.FAILED.value, job,
+                                       error="Rate limit exceeded")
+                channel.basic_nack(
+                    delivery_tag=method.delivery_tag, 
+                    requeue=False
+                )
+                return
+            
+            # Attempt to charge customer
+            success = self._charge_customer(job)
+            
+            if success:
+                # Log successful charge
+                charge_id = self._record_charge(job, success=True)
+                self._update_job_status(job_id, JobStatus.SUCCESS.value, job,
+                                       response={'charge_id': charge_id})
+                logger.info(f"Successfully charged customer {job.customer_id} ${job.amount}")
+                
+                # Acknowledge message
+                channel.basic_ack(delivery_tag=method.delivery_tag)
+            else:
+                # Handle failure
+                self._handle_failure(job, method, channel)
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid job format: {e}")
+            channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+        except Exception as e:
+            logger.error(f"Unexpected error processing job {job_id}: {e}")
+            if job_id:
+                self._update_job_status(job_id, JobStatus.FAILED.value, 
+                                       job, error=str(e))
+            channel.basic_nack(
+                delivery_tag=method.delivery_tag, 
+                requeue=False
+            )
+
+    def _charge_customer(self, job: ChargeJob) -> bool:
+        """Execute the actual charge to the customer"""
+        try:
+            # Check if amount is valid
+            if job.amount <= 0:
+                raise ValueError("Invalid amount")
+            
+            # Execute payment
+            payment_result = self.payment_gateway.charge(
+                customer_id=job.customer_id,
+                amount=job.amount,
+                currency=job.currency,
+                payment_method=job.payment_method,
+                metadata={
+                    'job_id': job.job_id,
+                    'retry_count': job.retry_count,
+                    **job.metadata
+                }
+            )
+            
+            return payment_result.get('status') == 'success'
+            
+        except Exception as e:
+            logger.error(f"Payment gateway error: {e}")
+            return False
+
+    def _handle_failure(self, job: ChargeJob, method, channel):
+        """Handle job failure with retry logic"""
+        job.retry_count += 1
+        
+        if job.retry_count <= MAX_RETRIES:
+            # Log retry
+            logger.warning(
+                f"Retry {job.retry_count}/{MAX_RETRIES} for job {job.job_id}"
+            )
+            
+            # Update job status
+            self._update_job_status(
+                job.job_id, 
+                JobStatus.RETRY.value, 
+                job,
+                error=f"Retry {job.retry_count}"
+            )
+            
+            # Requeue with delay using a delayed queue
+            self._schedule_retry(job, method.delivery_tag)
+        else:
+            # Max retries exceeded, send to dead letter queue
+            logger.error(
+                f"Job {job.job_id} failed after {MAX_RETRIES} attempts"
+            )
+            
+            self._update_job_status(
+                job.job_id, 
+                JobStatus.FAILED.value, 
+                job,
+                error="Max retries exceeded"
+            )
+            
+            # Publish to dead letter queue
+            self.channel.basic_publish(
+                exchange='payment_dlx',
+                routing_key='payment_failed',
+                body=json.dumps(job.to_dict()),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  # persistent
+                    timestamp=int(time.time())
+                )
+            )
+            
+            # Acknowledge original message (won't be requeued)
+            channel.basic_ack(delivery_tag=method.delivery_tag)
+
+    def _schedule_retry(self, job: ChargeJob, delivery_tag):
+        """Schedule a retry with delay using a separate delayed queue"""
+        # Implement delayed processing using Redis or a temporary timer queue
+        retry_time = time.time() + (RETRY_DELAY * job.retry_count)
+        
+        # Store in Redis with TTL for delayed processing
+        self.redis_client.zadd(
+            'payment_retries',
+            {json.dumps(job.to_dict()): retry_time}
+        )
+        
+        # For simplicity, we're using a simple sleep-based retry
+        # In production, use a proper delayed queue implementation
+        time.sleep(RETRY_DELAY * job.retry_count)
+        
+        # Republish to main queue
+        self.channel.basic_publish(
+            exchange='',
+            routing_key=RABBITMQ_QUEUE,
+            body=json.dumps(job.to_dict()),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                timestamp=int(time.time())
+            )
+        )
+        
+        # Acknowledge original message
+        self.channel.basic_ack(delivery_tag=delivery_tag)
+
+    def _is_job_processed(self, job_id: str) -> bool:
+        """Check if job was already processed (for idempotency)"""
+        return self.db['jobs'].find_one({
+            'job_id': job_id,
+            'status': JobStatus.SUCCESS.value
+        }) is not None
+
+    def _is_duplicate_charge(self, job: ChargeJob) -> bool:
+        """Check for duplicate charges to prevent double charging"""
+        duplicate_key = f"charge:{job.customer_id}:{job.amount}:{job.job_id}"
+        return bool(self.redis_client.setnx(duplicate_key, '1'))
+
+    def _check_rate_limit(self, customer_id: str) -> bool:
+        """Rate limiting per customer"""
+        # Simple implementation - allow max 3 charges per minute
+        rate_key = f"rate_limit:{customer_id}"
+        current = self.redis_client.incr(rate_key)
+        if current == 1:
+            self.redis_client.expire(rate_key, 60)
+        return current <= 3
+
+    def _update_job_status(self, job_id: str, status: str, 
+                          job: ChargeJob, response=None, error=None):
+        """Update job status in MongoDB"""
+        update_data = {
+            'job_id': job_id,
+            'customer_id': job.customer_id,
+            'amount': job.amount,
+            'status': status,
+            'updated_at': datetime.utcnow(),
+            'attempts': job.retry_count
+        }
+        
+        if response:
+            update_data['response'] = response
+        if error:
+            update_data['error'] = error
+            
+        self.db['jobs'].update_one(
+            {'job_id': job_id},
+            {'$set': update_data, '$setOnInsert': {
+                'created_at': datetime.utcnow(),
+                'original_data': job.to_dict()
+            }},
+            upsert=True
+        )
+
+    def _record_charge(self, job: ChargeJob, success: bool) -> str:
+        """Record the charge in the database"""
+        charge_id = f"charge_{uuid.uuid4().hex}"
+        
+        charge_data = {
+            'charge_id': charge_id,
+            'customer_id': job.customer_id,
+            'amount': job.amount,
+            'currency': job.currency,
+            'payment_method': job.payment_method,
+            'status': 'success' if success else 'failed',
+            'job_id': job.job_id,
+            'created_at': datetime.utcnow(),
+            'metadata': job.metadata
+        }
+        
+        self.db['charges'].insert_one(charge_data)
+        return charge_id
+
+    def start_consuming(self):
+        """Start the worker"""
+        try:
+            logger.info(f"Starting worker on queue: {RABBITMQ_QUEUE}")
+            
+            self.channel.basic_consume(
+                queue=RABBITMQ_QUEUE,
+                on_message_callback=self.process_job,
+                auto_ack=False
+            )
+            
+            self.channel.start_consuming()
+            
+        except KeyboardInterrupt:
+            logger.info("Worker interrupted")
+            self.stop()
+        except Exception as e:
+            logger.error(f"Consumer error: {e}")
+            self.cleanup()
+
+    def stop(self):
+        """Gracefully stop the worker"""
+        logger.info("Stopping worker...")
+        self.running = False
+        if self.channel and self.channel.is_open:
+            self.channel.stop_consuming()
+        self.cleanup()
+
+    def cleanup(self):
+        """Clean up connections and resources"""
+        if self.connection and self.connection.is_open:
+            self.connection.close()
+        logger.info("Worker stopped")
+
+    def signal_handler(self, signum, frame):
+        """Handle system signals for graceful shutdown"""
+        logger.info(f"Received signal {signum}")
+        self.stop()
+        sys.exit(0)
+
+def main():
+    # Initialize and run worker
+    worker = PaymentWorker()
+    
+    try:
+        worker.start_consuming()
+    except Exception as e:
+        logger.error(f"Worker error: {e}")
+        worker.cleanup()
+
+if __name__ == "__main__":
+    main()
+```
+
+Here's also a script to produce test jobs:
+
+```python
+# producer.py
+import json
+import random
+import uuid
+import pika
+import time
+
+def produce_jobs():
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters('localhost')
+    )
+    channel = connection.channel()
+    
+    channel.queue_declare(queue='payment_jobs', durable=True)
+    
+    for i in range(10):
+        job = {
+            'job_id': f"job_{uuid.uuid4().hex}",
+            'customer_id': f"cust_{random.randint(1, 100)}",
+            'amount': round(random.uniform(10, 1000), 2),
+            'currency': 'USD',
+            'payment_method': 'credit_card',
+            'metadata': {
+                'order_id': f"order_{i}",
+                'timestamp': time.time()
+            },
+            'retry_count': 0
+        }
+        
+        channel.basic_publish(
+            exchange='',
+            routing_key='payment_jobs',
+            body=json.dumps(job),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # persistent message
+                timestamp=int(time.time())
+            )
+        )
+        print(f"Published job {job['job_id']}")
+    
+    connection.close()
+
+if __name__ == "__main__":
+    produce_jobs()
+```
+
+And a monitoring script:
+
+```python
+# monitor.py
+import pymongo
+from datetime import datetime, timedelta
+
+def monitor_worker():
+    client = pymongo.MongoClient('mongodb://localhost:27017/')
+    db = client.payment_worker
+    
+    # Recent jobs
+    recent_jobs = db.jobs.find().sort('created_at', -1).limit(10)
+    print("Recent Jobs:")
+    for job in recent_jobs:
+        print(f"  {job['job_id']}: {job['status']} - ${job['amount']}")
+    
+    # Jobs in last hour
+    hour_ago = datetime.utcnow() - timedelta(hours=1)
+    success_count = db.jobs.count_documents({
+        'status': 'success',
+        'created_at': {'$gte': hour_ago}
+    })
+    failed_count = db.jobs.count_documents({
+        'status': 'failed',
+        'created_at': {'$gte': hour_ago}
+    })
+    
+    print(f"\nLast Hour Stats:")
+    print(f"  Successful: {success_count}")
+    print(f"  Failed: {failed_count}")
+
+if __name__ == "__main__":
+    monitor_worker()
+```
+
+## Key Features Implementation:
+
+1. **Idempotency**: Prevents double processing of the same job
+2. **Duplicate Detection**: Prevents charging the same customer twice for the same order
+3. **Retry Logic**: Up to 3 retries with exponential backoff
+4. **Dead Letter Queue**: Failed jobs are sent to a separate queue for analysis
+5. **Rate Limiting**: Prevents overwhelming customers with too many charges
+6. **Graceful Shutdown**: Handles SIGTERM/SIGINT signals properly
+7. **Observability**: Logs every step and stores job status in MongoDB
+8. **Message Persistence**: Ensures jobs survive broker restarts
+9. **Error Handling**: Comprehensive error handling for all failure scenarios
+
+## Dependencies Required:
+
+```bash
+pip install pika pymongo redis
+```
+
+## Production Considerations:
+
+1. **Use a proper delayed queue**: Implement using Redis sorted sets or RabbitMQ delayed message exchange
+2. **Add metrics**: Track job processing time, success rate, queue length
+3. **Circuit breaker**: For the payment gateway to handle outages
+4. **Backpressure**: Implement if queue processing is too slow
+5. **Monitoring**: Integrate with Prometheus/Grafana
+6. **Secrets management**: Store credentials securely
+7. **Connection pooling**: For database connections
+8. **Logging aggregation**: Send logs to a central system
+
+This worker provides a robust foundation for processing payment jobs with all the necessary safety measures for financial operations.

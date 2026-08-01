@@ -1,0 +1,177 @@
+Here's a Python function that runs git commands with a user-supplied branch name, with proper safety considerations:
+
+```python
+import subprocess
+import shlex
+from typing import List, Optional
+
+def run_git_command(branch_name: str, action: str = "checkout", *args: str) -> subprocess.CompletedProcess:
+    """
+    Run a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name: The branch name to use in the command
+        action: The git action to perform (checkout, merge, delete, create, etc.)
+        *args: Additional arguments to pass to git
+        
+    Returns:
+        subprocess.CompletedProcess: The result of the git command
+        
+    Raises:
+        ValueError: If an invalid branch name is provided
+        subprocess.CalledProcessError: If the git command fails
+    """
+    
+    # Validate branch name to prevent command injection
+    if not _is_valid_branch_name(branch_name):
+        raise ValueError(f"Invalid branch name: {branch_name}")
+    
+    # Build the git command
+    git_cmd = ["git", action, branch_name]
+    if args:
+        git_cmd.extend(args)
+    
+    try:
+        # Run the command without shell=True to prevent injection
+        result = subprocess.run(
+            git_cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=".",  # You can specify a different working directory if needed
+        )
+        return result
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Error running git command: {e}")
+        print(f"Error output: {e.stderr}")
+        raise
+
+def _is_valid_branch_name(branch_name: str) -> bool:
+    """
+    Validate a git branch name to prevent command injection.
+    
+    Args:
+        branch_name: The branch name to validate
+        
+    Returns:
+        bool: True if the branch name is valid, False otherwise
+    """
+    if not branch_name or len(branch_name) > 255:
+        return False
+    
+    # Branch name rules for git (simplified)
+    # - Cannot be empty
+    # - Cannot contain spaces or special characters
+    # - Cannot start with a dot or contain consecutive dots
+    # - Cannot end with a dot or contain ".."
+    # - Cannot contain ASCII control characters
+    # - Cannot contain ~, ^, :, ?, *, [, \
+    
+    invalid_chars = set(" ~^:?*[\\")
+    if any(char in invalid_chars for char in branch_name):
+        return False
+    
+    # Check for consecutive dots
+    if ".." in branch_name:
+        return False
+    
+    # Check for leading or trailing dot
+    if branch_name.startswith(".") or branch_name.endswith("."):
+        return False
+    
+    # Check for control characters
+    if any(ord(char) < 32 or ord(char) == 127 for char in branch_name):
+        return False
+    
+    return True
+
+# Example usage functions
+def git_checkout(branch_name: str) -> None:
+    """Checkout an existing branch or create a new one."""
+    try:
+        result = run_git_command(branch_name, "checkout")
+        print(result.stdout)
+        print(f"Successfully checked out branch: {branch_name}")
+    except subprocess.CalledProcessError:
+        # Try to create the branch if it doesn't exist
+        print(f"Branch {branch_name} doesn't exist, creating it...")
+        try:
+            run_git_command(branch_name, "checkout", "-b")
+            print(f"Created and checked out new branch: {branch_name}")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to create branch: {e}")
+
+def git_merge(branch_name: str, current_branch: Optional[str] = None) -> None:
+    """Merge a branch into the current branch."""
+    try:
+        result = run_git_command(branch_name, "merge")
+        print(result.stdout)
+        print(f"Successfully merged branch: {branch_name}")
+    except subprocess.CalledProcessError as e:
+        print(f"Merge failed: {e.stderr}")
+
+def list_branches() -> List[str]:
+    """List all branches in the repository."""
+    try:
+        result = subprocess.run(
+            ["git", "branch"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        branches = [line.strip().lstrip('*').strip() for line in result.stdout.splitlines()]
+        return branches
+    except subprocess.CalledProcessError as e:
+        print(f"Error listing branches: {e}")
+        return []
+
+# Example usage with safety validation
+if __name__ == "__main__":
+    # Safe usage examples
+    print("Available branches:", list_branches())
+    
+    # Test with a valid branch name
+    branch_to_use = "feature/my-feature"
+    try:
+        run_git_command(branch_to_use, "checkout", "-b")
+        print(f"Created and checked out {branch_to_use}")
+    except ValueError as e:
+        print(f"Invalid branch name: {e}")
+    except subprocess.CalledProcessError as e:
+        print(f"Git command failed: {e}")
+    
+    # Test with an invalid branch name (will be rejected)
+    dangerous_input = "test; rm -rf /"
+    try:
+        run_git_command(dangerous_input, "checkout")
+    except ValueError as e:
+        print(f"Security check prevented dangerous input: {e}")
+```
+
+Key security features of this implementation:
+
+1. **No shell=True**: The command is run as a list of arguments, preventing command injection
+2. **Branch name validation**: The `_is_valid_branch_name()` function validates input against git's branch naming rules
+3. **Error handling**: Catches and reports errors appropriately
+4. **Parameterized commands**: Git commands are constructed as lists, never string concatenation
+
+**Additional considerations:**
+
+- **Working directory**: The function uses `cwd="."` by default. You can modify this to specify a different repo location.
+- **Error handling**: The function raises exceptions on failure, which can be caught by the caller.
+- **Security**: Always validate user input when dealing with system commands.
+
+**Example safe usage:**
+```python
+# Safe checkout
+git_checkout("feature/new-feature")
+
+# Safe merge
+git_merge("develop")
+
+# Create new branch
+run_git_command("feature/safe-branch", "checkout", "-b")
+```
+
+This implementation ensures that user input cannot be used to execute arbitrary shell commands, while still providing flexible git command functionality.

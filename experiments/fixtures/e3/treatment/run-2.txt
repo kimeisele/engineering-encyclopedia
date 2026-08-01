@@ -1,0 +1,153 @@
+```python
+import json
+import os
+import tempfile
+
+
+def update_json_config(filepath: str, new_content: dict) -> None:
+    """
+    Atomically update a JSON config file on disk.
+
+    Writes the new content to a temporary file in the same directory as the
+    target, flushes it, and renames it over the target. The rename is atomic
+    on POSIX filesystems.
+
+    Args:
+        filepath: Absolute or relative path to the JSON config file.
+        new_content: Dictionary to be written as the new JSON config.
+
+    Raises:
+        TypeError: If new_content is not a dict.
+        OSError: If the directory doesn't exist or cannot be written to.
+        json.JSONEncodeError: If new_content cannot be serialized to JSON.
+    """
+    # Security: input validation at the trust boundary. We explicitly accept
+    # only a dict, rejecting all other shapes (e.g., lists, strings, ints).
+    if not isinstance(new_content, dict):
+        raise TypeError("new_content must be a dict")
+
+    target_dir = os.path.dirname(os.path.abspath(filepath))
+
+    # Create the temp file in the same directory as the target. This ensures
+    # os.replace() is a rename within one filesystem, which is atomic.
+    fd, temp_path = tempfile.mkstemp(
+        dir=target_dir, prefix=".config_tmp_", suffix=".json"
+    )
+
+    try:
+        # Serialize to bytes before writing to avoid encoding issues.
+        # ensure_ascii=True (default) keeps output ASCII-safe for portability.
+        data = json.dumps(new_content, indent=2).encode("utf-8")
+
+        # Write and flush. os.fsync() pushes the file data to disk so that a
+        # power loss after the rename still leaves a valid file.
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic replacement: either the old file or the new file exists,
+        # never a partially written version.
+        os.replace(temp_path, filepath)
+    except BaseException:
+        # Clean up the temp file on any failure (write error, serialization
+        # error, etc.). Without this, we'd leave orphaned temp files behind.
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Yes, using tempfile.mkstemp with dir=target_dir. This ensures the subsequent rename stays within one filesystem.
+          location: "update_json_config.py:23"
+        - question: Is the data flushed before the rename?
+          answer: Yes, f.flush() and os.fsync() are called before os.replace() to ensure the file data is on disk.
+          location: "update_json_config.py:35"
+        - question: What happens to the temp file if the write fails?
+          answer: The except block unlinks the temp path before re-raising the exception, preventing orphaned temp files.
+          location: "update_json_config.py:39"
+        - question: Can two writers both rename over the target?
+          answer: Yes, two concurrent callers can race. The final file will be whichever rename completes last, but no corruption occurs due to atomicity.
+          location: "update_json_config.py:37"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The function signature is the trust boundary. The isinstance check rejects non-dict inputs before any file I/O.
+          location: "update_json_config.py:19"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Only dict is accepted. Non-dict inputs (lists, strings, ints) raise TypeError, rejecting everything else.
+          location: "update_json_config.py:19"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated dict is passed directly to json.dumps() for serialization; raw input is never used.
+          location: "update_json_config.py:30"
+        - question: Does each use site still treat the value as untrusted?
+          answer: The function internally only serializes the validated dict. Any downstream consumer must do its own validation.
+          location: "update_json_config.py:30"
+      unanswered: []
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: Which behaviours are asserted, not just which lines run?
+          answer: Tests should assert atomicity implies no partial file, temp file cleanup on error, and correct JSON payload after rename.
+          location: "update_json_config.py:37"
+        - question: What important paths are not covered at all?
+          answer: Tests may miss failure paths: disk-full during write, permission errors on mkstemp, or fsync failing. These need explicit fault injection.
+          location: "update_json_config.py:35"
+        - question: Does the suite fail when the behaviour regresses?
+          answer: A regression test should simulate a crash between write and rename, asserting the original file remains intact.
+          location: "update_json_config.py:37"
+        - question: Is the metric used as evidence of quality?
+          answer: The function's complexity is low; we rely on behavioural assertions rather than coverage percentages to ensure correctness.
+          location: "update_json_config.py:1"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The target filepath is shared mutable state. Mutation occurs via os.replace(), replacing the entire file atomically.
+          location: "update_json_config.py:37"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: Yes, os.replace() is a single atomic operation. Readers never observe a partially written file.
+          location: "update_json_config.py:37"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No check-then-act pattern exists. Each writer independently produces a complete temp file before replacing.
+          location: "update_json_config.py:23"
+        - question: What happens if the check and the action are interleaved?
+          answer: No check-and-act sequence exists in this function, so interleaving only results in last-write-wins semantics.
+          location: "update_json_config.py:37"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The function isn't idempotent-safe in a concurrent sense; the file path identifies the operation target.
+          location: "update_json_config.py:37"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is the os.replace() itself, which is atomic and durable. No separate completion record exists.
+          location: "update_json_config.py:37"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No intermediate state exists because the temp file is either fully written or cleaned up in the except block.
+          location: "update_json_config.py:39"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Yes, both can start concurrently. However, each produces a valid complete file, so the final state is valid.
+          location: "update_json_config.py:23"
+      unanswered: []
+  not_applied: []
+```

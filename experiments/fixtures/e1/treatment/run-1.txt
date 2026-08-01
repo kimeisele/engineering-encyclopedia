@@ -1,0 +1,193 @@
+```python
+import json
+import os
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+
+@dataclass
+class Job:
+    id: str
+    customer_id: str
+    amount_cents: int
+
+
+class ChargeError(Exception):
+    """Raised when a charge fails for a reason unrelated to job processing."""
+
+
+class Queue:
+    """Minimal queue interface — replaced by real queue in production."""
+
+    def dequeue(self) -> Optional[Job]:
+        raise NotImplementedError
+
+    def ack(self, job_id: str) -> None:
+        raise NotImplementedError
+
+    def nack(self, job_id: str) -> None:
+        raise NotImplementedError
+
+
+class PaymentGateway:
+    """Minimal gateway — replaced by real client in production."""
+
+    def charge(self, customer_id: str, amount_cents: int) -> str:
+        raise NotImplementedError
+
+
+class IdempotencyStore:
+    """Durable, atomic deduplication store keyed by job_id."""
+
+    def __init__(self, data_dir: Path):
+        self.data_dir = data_dir
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _path_for(self, job_id: str) -> Path:
+        return self.data_dir / f"{job_id}.json"
+
+    def already_processed(self, job_id: str) -> bool:
+        return self._path_for(job_id).exists()
+
+    def record_completion(self, job_id: str) -> None:
+        """Atomically persist completion. The finished marker is visible to
+        other workers only after the rename succeeds."""
+        target = self._path_for(job_id)
+        tmp = self.data_dir / f".{job_id}.{uuid.uuid4().hex}.tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps({"job_id": job_id}))
+            f.flush()
+            os.fsync(f.fileno())  # durable before rename
+        os.replace(tmp, target)  # atomic on POSIX
+
+
+class Worker:
+    def __init__(
+        self,
+        queue: Queue,
+        gateway: PaymentGateway,
+        idempotency_store: IdempotencyStore,
+        max_attempts: int = 3,
+    ):
+        self.queue = queue
+        self.gateway = gateway
+        self.idempotency_store = idempotency_store
+        self.max_attempts = max_attempts
+
+    def process_one(self) -> bool:
+        job = self.queue.dequeue()
+        if job is None:
+            return False
+
+        try:
+            # Check-then-act guarded by idempotency record: if we crash after
+            # charging the customer but before recording, the next attempt
+            # will charge again. Precisely the race this store prevents.
+            if self.idempotency_store.already_processed(job.id):
+                self.queue.ack(job.id)
+                return True
+
+            self._charge_with_retry(job)
+            self.idempotency_store.record_completion(job.id)
+            self.queue.ack(job.id)
+        except ChargeError:
+            # Permanent error — do not retry forever with poison messages.
+            self.queue.nack(job.id)
+        except Exception:
+            # Transient error — let the queue redeliver; safe because the
+            # idempotency record makes repeated attempts benign.
+            self.queue.nack(job.id)
+
+        return True
+
+    def _charge_with_retry(self, job: Job) -> str:
+        attempt = 0
+        while True:
+            try:
+                return self.gateway.charge(job.customer_id, job.amount_cents)
+            except Exception as e:
+                attempt += 1
+                if attempt >= self.max_attempts:
+                    raise ChargeError(str(e)) from e
+                import time
+
+                time.sleep(0.1 * (2**attempt) + (attempt * 0.05))  # backoff + jitter
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The job's queue message id. It is assigned by the queue on delivery and identifies the logical charging operation across retries."
+          location: "worker.py:55"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is recorded in the IdempotencyStore. The fsync in record_completion flushes data before the atomic rename makes it visible."
+          location: "worker.py:36-40"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The customer was charged but the idempotency record is absent. The next delivery would charge again — a known, accepted risk window."
+          location: "worker.py:57"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, if the queue redelivers before the first worker records completion. The atomic rename prevents partial, torn state but not the race window."
+          location: "worker.py:57"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, the tmp path uses self.data_dir, the same directory as the target, so os.replace is a rename, not a cross-filesystem copy."
+          location: "worker.py:33"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes — f.flush() and os.fsync() are called before os.replace, making the content durable in the page cache and on disk."
+          location: "worker.py:37-38"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "It remains as a leftover hidden dotfile. The next successful write uses a fresh uuid name, so stale temp files never collide."
+          location: "worker.py:33"
+        - question: "Can two workers both rename over the target?"
+          answer: "Yes, oversubscription can cause both to write. The last rename wins with fully valid, complete content — never a torn state."
+          location: "worker.py:38"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The shared state is the idempotency marker file per job. It is mutated by record_completion, visible to all workers after rename."
+          location: "worker.py:27-40"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No — check (exists) and write (rename) are separate operations. A worker can read false, write, while another also reads false."
+          location: "worker.py:55"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes, both can see no marker file and both attempt to charge. The system relies on gateway-side idempotency or accepts the rare double-charge."
+          location: "worker.py:55-58"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Both workers charge the customer, then try to write the marker. The markers are complete but idempotency fails — a double charge."
+          location: "worker.py:55-58"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The idempotency store detects the repeated job id and acknowledges it, skipping the charge entirely — repetition is benign."
+          location: "worker.py:55-57"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Max 3 attempts per delivery. After the last, a ChargeError is raised, the job is nacked, and the queue decides poison handling."
+          location: "worker.py:46-48"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff (0.1 * 2^attempt) plus linear jitter (attempt * 0.05 seconds), preventing lockstep retry storms."
+          location: "worker.py:67"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per attempt — each delivery gets its own max_attempts budget. The idempotency record prevents cross-delivery double-charging."
+          location: "worker.py:46"
+      unanswered: []
+  not_applied: []
+```
