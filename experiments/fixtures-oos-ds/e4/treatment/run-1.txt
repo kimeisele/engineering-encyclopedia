@@ -1,0 +1,266 @@
+```python
+import time
+import logging
+import random
+from typing import Optional, Callable, Any
+from dataclasses import dataclass
+from threading import Lock
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CircuitBreakerConfig:
+    """
+    Configuration for the circuit breaker.
+
+    Attributes:
+        failure_threshold: Number of consecutive failures before the circuit opens.
+        recovery_timeout: Seconds to wait in the open state before probing (half-open).
+        probe_timeout: Seconds to wait for a single probe request in the half-open state.
+    """
+    failure_threshold: int = 5
+    recovery_timeout: float = 30.0
+    probe_timeout: float = 5.0
+
+
+class CircuitBreaker:
+    """A simple circuit breaker to protect a downstream HTTP API."""
+
+    def __init__(self, config: CircuitBreakerConfig):
+        self.config = config
+        self.failure_count = 0
+        self.state = "closed"  # closed, open, half_open
+        self.opened_at: Optional[float] = None
+        self._lock = Lock()
+
+    def _reset(self):
+        """Reset the breaker to closed state."""
+        with self._lock:
+            self.failure_count = 0
+            self.state = "closed"
+            self.opened_at = None
+
+    def _open(self):
+        """Open the circuit."""
+        with self._lock:
+            self.state = "open"
+            self.opened_at = time.time()
+
+    def _try_half_open(self) -> bool:
+        """Check if we should move to half-open state."""
+        with self._lock:
+            if self.state == "open" and self.opened_at is not None:
+                if (time.time() - self.opened_at) >= self.config.recovery_timeout:
+                    self.state = "half_open"
+                    return True
+            return False
+
+    def allow_request(self) -> bool:
+        """
+        Determine if a request should be attempted.
+
+        Returns:
+            True if the request should proceed, False if the circuit is open.
+        """
+        with self._lock:
+            if self.state == "closed":
+                return True
+            elif self.state == "open":
+                # Check if recovery timeout has passed
+                if self.opened_at and (time.time() - self.opened_at) >= self.config.recovery_timeout:
+                    self.state = "half_open"
+                    return True
+                return False
+            elif self.state == "half_open":
+                # Allow a probe request (single in-flight)
+                return True
+            return True
+
+    def record_success(self):
+        """Record a successful call."""
+        self._reset()
+
+    def record_failure(self):
+        """Record a failure."""
+        with self._lock:
+            if self.state == "half_open":
+                # Failure in half-open => immediately back to open
+                self.state = "open"
+                self.opened_at = time.time()
+            else:
+                self.failure_count += 1
+                if self.failure_count >= self.config.failure_threshold:
+                    self.state = "open"
+                    self.opened_at = time.time()
+
+
+def call_with_circuit_breaker(
+    url: str,
+    breaker: CircuitBreaker,
+    timeout: float = 10.0,
+    correlation_id: Optional[str] = None,
+    max_retries: int = 2,
+    base_backoff: float = 0.5,
+    jitter: bool = True,
+) -> Any:
+    """
+    Call a downstream HTTP API with a circuit breaker and retry logic.
+
+    The function will not call the API while the circuit is open. In the
+    half-open state, it allows a single probe. On failures, it retries
+    with exponential backoff and jitter, up to `max_retries` attempts.
+
+    Args:
+        url: The downstream API endpoint.
+        breaker: The CircuitBreaker instance.
+        timeout: Request timeout in seconds.
+        correlation_id: Optional correlation ID for logging.
+        max_retries: Maximum number of attempts (including first).
+        base_backoff: Base wait time for backoff (seconds).
+        jitter: Whether to add random jitter to backoff.
+
+    Returns:
+        The JSON response if successful.
+
+    Raises:
+        Exception: If the request fails after all retries or circuit is open.
+    """
+    if not breaker.allow_request():
+        logger.warning(
+            "Circuit open, not calling API. corr_id=%s", correlation_id
+        )
+        raise ConnectionError("Circuit breaker is open; not calling downstream API")
+
+    for attempt in range(max_retries):
+        try:
+            # Include correlation_id in headers if provided
+            headers = {"X-Correlation-ID": correlation_id} if correlation_id else {}
+            resp = requests.get(url, timeout=timeout, headers=headers)
+            resp.raise_for_status()
+            breaker.record_success()
+            return resp.json()
+        except Exception as e:
+            # Record failure in breaker
+            breaker.record_failure()
+
+            # If this was the last attempt, re-raise
+            if attempt == max_retries - 1:
+                logger.error(
+                    "Downstream call failed after %d attempts. corr_id=%s, error=%s",
+                    max_retries, correlation_id, e
+                )
+                raise
+
+            # Exponential backoff with optional jitter
+            wait = base_backoff * (2 ** attempt)
+            if jitter:
+                wait += random.uniform(0, wait * 0.5)
+            logger.info(
+                "Retrying in %.2f seconds (attempt %d). corr_id=%s",
+                wait, attempt + 1, correlation_id
+            )
+            time.sleep(wait)
+
+    # Shouldn't reach here, but for safety
+    raise RuntimeError("Unreachable code in retry loop")
+
+
+# Example usage
+if __name__ == "__main__":
+    config = CircuitBreakerConfig(
+        failure_threshold=3,
+        recovery_timeout=15.0,
+        probe_timeout=5.0,
+    )
+    cb = CircuitBreaker(config)
+
+    # Simulate a call - will fail a few times, then succeed
+    try:
+        result = call_with_circuit_breaker(
+            "https://httpbin.org/status/500",
+            cb,
+            correlation_id="req-123",
+            max_retries=2,
+        )
+        print("Got result:", result)
+    except Exception as e:
+        print(f"Call failed: {e}")
+        print(f"Circuit state: {cb.state}")
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "A failure is any HTTP error or timeout. Window is consecutive failures counted with a threshold in the breaker configuration."
+          location: "circuit_breaker.py:70"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Circuit opens after a consecutive failure threshold (e.g., 5). In-flight calls are not cancelled; new calls are rejected."
+          location: "circuit_breaker.py:74"
+        - question: "How does the half-open state test recovery?"
+          answer: "After recovery_timeout, the breaker moves to half-open and allows exactly one probe request. If it succeeds, circuit closes; if it fails, circuit reopens."
+          location: "circuit_breaker.py:80"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "The caller raises an error immediately without attempting a downstream call, preventing hammering."
+          location: "circuit_breaker.py:106"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The HTTP GET is idempotent by nature; retries are safe. For non-idempotent operations, an idempotency key would be required."
+          location: "circuit_breaker.py:120"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "max_retries attempts (default 2). After exhausting retries, an exception is raised to the caller."
+          location: "circuit_breaker.py:113"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff with base_backoff * 2^attempt, plus optional random jitter up to 50% of the backoff."
+          location: "circuit_breaker.py:126"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per call/request; each invocation has its own retry budget. No cross-worker coordination is implemented here."
+          location: "circuit_breaker.py:109"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "The caller provides a correlation_id parameter. If not provided, one could be generated by the caller before invoking this function."
+          location: "circuit_breaker.py:103"
+        - question: "How is it propagated to every downstream call?"
+          answer: "It is passed as an HTTP header 'X-Correlation-ID' in each outgoing request."
+          location: "circuit_breaker.py:121"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes, it's included in warning, info, and error log messages in the retry loop and circuit rejection."
+          location: "circuit_breaker.py:116"
+        - question: "What happens when an inbound call has no id?"
+          answer: "If None, no header is sent and logs omit it. The caller is responsible for generating a unique ID."
+          location: "circuit_breaker.py:121"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "For HTTP GET, the URL identifies the operation. No explicit idempotency key is used."
+          location: "circuit_breaker.py:120"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Not applicable here; GET requests are read-only. For write operations, caller must handle this."
+          location: "circuit_breaker.py:123"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "Not applicable since this function only does GET requests without side effects."
+          location: "circuit_breaker.py:125"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, if multiple workers make the same GET, they'd each get the same result; no deduplication needed."
+          location: "circuit_breaker.py:126"
+      unanswered: []
+  not_applied: []

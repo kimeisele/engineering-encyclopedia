@@ -1,0 +1,213 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handler design that allows operators to trace a single request as it flows through two services. This implementation includes correlation IDs, structured logging, and error propagation.
+
+## Key Components
+
+1. **Correlation ID**: A unique identifier that follows the request across both services
+2. **Structured Logging**: Consistent log format with request context
+3. **Error Propagation**: Preserving context when errors cross service boundaries
+4. **Span Tracking**: For distributed tracing (optional)
+
+## Implementation (Python Example)
+
+```python
+import logging
+import uuid
+import json
+from functools import wraps
+from typing import Optional, Dict, Any
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("cross_service_tracer")
+
+class CrossServiceError(Exception):
+    """Base exception for cross-service errors with context preservation"""
+    def __init__(self, message: str, original_exception: Optional[Exception] = None, context: Optional[Dict] = None):
+        self.message = message
+        self.original_exception = original_exception
+        self.context = context or {}
+        super().__init__(message)
+
+    def to_dict(self) -> Dict:
+        """Convert error to serializable dict for logging/propagation"""
+        return {
+            "error": self.message,
+            "original_exception": str(self.original_exception) if self.original_exception else None,
+            "context": self.context
+        }
+
+def generate_correlation_id() -> str:
+    """Generate a unique correlation ID for request tracing"""
+    return str(uuid.uuid4())
+
+def log_with_context(correlation_id: str, service_name: str, **extra_context):
+    """Decorator to add correlation context to all logs"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Add context to thread-local storage or logging context
+            logger_with_context = logger.bind(
+                correlation_id=correlation_id,
+                service=service_name,
+                **extra_context
+            )
+
+            # Log entry
+            logger_with_context.info(f"Entering {func.__name__}")
+
+            try:
+                result = func(*args, **kwargs)
+                logger_with_context.info(f"Exiting {func.__name__} successfully")
+                return result
+            except Exception as e:
+                logger_with_context.error(f"Error in {func.__name__}: {str(e)}", extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "stack_trace": str(e.__traceback__)
+                })
+                raise
+        return wrapper
+    return decorator
+
+class CrossServiceRequestTracer:
+    """Handles tracing of requests across two services"""
+
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.correlation_id = generate_correlation_id()
+
+    def start_request(self, initial_data: Optional[Dict] = None) -> Dict:
+        """Initialize tracing for a new request"""
+        context = {
+            "correlation_id": self.correlation_id,
+            "service": self.service_name,
+            "timestamp": datetime.utcnow().isoformat(),
+            "initial_data": initial_data or {}
+        }
+        logger.info("Starting cross-service request", extra=context)
+        return context
+
+    def log_service_interaction(self, service: str, operation: str, status: str, details: Optional[Dict] = None):
+        """Log an interaction with another service"""
+        log_data = {
+            "correlation_id": self.correlation_id,
+            "from_service": self.service_name,
+            "to_service": service,
+            "operation": operation,
+            "status": status,
+            "timestamp": datetime.utcnow().isoformat(),
+            **(details or {})
+        }
+        logger.info(f"Service interaction: {operation}", extra=log_data)
+
+    def handle_error(self, error: Exception, context: Optional[Dict] = None) -> CrossServiceError:
+        """Handle and wrap errors with tracing context"""
+        error_context = {
+            "correlation_id": self.correlation_id,
+            "service": self.service_name,
+            **(context or {})
+        }
+
+        if isinstance(error, CrossServiceError):
+            # Already has context, just add our service info
+            error.context.update(error_context)
+            return error
+
+        return CrossServiceError(
+            message=str(error),
+            original_exception=error,
+            context=error_context
+        )
+
+    def propagate_error(self, error: Exception) -> None:
+        """Propagate error to the other service with context"""
+        if isinstance(error, CrossServiceError):
+            # Log the full error context
+            logger.error("Propagating error to other service", extra=error.to_dict())
+            # Here you would typically send this to the other service
+            # via your inter-service communication mechanism
+        else:
+            logger.error("Unexpected error occurred", extra={
+                "error": str(error),
+                "error_type": type(error).__name__,
+                "correlation_id": self.correlation_id,
+                "service": self.service_name
+            })
+```
+
+## Usage Example
+
+```python
+# Service A
+def service_a_request_handler(request_data):
+    tracer = CrossServiceRequestTracer("ServiceA")
+    tracer.start_request(request_data)
+
+    try:
+        # Do some work
+        result = process_request(request_data)
+
+        # Call Service B
+        tracer.log_service_interaction("ServiceB", "process_data", "started")
+        service_b_response = call_service_b(result)
+        tracer.log_service_interaction("ServiceB", "process_data", "completed")
+
+        return {"status": "success", "data": service_b_response}
+
+    except Exception as e:
+        error = tracer.handle_error(e, {"request_data": request_data})
+        tracer.propagate_error(error)
+        return {"status": "error", "message": "Request failed"}
+
+# Service B
+@log_with_context(correlation_id, "ServiceB")
+def service_b_processor(data):
+    tracer = CrossServiceRequestTracer("ServiceB")
+    tracer.start_request(data)
+
+    try:
+        # Process the data
+        processed = process_data(data)
+        return {"status": "success", "result": processed}
+    except Exception as e:
+        error = tracer.handle_error(e)
+        raise error  # Will be caught by the caller
+```
+
+## Log Analysis
+
+Operators can search logs using the correlation ID to see the complete request flow:
+
+```
+# Service A logs
+2023-11-15 10:00:00 - cross_service_tracer - INFO - Starting cross-service request - {"correlation_id": "abc-123", "service": "ServiceA", ...}
+
+# Service B logs (same correlation ID)
+2023-11-15 10:00:01 - cross_service_tracer - INFO - Service interaction: process_data - {"correlation_id": "abc-123", "from_service": "ServiceA", "to_service": "ServiceB", ...}
+
+# Error in Service B
+2023-11-15 10:00:02 - cross_service_tracer - ERROR - Error in service_b_processor - {"correlation_id": "abc-123", "error": "...", ...}
+
+# Propagated error in Service A
+2023-11-15 10:00:02 - cross_service_tracer - ERROR - Propagating error to other service - {"correlation_id": "abc-123", "error": "...", "original_exception": "...", ...}
+```
+
+## Best Practices
+
+1. **Always include correlation ID** in all logs and error messages
+2. **Use structured logging** for easy parsing and querying
+3. **Preserve context** when propagating errors between services
+4. **Standardize error formats** between services
+5. **Include timestamps** for performance analysis
+6. **Log service interactions** explicitly (who called whom for what)
+7. **Consider distributed tracing** (OpenTelemetry, Jaeger) for more advanced scenarios
+
+This approach provides a solid foundation for tracing requests across service boundaries while maintaining good observability for operators.

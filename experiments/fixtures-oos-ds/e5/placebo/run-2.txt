@@ -1,0 +1,191 @@
+```python
+import logging
+import uuid
+from contextvars import ContextVar
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Context variable to carry the trace ID and service hops across async/sync boundaries
+_request_context: ContextVar[dict] = ContextVar("request_context", default={})
+
+
+class RequestContext:
+    """Carries trace ID and service hop information for a single request."""
+
+    def __init__(self, trace_id: Optional[str] = None):
+        self.trace_id = trace_id or str(uuid.uuid4())
+        self.hops: list[str] = []
+
+    def add_hop(self, service: str, step: str):
+        self.hops.append(f"{service}:{step}")
+
+    def to_dict(self) -> dict:
+        return {"trace_id": self.trace_id, "hops": list(self.hops)}
+
+
+def set_request_context(context: RequestContext):
+    _request_context.set(context.to_dict())
+
+
+def get_request_context() -> dict:
+    return _request_context.get()
+
+
+class ServiceError(Exception):
+    """Base error for service-to-service calls with trace context."""
+
+    def __init__(self, message: str, service: str, step: str, cause: Optional[Exception] = None):
+        ctx = get_request_context()
+        trace_id = ctx.get("trace_id", "unknown")
+        hops = ctx.get("hops", [])
+        hops_str = " -> ".join(hops) if hops else "no-hops-yet"
+
+        # Include trace ID and hop path in the message
+        super().__init__(f"[trace={trace_id}] [path={hops_str}] [{service}:{step}] {message}")
+
+        self.service = service
+        self.step = step
+        self.trace_id = trace_id
+        self.hops = hops
+        self.cause = cause
+
+
+def service_call(service_name: str, step_name: str, operation):
+    """Wrapper to add a hop to the request context and catch errors."""
+    ctx = get_request_context()
+    if not ctx:
+        ctx = RequestContext().to_dict()
+        set_request_context(RequestContext(ctx["trace_id"]))
+
+    ctx = get_request_context()
+    ctx["hops"] = ctx.get("hops", []) + [f"{service_name}:{step_name}"]
+    set_request_context(RequestContext(ctx["trace_id"]))
+
+    try:
+        result = operation()
+        return result
+    except Exception as e:
+        raise ServiceError(
+            f"Call to {service_name} failed during {step_name}",
+            service=service_name,
+            step=step_name,
+            cause=e,
+        ) from e
+
+
+# ----- Usage example with two services -----
+
+def service_a_handler(request_id: str):
+    """Simulates Service A processing a request."""
+
+    # Initialize the trace context for this request
+    ctx = RequestContext()
+    set_request_context(ctx)
+    ctx.add_hop("service-a", "entry")
+
+    try:
+        # Call Service B
+        result = service_call(
+            "service-b",
+            "fetch-user-data",
+            lambda: _service_b_call(request_id),
+        )
+        ctx.add_hop("service-a", "after-b-call")
+        return {"status": "ok", "data": result}
+
+    except ServiceError as se:
+        # Handler just re-raises with enhanced context
+        logger.error("Request %s failed: %s", request_id, se)
+        raise
+
+
+def _service_b_call(request_id: str):
+    """Simulates Service B processing."""
+    ctx = get_request_context()
+    ctx["hops"] = ctx.get("hops", []) + ["service-b:business-logic"]
+    set_request_context(RequestContext(ctx["trace_id"]))
+
+    if request_id == "fail":
+        raise ValueError("Simulated failure in Service B")
+
+    return {"user": "alice", "id": request_id}
+
+
+# ----- Top-level error handler for the operator -----
+
+def error_handler(exc: Exception, request_id: str, service_name: str):
+    """
+    Operator-facing error handler that formats the error with full trace context.
+
+    The operator can use trace_id to correlate logs across both services.
+    """
+    ctx = get_request_context()
+    trace_id = ctx.get("trace_id", "unknown")
+    hops = ctx.get("hops", [])
+
+    # Build a structured log entry (JSON-like for log aggregators)
+    error_info = {
+        "request_id": request_id,
+        "trace_id": trace_id,
+        "service": service_name,
+        "hops": hops,
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+        "cause_trace": exc.__cause__.__class__.__name__ if exc.__cause__ else None,
+    }
+
+    # Log at ERROR level with the full structured context
+    logger.error("Request tracing failed", extra=error_info)
+
+    # Human-readable message for the operator
+    return (
+        f"Request {request_id} (trace {trace_id}) failed at {service_name}.\n"
+        f"Hops traversed: {' -> '.join(hops) if hops else 'none'}\n"
+        f"Error: {exc}\n"
+        f"Cause: {exc.__cause__ if exc.__cause__ else 'none'}"
+    )
+
+
+# Demo
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.ERROR)
+
+    # Successful case
+    try:
+        service_a_handler("abc123")
+        print("Success case ran without error.")
+    except Exception as e:
+        print(error_handler(e, "abc123", "service-a"))
+
+    # Failure case
+    try:
+        service_a_handler("fail")
+    except Exception as e:
+        print("\n--- Failure case error handler output ---")
+        print(error_handler(e, "fail", "service-a"))
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — ServiceError includes service name and step, and error_handler logs the full hops path."
+          location: "service_call wrapper at lines 55-70, error_handler at lines 100-120"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — trace_id is included in every error message and log entry, correlating across services."
+          location: "RequestContext.trace_id at line 15, included in ServiceError at line 49"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — only request_id, trace_id, service names, and step names are logged; no payloads or secrets."
+          location: "error_handler at lines 104-110"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Both — context is set before calls via set_request_context, and the wrapping ServiceError captures it at raise time."
+          location: "service_call at lines 57-62, ServiceError.__init__ at lines 40-50"
+      unanswered: []
+  not_applied: []

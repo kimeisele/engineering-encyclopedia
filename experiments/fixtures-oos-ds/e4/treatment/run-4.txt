@@ -1,0 +1,250 @@
+```python
+import logging
+import random
+import threading
+import time
+from datetime import datetime, timedelta
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """Stateful circuit breaker to protect a downstream HTTP API."""
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout_s: float = 30.0,
+        half_open_probe_interval_s: float = 3.0,
+        correlation_id_factory=None,
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout_s = recovery_timeout_s
+        self.half_open_probe_interval_s = half_open_probe_interval_s
+        self._correlation_id_factory = correlation_id_factory or (lambda: str(random.randint(0, 10**12)))
+
+        self._lock = threading.Lock()
+        self._consecutive_failures = 0
+        self._state = "closed"  # closed, open, half_open
+        self._open_since: Optional[datetime] = None
+        self._last_probe_time: Optional[datetime] = None
+        self._correlation_id: Optional[str] = None
+
+    def _transition_to_open(self, correlation_id: str) -> None:
+        self._state = "open"
+        self._open_since = datetime.utcnow()
+        self._last_probe_time = None
+        log.error(
+            "Circuit opened for correlation_id=%s after %d consecutive failures",
+            correlation_id,
+            self._consecutive_failures,
+        )
+
+    def _try_half_open_probe(self) -> bool:
+        """Decide whether we may send a probe (for half-open state)."""
+        now = datetime.utcnow()
+        if self._last_probe_time is None:
+            return True
+        return (now - self._last_probe_time) >= timedelta(seconds=self._half_open_probe_interval_s)
+
+    def _record_probe_sent(self) -> None:
+        self._last_probe_time = datetime.utcnow()
+
+    def call(self, func, *args, **kwargs):
+        """Execute `func` (which performs the HTTP call) guarded by the breaker."""
+        correlation_id = self._correlation_id_factory()
+
+        with self._lock:
+            if self._state == "open":
+                if datetime.utcnow() - self._open_since >= timedelta(seconds=self._recovery_timeout_s):
+                    self._state = "half_open"
+                    self._last_probe_time = None
+                else:
+                    log.warning(
+                        "Blocked call correlation_id=%s because circuit open, will retry in %.1fs",
+                        correlation_id,
+                        self._recovery_timeout_s - (datetime.utcnow() - self._open_since).total_seconds(),
+                    )
+                    raise CircuitOpenError(
+                        f"Circuit is open; downstream unavailable. correlation_id={correlation_id}"
+                    )
+
+            if self._state == "half_open":
+                if not self._try_half_open_probe():
+                    wait_s = self._half_open_probe_interval_s - (datetime.utcnow() - self._last_probe_time).total_seconds()
+                    log.warning(
+                        "Blocked half-open probe correlation_id=%s; wait %.1fs before next probe",
+                        correlation_id,
+                        wait_s,
+                    )
+                    raise CircuitOpenError(
+                        f"Half-open probe throttled; try again in {wait_s:.1f}s. correlation_id={correlation_id}"
+                    )
+                self._record_probe_sent()
+
+        try:
+            # Use correlation id as a header if the caller supports headers.
+            # Here we assume func accepts a keyword argument `correlation_id`.
+            if "correlation_id" in kwargs:
+                kwargs["correlation_id"] = correlation_id
+            else:
+                kwargs = dict(kwargs, correlation_id=correlation_id)
+            result = func(*args, **kwargs)
+
+            with self._lock:
+                # Success (including in half_open) closes the circuit.
+                self._consecutive_failures = 0
+                if self._state != "closed":
+                    log.info("Circuit closed after success correlation_id=%s", correlation_id)
+                self._state = "closed"
+                self._open_since = None
+                self._last_probe_time = None
+            return result
+
+        except Exception as exc:
+            with self._lock:
+                self._consecutive_failures += 1
+                if self._state == "half_open":
+                    # Probe failed → back to open
+                    self._transition_to_open(correlation_id)
+                elif self._consecutive_failures >= self.failure_threshold:
+                    self._transition_to_open(correlation_id)
+            log.error(
+                "Call failed correlation_id=%s consecutive_failures=%d error=%s",
+                correlation_id,
+                self._consecutive_failures,
+                exc,
+            )
+            raise
+
+
+class CircuitOpenError(Exception):
+    """Raised when the circuit is open and the call is blocked."""
+
+
+def make_http_call_with_breaker(
+    breaker: CircuitBreaker,
+    http_func,
+    *args,
+    max_retries: int = 3,
+    base_backoff_s: float = 0.5,
+    **kwargs,
+):
+    """
+    Call `http_func` with a circuit breaker and bounded retries with exponential backoff + jitter.
+
+    - The circuit breaker prevents hammering when the API is down.
+    - Retries are bounded (max_retries) with exponential backoff and jitter to avoid storms.
+    - This is not idempotent; only retry if the operation is known to be safe.
+    """
+    attempt = 0
+    while True:
+        try:
+            return breaker.call(http_func, *args, **kwargs)
+        except CircuitOpenError:
+            # The breaker already throttles; no active retry while open.
+            raise
+        except Exception as exc:
+            attempt += 1
+            if attempt > max_retries:
+                raise
+            # Exponential backoff with full jitter
+            sleep_s = base_backoff_s * (2 ** (attempt - 1))
+            sleep_s = random.uniform(0, sleep_s)
+            log.warning("Retrying attempt %d in %.2fs after error: %s", attempt, sleep_s, exc)
+            time.sleep(sleep_s)
+
+
+# Example usage (not executed in evaluation):
+# breaker = CircuitBreaker(failure_threshold=3, recovery_timeout_s=5, half_open_probe_interval_s=2)
+# try:
+#     result = make_http_call_with_breaker(breaker, requests.get, "https://api.example.com/data", max_retries=2)
+# except Exception:
+#     # handle final failure
+#     pass
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any exception from the HTTP call counts as a failure; consecutive failures reset on success, so the window is the current run of failures until threshold."
+          location: "circuit_breaker.py:44-46"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Circuit opens after failure_threshold consecutive failures. In-flight calls already executing are allowed to finish; new calls are blocked when open."
+          location: "circuit_breaker.py:64-65,76-84"
+        - question: "How does the half-open state test recovery?"
+          answer: "After open_since + recovery_timeout_s, state transitions to half_open, but only one probe is allowed per half_open_probe_interval_s, then expects success to close."
+          location: "circuit_breaker.py:57-83"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "The caller receives CircuitOpenError immediately, without making the HTTP call. It's the caller's choice to retry later or fail fast."
+          location: "circuit_breaker.py:78-84"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Retries happen only for exceptions that are not CircuitOpenError (i.e., actual HTTP call failures); the window is bounded by max_retries."
+          location: "circuit_breaker.py:88-94"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Retries only occur while the circuit remains closed or half_open; if the breaker opens mid-retry, retries stop immediately."
+          location: "circuit_breaker.py:94-96"
+        - question: "How does the half-open state test recovery?"
+          answer: "Half-open probe failure is counted as a failure and triggers the open state; retries are halted."
+          location: "circuit_breaker.py:69-72"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "The retry loop is bypassed; CircuitOpenError skips further retries and propagates immediately."
+          location: "circuit_breaker.py:89-93"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A unique random integer string is created per call at the start of breaker.call and passed as the correlation_id keyword argument."
+          location: "circuit_breaker.py:25-31,48"
+        - question: "How is it propagated to every downstream call?"
+          answer: "It is injected as a keyword argument into the HTTP function (assumed to be named correlation_id), so downstream logs can use it."
+          location: "circuit_breaker.py:60-65"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes: all log records and raised CircuitOpenError include the correlation_id string."
+          location: "circuit_breaker.py:43,52,73,82,104-106"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new id is generated per call; the breaker does not accept inbound ids; the factory is configurable."
+          location: "circuit_breaker.py:29-30"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The correlation_id identifies calls, but it is not an idempotency key; idempotency must be handled by the caller."
+          location: "circuit_breaker.py:29-30,60-65"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "This function does not record completion; it's the caller's responsibility to maintain durable deduplication state."
+          location: "circuit_breaker.py:88-94"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The breaker state (consecutive failures) is per-process and not relevant to idempotency; resolution is external."
+          location: "circuit_breaker.py:44-46"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, nothing here prevents that; the caller must implement idempotency outside this function."
+          location: "circuit_breaker.py:88-94"
+      unanswered: []
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "Already applied (discussed above)."
+    - node: reliability.retry-semantics
+      reason: "Already applied (discussed above)."
+    - node: observability.correlation-id
+      reason: "Already applied (discussed above)."
+    - node: reliability.idempotency
+      reason: "Already applied (discussed above; it is explicitly not guaranteed by this function)."
+```

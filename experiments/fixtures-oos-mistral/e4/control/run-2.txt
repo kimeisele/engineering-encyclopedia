@@ -1,0 +1,137 @@
+# HTTP API Client with Backoff and Circuit Breaker
+
+Here's a robust function that calls a downstream HTTP API with proper handling for when the service is down, implementing both backoff and a circuit breaker pattern:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from functools import wraps
+from threading import Lock
+
+class CircuitBreaker:
+    def __init__(self, max_failures=5, reset_timeout=60):
+        self.max_failures = max_failures
+        self.reset_timeout = reset_timeout
+        self.failures = 0
+        self.last_failure_time = None
+        self.state = "closed"  # closed, open, half-open
+        self.lock = Lock()
+
+    def __call__(self, func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with self.lock:
+                current_time = time.time()
+
+                # Reset if timeout has passed since last failure
+                if self.state == "open" and current_time - self.last_failure_time > self.reset_timeout:
+                    self.state = "half-open"
+                    self.failures = 0
+
+                # If circuit is open, fail fast
+                if self.state == "open":
+                    raise Exception("Circuit breaker is open - service unavailable")
+
+            try:
+                result = func(*args, **kwargs)
+
+                with self.lock:
+                    if self.state == "half-open":
+                        self.state = "closed"
+                        self.failures = 0
+                return result
+
+            except RequestException as e:
+                with self.lock:
+                    self.failures += 1
+                    self.last_failure_time = current_time
+
+                    if self.failures >= self.max_failures:
+                        self.state = "open"
+
+                # Exponential backoff
+                retry_delay = min(2 ** (self.failures - 1), 30)  # Cap at 30 seconds
+                time.sleep(retry_delay)
+
+                # Re-raise the exception
+                raise
+
+        return wrapper
+
+def call_downstream_api(url, method="GET", params=None, data=None, headers=None, timeout=5):
+    """
+    Calls a downstream HTTP API with proper backoff and circuit breaker protection.
+
+    Args:
+        url (str): The API endpoint URL
+        method (str): HTTP method (GET, POST, etc.)
+        params (dict): Query parameters
+        data (dict): Request body data
+        headers (dict): Request headers
+        timeout (int): Request timeout in seconds
+
+    Returns:
+        dict: JSON response from the API
+
+    Raises:
+        Exception: If the API is unavailable or returns an error
+    """
+    @CircuitBreaker(max_failures=3, reset_timeout=30)
+    def _make_request():
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                params=params,
+                json=data,
+                headers=headers,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            # Log the error here if needed
+            raise Exception(f"API request failed: {str(e)}")
+
+    return _make_request()
+```
+
+## Key Features:
+
+1. **Circuit Breaker Pattern**:
+   - Tracks failures and opens the circuit after a threshold
+   - Automatically resets after a timeout period
+   - Prevents hammering a down service
+
+2. **Exponential Backoff**:
+   - Waits progressively longer between retries (1s, 2s, 4s, etc.)
+   - Caps the maximum delay to prevent excessive waiting
+
+3. **Thread Safety**:
+   - Uses locks to safely manage state in multi-threaded environments
+
+4. **Configurable**:
+   - Adjustable failure threshold and reset timeout
+   - Standard HTTP request parameters
+
+## Usage Example:
+
+```python
+try:
+    result = call_downstream_api(
+        url="https://api.example.com/data",
+        method="POST",
+        data={"key": "value"},
+        headers={"Authorization": "Bearer token"}
+    )
+    print("API response:", result)
+except Exception as e:
+    print("Failed to call API:", str(e))
+```
+
+This implementation will:
+- Fail fast when the circuit is open
+- Retry with backoff when the service is temporarily down
+- Automatically recover when the service comes back online
+- Prevent overwhelming a struggling service

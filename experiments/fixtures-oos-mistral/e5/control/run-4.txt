@@ -1,0 +1,309 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request as it flows through two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured logging
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection
+
+## Implementation (Python Example)
+
+```python
+import uuid
+import logging
+from logging.handlers import RotatingFileHandler
+from functools import wraps
+import time
+import json
+from datetime import datetime
+
+# Configure structured logging
+def setup_logging():
+    logger = logging.getLogger('cross_service_tracer')
+    logger.setLevel(logging.INFO)
+
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - '
+        'correlation_id=%(correlation_id)s - '
+        'service=%(service_name)s - '
+        'trace_id=%(trace_id)s - '
+        'message=%(message)s'
+    )
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # File handler (rotating)
+    file_handler = RotatingFileHandler(
+        'service_errors.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+logger = setup_logging()
+
+# Context manager for request tracing
+class RequestTracer:
+    def __init__(self, service_name, correlation_id=None):
+        self.service_name = service_name
+        self.correlation_id = correlation_id or str(uuid.uuid4())
+        self.trace_id = str(uuid.uuid4())
+        self.start_time = None
+
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        duration = time.time() - self.start_time
+        if exc_type:
+            logger.error(
+                f"Request failed after {duration:.2f}s",
+                extra={
+                    'correlation_id': self.correlation_id,
+                    'trace_id': self.trace_id,
+                    'service_name': self.service_name,
+                    'error_type': exc_type.__name__,
+                    'error_message': str(exc_val),
+                    'duration': duration
+                }
+            )
+        else:
+            logger.info(
+                f"Request completed in {duration:.2f}s",
+                extra={
+                    'correlation_id': self.correlation_id,
+                    'trace_id': self.trace_id,
+                    'service_name': self.service_name,
+                    'duration': duration
+                }
+            )
+
+# Decorator for service methods
+def trace_request(service_name):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract correlation_id from headers if present
+            headers = kwargs.get('headers', {})
+            correlation_id = headers.get('X-Correlation-ID', str(uuid.uuid4()))
+
+            with RequestTracer(service_name, correlation_id) as tracer:
+                # Add tracing headers to outgoing requests
+                if 'headers' not in kwargs:
+                    kwargs['headers'] = {}
+                kwargs['headers'].update({
+                    'X-Correlation-ID': tracer.correlation_id,
+                    'X-Trace-ID': tracer.trace_id
+                })
+
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    logger.error(
+                        f"Error in {func.__name__}: {str(e)}",
+                        extra={
+                            'correlation_id': tracer.correlation_id,
+                            'trace_id': tracer.trace_id,
+                            'service_name': service_name,
+                            'error_type': type(e).__name__,
+                            'error_message': str(e)
+                        }
+                    )
+                    raise
+        return wrapper
+    return decorator
+
+# Error handler for service-to-service communication
+class ServiceErrorHandler:
+    def __init__(self, service_name):
+        self.service_name = service_name
+
+    def handle_error(self, error, context):
+        """
+        Centralized error handling that preserves correlation context
+
+        Args:
+            error: The exception that occurred
+            context: Dictionary containing:
+                - correlation_id
+                - trace_id
+                - original_service (where error originated)
+                - request_data (optional)
+        """
+        error_type = type(error).__name__
+        error_message = str(error)
+
+        # Log the error with full context
+        logger.error(
+            f"Service error: {error_type} - {error_message}",
+            extra={
+                'correlation_id': context['correlation_id'],
+                'trace_id': context['trace_id'],
+                'service_name': self.service_name,
+                'original_service': context['original_service'],
+                'error_type': error_type,
+                'error_message': error_message,
+                'request_data': json.dumps(context.get('request_data', {}))
+            }
+        )
+
+        # Determine if we should retry or fail fast
+        if self._should_retry(error):
+            return {
+                'retry': True,
+                'delay': self._calculate_retry_delay(error)
+            }
+        else:
+            return {
+                'retry': False,
+                'error': {
+                    'type': error_type,
+                    'message': error_message,
+                    'context': context
+                }
+            }
+
+    def _should_retry(self, error):
+        """Determine if an operation should be retried"""
+        # Add your retry logic here
+        return False
+
+    def _calculate_retry_delay(self, error):
+        """Calculate delay for retry attempts"""
+        return 1  # seconds
+
+# Example usage in services
+class ServiceA:
+    def __init__(self):
+        self.error_handler = ServiceErrorHandler('ServiceA')
+
+    @trace_request('ServiceA')
+    def make_request_to_service_b(self, data):
+        try:
+            # Simulate making a request to ServiceB
+            headers = {'X-Correlation-ID': data.get('correlation_id')}
+            response = self._call_service_b(data, headers)
+            return response
+        except Exception as e:
+            context = {
+                'correlation_id': data.get('correlation_id'),
+                'trace_id': data.get('trace_id'),
+                'original_service': 'ServiceA',
+                'request_data': data
+            }
+            result = self.error_handler.handle_error(e, context)
+            if result['retry']:
+                # Implement retry logic here
+                pass
+            raise
+
+    def _call_service_b(self, data, headers):
+        # In a real implementation, this would make an HTTP request
+        # For demo, we'll simulate a failure
+        if data.get('should_fail'):
+            raise ConnectionError("ServiceB unavailable")
+        return {"status": "success", "data": "processed"}
+
+class ServiceB:
+    def __init__(self):
+        self.error_handler = ServiceErrorHandler('ServiceB')
+
+    @trace_request('ServiceB')
+    def process_data(self, data):
+        try:
+            # Process the data
+            if data.get('invalid'):
+                raise ValueError("Invalid data format")
+
+            return {"status": "processed", "result": "success"}
+        except Exception as e:
+            context = {
+                'correlation_id': data.get('correlation_id'),
+                'trace_id': data.get('trace_id'),
+                'original_service': 'ServiceB',
+                'request_data': data
+            }
+            result = self.error_handler.handle_error(e, context)
+            if result['retry']:
+                # Implement retry logic here
+                pass
+            raise
+```
+
+## Key Features
+
+1. **Correlation IDs**:
+   - Each request gets a unique correlation ID that flows through both services
+   - Trace IDs help track individual operations within a request
+
+2. **Structured Logging**:
+   - All logs include correlation and trace IDs
+   - Logs are searchable by these IDs to trace requests across services
+   - Includes timing information for performance monitoring
+
+3. **Error Propagation**:
+   - Errors include full context about where they occurred
+   - Original service information is preserved
+   - Request data can be included (with care for sensitive data)
+
+4. **Centralized Error Handling**:
+   - Consistent error handling across both services
+   - Retry logic can be configured centrally
+   - Error metrics can be aggregated
+
+5. **Decorators for Clean Code**:
+   - `@trace_request` decorator handles all the tracing boilerplate
+   - Makes it easy to add tracing to any service method
+
+## Querying Logs for Tracing
+
+With this system in place, operators can:
+
+1. Find all logs for a specific request:
+   ```
+   grep "correlation_id=abc123" service_errors.log
+   ```
+
+2. Follow the flow through both services:
+   ```
+   grep "correlation_id=abc123" service_errors.log | grep -E "ServiceA|ServiceB"
+   ```
+
+3. Find slow requests:
+   ```
+   grep "Request completed" service_errors.log | awk '{print $10}' | sort -n
+   ```
+
+4. Find all errors for a correlation ID:
+   ```
+   grep "correlation_id=abc123" service_errors.log | grep "levelname=ERROR"
+   ```
+
+## Deployment Considerations
+
+1. **Log Aggregation**: Consider using ELK stack, Splunk, or similar to aggregate logs from both services.
+
+2. **Metrics**: Add metrics collection for:
+   - Request counts
+   - Error rates
+   - Processing times
+   - Retry counts
+
+3. **Distributed Tracing**: For more advanced tracing, consider integrating with OpenTelemetry or Jaeger.
+
+4. **Security**: Be careful with logging sensitive data. Consider:
+   - Redacting PII
+   - Limiting log retention
+   - Using log masking
+
+This implementation provides a solid foundation for tracing requests across two services while maintaining good operational visibility.

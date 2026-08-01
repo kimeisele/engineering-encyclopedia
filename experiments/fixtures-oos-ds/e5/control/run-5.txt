@@ -1,0 +1,397 @@
+Here's a comprehensive error handler with request tracing across two services:
+
+```python
+import json
+import logging
+import uuid
+import traceback
+from datetime import datetime
+from functools import wraps
+from typing import Optional, Dict, Any
+
+class RequestTracer:
+    """Centralized request tracing and error handling for multi-service operations"""
+    
+    def __init__(self, service_name: str, log_level: str = "INFO"):
+        self.service_name = service_name
+        self.logger = self._setup_logger(log_level)
+        self.active_requests = {}  # For real-time tracking
+        
+    def _setup_logger(self, level: str) -> logging.Logger:
+        """Configure structured logging with JSON format"""
+        logger = logging.getLogger(f"request_router.{self.service_name}")
+        logger.setLevel(getattr(logging, level))
+        
+        # JSON formatter for structured logs
+        class JSONFormatter(logging.Formatter):
+            def format(self, record):
+                log_entry = {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "service": self.service_name,
+                    "level": record.levelname,
+                    "message": record.getMessage()
+                }
+                if hasattr(record, 'request_data'):
+                    log_entry.update(record.request_data)
+                if record.exc_info:
+                    log_entry["exception"] = {
+                        "type": record.exc_info[0].__name__,
+                        "message": str(record.exc_info[1]),
+                        "traceback": traceback.format_exc()
+                    }
+                return json.dumps(log_entry)
+        
+        formatter = JSONFormatter()
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        # File handler (optional, for persistent logs)
+        file_handler = logging.FileHandler(f"request_trace_{self.service_name}.log")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        return logger
+    
+    def create_request_id(self) -> str:
+        """Generate unique request ID for tracing"""
+        return str(uuid.uuid4())
+    
+    def start_request(self, request_data: Dict[str, Any]) -> str:
+        """Initialize a new request trace"""
+        request_id = self.create_request_id()
+        trace_data = {
+            "request_id": request_id,
+            "service": self.service_name,
+            "status": "STARTED",
+            "started_at": datetime.utcnow().isoformat(),
+            "request_data": request_data
+        }
+        self.active_requests[request_id] = trace_data
+        
+        self.logger.info(
+            f"Request started: {request_id}",
+            extra={"request_data": trace_data}
+        )
+        return request_id
+    
+    def update_trace(self, request_id: str, **kwargs):
+        """Update trace information for a request"""
+        if request_id in self.active_requests:
+            self.active_requests[request_id].update(kwargs)
+            
+            self.logger.debug(
+                f"Trace updated for {request_id}",
+                extra={"request_data": self.active_requests[request_id]}
+            )
+    
+    def end_request(self, request_id: str, status: str = "COMPLETED", response: Optional[Dict] = None):
+        """Mark request as complete"""
+        if request_id in self.active_requests:
+            trace_data = self.active_requests.pop(request_id)
+            trace_data["status"] = status
+            trace_data["ended_at"] = datetime.utcnow().isoformat()
+            trace_data["duration_ms"] = self._calculate_duration(
+                trace_data.get("started_at"), trace_data["ended_at"]
+            )
+            if response:
+                trace_data["response"] = response
+            
+            self.logger.info(
+                f"Request completed: {request_id}",
+                extra={"request_data": trace_data}
+            )
+
+def error_handler_decorator(tracer: RequestTracer):
+    """Decorator factory for adding error handling to service methods"""
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            request_id = kwargs.get('request_id', tracer.create_request_id())
+            
+            try:
+                tracer.logger.debug(
+                    f"Executing {func.__name__} for request {request_id}",
+                    extra={"request_data": {"request_id": request_id, "function": func.__name__}}
+                )
+                
+                result = func(*args, **kwargs)
+                tracer.update_trace(
+                    request_id,
+                    status="SUCCESS",
+                    function=func.__name__
+                )
+                return result
+                
+            except ServiceA_Error as e:
+                tracer.logger.error(
+                    f"Service A error: {str(e)}",
+                    exc_info=True,
+                    extra={"request_data": {
+                        "request_id": request_id,
+                        "function": func.__name__,
+                        "error_type": "SERVICE_A_ERROR",
+                        "error_code": e.error_code
+                    }}
+                )
+                raise
+                
+            except ServiceB_Error as e:
+                tracer.logger.error(
+                    f"Service B error: {str(e)}",
+                    exc_info=True,
+                    extra={"request_data": {
+                        "request_id": request_id,
+                        "function": func.__name__,
+                        "error_type": "SERVICE_B_ERROR",
+                        "error_code": e.error_code
+                    }}
+                )
+                raise
+                
+            except TimeoutError as e:
+                tracer.logger.error(
+                    f"Timeout while processing {func.__name__}",
+                    exc_info=True,
+                    extra={"request_data": {
+                        "request_id": request_id,
+                        "function": func.__name__,
+                        "error_type": "TIMEOUT"
+                    }}
+                )
+                raise
+                
+            except Exception as e:
+                tracer.logger.error(
+                    f"Unexpected error in {func.__name__}: {str(e)}",
+                    exc_info=True,
+                    extra={"request_data": {
+                        "request_id": request_id,
+                        "function": func.__name__,
+                        "error_type": "UNEXPECTED_ERROR"
+                    }}
+                )
+                raise
+                
+        return wrapper
+    return decorator
+
+# Example service classes
+class ServiceA_Error(Exception):
+    def __init__(self, message, error_code="SVC_A_ERROR"):
+        self.error_code = error_code
+        super().__init__(message)
+
+class ServiceB_Error(Exception):
+    def __init__(self, message, error_code="SVC_B_ERROR"):
+        self.error_code = error_code
+        super().__init__(message)
+
+# Concrete implementation
+class TwoServiceCoordinator:
+    """Manages orchestration between Service A and Service B with tracing"""
+    
+    def __init__(self):
+        self.tracer_a = RequestTracer("Service_A")
+        self.tracer_b = RequestTracer("Service_B")
+        self.coordinator_tracer = RequestTracer("Coordinator")
+        
+    @error_handler_decorator
+    def execute_multi_service_request(self, request_data: Dict[str, Any], request_id: Optional[str] = None):
+        """High-level orchestration method that coordinates both services"""
+        
+        # Start the overall request
+        request_id = self.coordinator_tracer.start_request(request_data)
+        service_a_id = None
+        service_b_id = None
+        
+        try:
+            self.coordinator_tracer.logger.info(
+                f"Starting multi-service execution: {request_id}",
+                extra={"request_data": {"request_id": request_id, "payload": request_data}}
+            )
+            
+            # Step 1: Call Service A
+            self.coordinator_tracer.update_trace(
+                request_id,
+                stage="SERVICE_A_STARTED",
+                status="IN_PROGRESS"
+            )
+            
+            service_a_id = self.tracer_a.start_request({
+                "correlation_id": request_id,
+                "original_payload": request_data
+            })
+            
+            service_a_response = self._call_service_a(request_data, request_id)
+            
+            self.tracer_a.end_request(service_a_id, status="COMPLETED", response=service_a_response)
+            self.coordinator_tracer.update_trace(
+                request_id,
+                stage="SERVICE_A_COMPLETED",
+                service_a_response=service_a_response
+            )
+            
+            # Step 2: Call Service B (using data from Service A)
+            self.coordinator_tracer.update_trace(
+                request_id,
+                stage="SERVICE_B_STARTED",
+                status="IN_PROGRESS"
+            )
+            
+            service_b_id = self.tracer_b.start_request({
+                "correlation_id": request_id,
+                "payload_from_a": service_a_response
+            })
+            
+            service_b_response = self._call_service_b(service_a_response, request_id)
+            
+            self.tracer_b.end_request(service_b_id, status="COMPLETED", response=service_b_response)
+            self.coordinator_tracer.update_trace(
+                request_id,
+                stage="SERVICE_B_COMPLETED",
+                service_b_response=service_b_response
+            )
+            
+            # Final response
+            final_response = {
+                "request_id": request_id,
+                "service_a_result": service_a_response,
+                "service_b_result": service_b_response,
+                "status": "SUCCESS"
+            }
+            
+            self.coordinator_tracer.end_request(
+                request_id,
+                status="COMPLETED",
+                response=final_response
+            )
+            
+            return final_response
+            
+        except Exception as e:
+            # Rollback/failure handling
+            self.coordinator_tracer.logger.error(
+                f"Multi-service request failed: {str(e)}",
+                exc_info=True,
+                extra={"request_data": {
+                    "request_id": request_id,
+                    "service_a_id": service_a_id,
+                    "service_b_id": service_b_id,
+                    "error": str(e)
+                }}
+            )
+            
+            # End incomplete traces
+            if service_a_id and service_a_id in self.tracer_a.active_requests:
+                self.tracer_a.end_request(service_a_id, status="FAILED")
+            if service_b_id and service_b_id in self.tracer_b.active_requests:
+                self.tracer_b.end_request(service_b_id, status="FAILED")
+            
+            self.coordinator_tracer.end_request(request_id, status="FAILED")
+            
+            raise
+    
+    def _call_service_a(self, data: Dict, request_id: str) -> Dict:
+        """Simulated Service A call with error handling"""
+        try:
+            # Simulate service A processing
+            if "error" in data.get("trigger", ""):
+                raise ServiceA_Error(
+                    f"Service A failed for {request_id}",
+                    error_code="SVC_A_PROCESSING_ERROR"
+                )
+            
+            result = {"status": "processed", "data": data, "service": "A"}
+            self.tracer_a.update_trace(
+                request_id,
+                status="PROCESSED",
+                result=result
+            )
+            return result
+            
+        except ServiceA_Error as e:
+            self.tracer_a.logger.error(
+                f"Service A error for {request_id}: {e.error_code} - {str(e)}"
+            )
+            raise
+        
+    def _call_service_b(self, data: Dict, request_id: str) -> Dict:
+        """Simulated Service B call with error handling"""
+        try:
+            # Simulate service B processing
+            if "service_b_error" in data.get("data", {}).get("trigger", ""):
+                raise ServiceB_Error(
+                    f"Service B failed for {request_id}",
+                    error_code="SVC_B_VALIDATION_ERROR"
+                )
+            
+            result = {"status": "processed", "data": data, "service": "B"}
+            self.tracer_b.update_trace(
+                request_id,
+                status="PROCESSED",
+                result=result
+            )
+            return result
+            
+        except ServiceB_Error as e:
+            self.tracer_b.logger.error(
+                f"Service B error for {request_id}: {e.error_code} - {str(e)}"
+            )
+            raise
+
+# Simple query interface for operators
+def operator_query(tracer: RequestTracer, request_id: str) -> Dict:
+    """Allow operators to query trace information"""
+    if request_id in tracer.active_requests:
+        return tracer.active_requests[request_id]
+    
+    # In production, you'd query logs/files for completed requests
+    return {"request_id": request_id, "message": "Request not in active memory"}
+
+# Usage example
+if __name__ == "__main__":
+    coordinator = TwoServiceCoordinator()
+    
+    # Normal case
+    try:
+        response = coordinator.execute_multi_service_request({
+            "transaction_id": "TX123",
+            "amount": 100.00,
+            "trigger": "normal_flow"
+        })
+        print(json.dumps(response, indent=2))
+    except Exception as e:
+        print(f"Normal flow error: {e}")
+    
+    # Error case
+    try:
+        response = coordinator.execute_multi_service_request({
+            "transaction_id": "TX456",
+            "amount": 50.00,
+            "trigger": "service_b_error_trigger"
+        })
+    except Exception as e:
+        print(f"Error flow: {e}")
+```
+
+This error handler provides:
+
+1. **Distributed Tracing**: Each request gets a unique `request_id` that propagates across both services
+2. **Comprehensive Logging**: Structured JSON logs with request ID, timestamps, status, and error details
+3. **Operator Visibility**: Operators can trace a request through the complete lifecycle
+4. **Error Correlation**: Errors are correlated with the original request ID and service-specific error codes
+5. **Performance Metrics**: Track request duration and stages completion
+6. **Compensating Actions**: Properly cleans up failed requests to prevent orphaned traces
+
+**Key Features for Operators:**
+
+- Search logs by `request_id` to see the full trace path
+- Query specific service logs for detailed error analysis
+- Real-time monitoring of active requests
+- Correlation between client request, Service A, and Service B activity
+
+The operator can simply search for a `request_id` across all service logs to see the complete flow from start to finish.

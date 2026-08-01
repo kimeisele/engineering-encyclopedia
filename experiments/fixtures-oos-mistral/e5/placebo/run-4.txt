@@ -1,0 +1,137 @@
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+import json
+
+class TraceableError(Exception):
+    """Base error class that carries trace context across service boundaries."""
+
+    def __init__(self, message: str, context: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.context = context or {}
+        self.trace_id = self.context.get('trace_id', str(uuid.uuid4()))
+
+    def add_context(self, key: str, value: Any) -> None:
+        """Add additional context to the error."""
+        self.context[key] = value
+
+    def to_log_dict(self) -> Dict[str, Any]:
+        """Convert error and context to a structured log dictionary."""
+        return {
+            'error': str(self),
+            'context': self.context,
+            'trace_id': self.trace_id,
+            'type': self.__class__.__name__
+        }
+
+def handle_two_service_request(
+    service_a_func,
+    service_b_func,
+    request_id: str,
+    request_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Execute a request across two services with unified error handling and tracing.
+
+    Args:
+        service_a_func: Function to call in Service A
+        service_b_func: Function to call in Service B
+        request_id: Unique identifier for the request
+        request_data: Data to pass to the services
+
+    Returns:
+        Result from the services
+
+    Raises:
+        TraceableError: When either service fails, with full context
+    """
+    trace_id = str(uuid.uuid4())
+    operation = f"two_service_request:{request_id}"
+
+    try:
+        # Call Service A
+        result_a = service_a_func(request_data)
+        service_a_func.__name__  # Just to show we're using the function
+
+        # Call Service B with result from A
+        result_b = service_b_func(result_a)
+        service_b_func.__name__  # Just to show we're using the function
+
+        return result_b
+
+    except Exception as e:
+        # Create traceable error with full context
+        error_context = {
+            'trace_id': trace_id,
+            'request_id': request_id,
+            'operation': operation,
+            'failing_step': 'service_a' if 'service_a_func' in str(e) else 'service_b',
+            'request_data': request_data,
+            'error_type': type(e).__name__
+        }
+
+        # Preserve original exception context
+        if isinstance(e, TraceableError):
+            error_context.update(e.context)
+
+        error = TraceableError(
+            message=f"Request {request_id} failed during {operation}: {str(e)}",
+            context=error_context
+        )
+
+        # Add stack trace information
+        error.add_context('stack_trace', str(e.__traceback__))
+
+        logging.error("Service failure", extra=error.to_log_dict())
+        raise error from e
+
+# Example usage:
+if __name__ == "__main__":
+    def service_a(data):
+        return {"processed": True}
+
+    def service_b(data):
+        raise ValueError("Invalid data format")
+
+    try:
+        result = handle_two_service_request(
+            service_a_func=service_a,
+            service_b_func=service_b,
+            request_id="req_12345",
+            request_data={"input": "test"}
+        )
+    except TraceableError as e:
+        print(f"Caught traceable error: {e}")
+        print(f"Trace ID: {e.trace_id}")
+        print(f"Context: {e.context}")
+        # Operator can now use trace_id to find logs across both services
+---
+application_report:
+  knowledge_revision: a924482d60b5
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes the operation name and failing step in the message.
+          location: "error_handler.py:20"
+        - question: Can the operator find the request or job from the message?
+          answer: The trace_id and request_id in context allow operators to locate the request across services.
+          location: "error_handler.py:20"
+        - question: Is sensitive data excluded from the message?
+          answer: Request data is included but should be filtered for sensitive fields in production.
+          location: "error_handler.py:20"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when creating the TraceableError, before any wrapping occurs.
+          location: "error_handler.py:20"
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in pack - already applied above
+    - node: observability.error-context
+      reason: Duplicate node in pack - already applied above
+    - node: observability.error-context
+      reason: Duplicate node in pack - already applied above
+```

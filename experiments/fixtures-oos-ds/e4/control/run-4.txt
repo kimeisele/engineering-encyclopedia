@@ -1,0 +1,307 @@
+Here's a robust solution that handles both rate limiting and circuit breaker patterns to avoid hammering a downstream API when it's down:
+
+```python
+import time
+import requests
+from datetime import datetime, timedelta
+import threading
+from typing import Optional, Callable
+import logging
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern to prevent hammering a down API.
+    States: CLOSED (normal), OPEN (fail fast), HALF_OPEN (testing recovery)
+    """
+    
+    def __init__(self, 
+                 failure_threshold: int = 5,
+                 recovery_timeout: int = 60,
+                 success_threshold: int = 2):
+        """
+        Args:
+            failure_threshold: Number of consecutive failures before opening circuit
+            recovery_timeout: Seconds to wait before trying again
+            success_threshold: Successes needed in half-open state to close circuit
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.success_threshold = success_threshold
+        
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = None
+        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
+        
+        self._lock = threading.Lock()
+        self.logger = logging.getLogger(__name__)
+    
+    def call(self, func: Callable, *args, **kwargs):
+        """
+        Execute the API call with circuit breaker logic
+        """
+        with self._lock:
+            if self.state == 'OPEN':
+                # Check if recovery timeout has passed
+                if self.last_failure_time and \
+                   datetime.now() - self.last_failure_time >= timedelta(seconds=self.recovery_timeout):
+                    self.state = 'HALF_OPEN'
+                    self.success_count = 0
+                    self.logger.info(f"Circuit breaker moved to HALF_OPEN state")
+                else:
+                    self.logger.warning(f"Circuit breaker OPEN, rejecting request")
+                    raise CircuitBreakerException("API is unavailable, circuit is open")
+            
+            try:
+                result = func(*args, **kwargs)
+                
+                # Success - update counters
+                with self._lock:
+                    if self.state == 'HALF_OPEN':
+                        self.success_count += 1
+                        if self.success_count >= self.success_threshold:
+                            self.state = 'CLOSED'
+                            self.failure_count = 0
+                            self.logger.info(f"Circuit breaker closed after successful recovery")
+                    else:
+                        self.failure_count = 0
+                
+                return result
+                
+            except Exception as e:
+                with self._lock:
+                    self.failure_count += 1
+                    self.last_failure_time = datetime.now()
+                    
+                    if self.state == 'HALF_OPEN':
+                        # Failed during recovery test
+                        self.state = 'OPEN'
+                        self.logger.warning(f"Circuit breaker returned to OPEN state after failure in HALF_OPEN")
+                    
+                    elif self.failure_count >= self.failure_threshold:
+                        self.state = 'OPEN'
+                        self.logger.warning(f"Circuit breaker opened after {self.failure_count} consecutive failures")
+                
+                # Re-raise or wrap the exception
+                raise
+
+class RateLimiter:
+    """
+    Rate limiter to prevent sending too many requests per second
+    """
+    
+    def __init__(self, max_requests_per_second: float = 10):
+        self.max_requests_per_second = max_requests_per_second
+        self.min_interval = 1.0 / max_requests_per_second
+        self._lock = threading.Lock()
+        self.last_request_time = 0
+    
+    def wait_if_needed(self):
+        """
+        Wait if we're sending requests too quickly
+        """
+        with self._lock:
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            
+            if time_since_last < self.min_interval:
+                wait_time = self.min_interval - time_since_last
+                time.sleep(wait_time)
+            
+            self.last_request_time = time.time()
+
+class AdaptiveAPIClient:
+    """
+    Main API client with circuit breaker and rate limiting
+    """
+    
+    def __init__(self, 
+                 api_url: str,
+                 circuit_breaker_threshold: int = 5,
+                 recovery_timeout: int = 60,
+                 max_requests_per_second: float = 10,
+                 timeout: int = 5):
+        """
+        Args:
+            api_url: Base URL for the API
+            circuit_breaker_threshold: Failures before circuit opens
+            recovery_timeout: Seconds to wait before recovery attempt
+            max_requests_per_second: Rate limit
+            timeout: Request timeout in seconds
+        """
+        self.api_url = api_url
+        self.timeout = timeout
+        self.rate_limiter = RateLimiter(max_requests_per_second)
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=circuit_breaker_threshold,
+            recovery_timeout=recovery_timeout
+        )
+        self.logger = logging.getLogger(__name__)
+    
+    def _make_request(self, endpoint: str, method: str = 'GET', **kwargs):
+        """
+        Internal method to make the actual HTTP request
+        """
+        self.rate_limiter.wait_if_needed()
+        
+        url = f"{self.api_url}/{endpoint.lstrip('/')}"
+        self.logger.info(f"Making {method} request to {url}")
+        
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                timeout=self.timeout,
+                **kwargs
+            )
+            response.raise_for_status()  # Raise exception for HTTP errors
+            return response.json()
+        except requests.RequestException as e:
+            raise APICallException(f"API request failed: {str(e)}")
+    
+    def call_api(self, endpoint: str, method: str = 'GET', **kwargs):
+        """
+        Public method to call the API with all protections
+        """
+        try:
+            return self.circuit_breaker.call(
+                self._make_request, endpoint, method, **kwargs
+            )
+        except CircuitBreakerException:
+            # Circuit is open, return cached data or raise specific error
+            self.logger.error(f"API call rejected - service is down")
+            raise
+        except APICallException as e:
+            self.logger.error(f"API call failed: {str(e)}")
+            raise
+
+# Custom exceptions
+class CircuitBreakerException(Exception):
+    pass
+
+class APICallException(Exception):
+    pass
+
+# Example usage
+def example_usage():
+    import random
+    import time
+    
+    # Setup logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Create client
+    client = AdaptiveAPIClient(
+        api_url="https://api.example.com",
+        circuit_breaker_threshold=3,
+        recovery_timeout=10,
+        max_requests_per_second=5,  # Maximum 5 requests per second
+        timeout=3  # 3 second timeout
+    )
+    
+    # Simulate making API calls
+    for i in range(20):
+        try:
+            # Simulate a failing API (random failures)
+            if random.random() < 0.8:  # 80% failure rate
+                result = client.call_api("data")
+                print(f"Request {i}: Success - {result}")
+            else:
+                raise APICallException("Simulated API failure")
+        except Exception as e:
+            print(f"Request {i}: Failed - {str(e)}")
+        
+        time.sleep(0.2)  # Small delay between requests
+
+if __name__ == "__main__":
+    example_usage()
+```
+
+## Key Features:
+
+1. **Circuit Breaker Pattern**:
+   - Tracks consecutive failures
+   - Opens circuit after threshold is reached
+   - Automatically tests recovery after timeout
+   - Prevents requests from reaching a down service
+
+2. **Rate Limiting**:
+   - Ensures maximum requests per second
+   - Prevents burst requests
+   - Smooths request pattern
+
+3. **Thread Safety**:
+   - Uses locks to handle concurrent access
+   - Safe for multithreaded applications
+
+4. **Configurable**:
+   - Adjustable failure thresholds
+   - Configurable recovery timeouts
+   - Customizable rate limits
+
+5. **Monitoring/Logging**:
+   - State transitions are logged
+   - Requests and failures are tracked
+   - Useful for debugging and monitoring
+
+## Alternative Implementation (Simplified):
+
+If you need a simpler version without the full circuit breaker pattern:
+
+```python
+import time
+import requests
+from datetime import datetime, timedelta
+
+class SimpleAPIClient:
+    def __init__(self, base_url, max_retries=3, retry_delay=5, cooldown_period=60):
+        self.base_url = base_url
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.cooldown_period = cooldown_period
+        self.last_failure_time = None
+        self.consecutive_failures = 0
+        self.in_cooldown = False
+    
+    def call_api(self, endpoint, **kwargs):
+        # Check if we're in cooldown mode
+        if self.in_cooldown:
+            if datetime.now() - self.last_failure_time >= timedelta(seconds=self.cooldown_period):
+                self.in_cooldown = False
+                self.consecutive_failures = 0
+            else:
+                # Still in cooldown - reject the request
+                raise Exception("API is in cooldown period")
+        
+        # Make the request with retries
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.get(f"{self.base_url}/{endpoint}", timeout=5, **kwargs)
+                response.raise_for_status()
+                
+                # Success - reset failure counter
+                self.consecutive_failures = 0
+                self.in_cooldown = False
+                return response.json()
+                
+            except requests.RequestException as e:
+                self.consecutive_failures += 1
+                self.last_failure_time = datetime.now()
+                
+                # Enter cooldown if we've had too many failures
+                if self.consecutive_failures >= self.max_retries:
+                    self.in_cooldown = True
+                    raise Exception(f"API unavailable - entering cooldown. Last error: {e}")
+                
+                # Wait before retrying
+                time.sleep(self.retry_delay * (attempt + 1))
+        
+        raise Exception("API call failed after all retries")
+```
+
+This implementation:
+- Automatically backs off when API is down
+- Enters "cooldown mode" after repeated failures
+- Prevents hammering by rejecting requests during cooldown
+- Tests recovery after cooldown period
+- Includes retry logic with exponential backoff

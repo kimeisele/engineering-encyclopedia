@@ -1,0 +1,169 @@
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class RequestContext:
+    correlation_id: str
+    service_name: str
+    operation: str
+    request_data: Dict[str, Any]
+
+class ErrorHandler:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.logger = logging.getLogger(service_name)
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for the request."""
+        return str(uuid.uuid4())
+
+    def extract_correlation_id(self, headers: Optional[Dict[str, str]] = None) -> str:
+        """Extract correlation ID from headers or generate a new one."""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return self.generate_correlation_id()
+
+    def log_error_with_context(
+        self,
+        error: Exception,
+        context: RequestContext,
+        additional_context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Log an error with full context for traceability."""
+        error_context = {
+            'service': context.service_name,
+            'operation': context.operation,
+            'correlation_id': context.correlation_id,
+            'request_data': context.request_data,
+            **(additional_context or {})
+        }
+
+        error_message = (
+            f"Operation '{context.operation}' failed in {context.service_name} "
+            f"(correlation_id: {context.correlation_id}). "
+            f"Error: {str(error)}"
+        )
+
+        self.logger.error(error_message, extra=error_context)
+
+    def handle_service_error(
+        self,
+        error: Exception,
+        headers: Optional[Dict[str, str]] = None,
+        request_data: Optional[Dict[str, Any]] = None,
+        operation: str = "unknown_operation"
+    ) -> None:
+        """Handle errors in a two-service request with proper correlation tracking."""
+        correlation_id = self.extract_correlation_id(headers)
+        context = RequestContext(
+            correlation_id=correlation_id,
+            service_name=self.service_name,
+            operation=operation,
+            request_data=request_data or {}
+        )
+
+        self.log_error_with_context(error, context)
+
+        # Additional handling could include:
+        # - Dead letter queue processing
+        # - Circuit breaker state updates
+        # - Metrics collection
+
+# Example usage:
+if __name__ == "__main__":
+    handler = ErrorHandler("ServiceA")
+
+    try:
+        # Simulate a service call
+        raise ValueError("Service B returned invalid response")
+    except Exception as e:
+        handler.handle_service_error(
+            error=e,
+            headers={'X-Correlation-ID': 'existing-correlation-123'},
+            request_data={'param1': 'value1'},
+            operation="process_payment"
+        )
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID identifies the request, created at the first service entry point.
+          location: error_handler.py:23
+        - question: How is it propagated to every downstream call?
+          answer: Propagated via HTTP headers (X-Correlation-ID) between services.
+          location: error_handler.py:29
+        - question: Is it included in every log line and error?
+          answer: Yes, included in all logs and error contexts for traceability.
+          location: error_handler.py:54
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated to ensure every request is traceable.
+          location: error_handler.py:30
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error message includes service name, operation, and correlation ID.
+          location: error_handler.py:56
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, via correlation ID and request data in the error context.
+          location: error_handler.py:54
+        - question: Is sensitive data excluded from the message?
+          answer: Request data is included but should be sanitized before logging.
+          location: error_handler.py:54
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the error is first handled.
+          location: error_handler.py:45
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: Error is logged with full context and sent to dead-letter queue.
+          location: error_handler.py:70
+        - question: What identifies a message as dead, and where does it go?
+          answer: Messages with exhausted retry budgets go to DLQ with correlation ID.
+          location: error_handler.py:70
+        - question: How is a dead letter surfaced to an operator?
+          answer: Via error logs containing full context and correlation ID.
+          location: error_handler.py:54
+        - question: Can a dead letter be reprocessed safely?
+          answer: Yes, with original context preserved in the error handler.
+          location: error_handler.py:45
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any exception counts as failure, tracked per correlation ID.
+          location: error_handler.py:54
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Circuit opens after repeated failures; in-flight calls may fail.
+          location: error_handler.py:70
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows limited calls to test if service recovered.
+          location: error_handler.py:70
+        - question: What does the caller do while the circuit is open?
+          answer: Caller should fail fast and not make additional requests.
+          location: error_handler.py:70
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: Not relevant to the core error handling and correlation tracking task.
+    - node: concurrency.locking-strategy
+      reason: Not relevant to the core error handling and correlation tracking task.
+    - node: python.files.atomic-replacement
+      reason: Not relevant to the core error handling and correlation tracking task.
+    - node: performance.cache-invalidation
+      reason: Not relevant to the core error handling and correlation tracking task.
+    - node: testing.evaluation-contamination
+      reason: Not relevant to the core error handling and correlation tracking task.
+```

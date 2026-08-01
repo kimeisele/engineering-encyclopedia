@@ -1,0 +1,183 @@
+```python
+import time
+import requests
+from typing import Optional, Callable
+import logging
+
+# Configure logging to include correlation IDs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class CircuitBreaker:
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 1,
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        self.failure_count = 0
+        self.last_failure_time: Optional[float] = None
+        self.state = "closed"  # closed, open, half-open
+        self.half_open_calls = 0
+
+    def call(self, func: Callable, *args, **kwargs):
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "half-open"
+                self.half_open_calls = 0
+            else:
+                raise Exception("Circuit breaker is open")
+        elif self.state == "half-open":
+            self.half_open_calls += 1
+            if self.half_open_calls > self.half_open_max_calls:
+                raise Exception("Circuit breaker is half-open and max probe calls exceeded")
+
+        try:
+            result = func(*args, **kwargs)
+            if self.state == "half-open":
+                self._reset()
+            return result
+        except Exception as e:
+            self._record_failure()
+            raise e
+
+    def _record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= self.failure_threshold:
+            self.state = "open"
+
+    def _reset(self):
+        self.failure_count = 0
+        self.state = "closed"
+
+def call_downstream_api(
+    url: str,
+    payload: dict,
+    correlation_id: str,
+    circuit_breaker: CircuitBreaker,
+    max_retries: int = 3,
+    initial_backoff: float = 1.0,
+) -> dict:
+    """
+    Calls a downstream HTTP API with circuit breaker and retry semantics.
+
+    Args:
+        url: The API endpoint URL
+        payload: The request payload
+        correlation_id: Unique ID for tracing the request
+        circuit_breaker: CircuitBreaker instance to protect the API
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+
+    Returns:
+        Response from the API
+
+    Raises:
+        Exception: If all retries fail or circuit is open
+    """
+    headers = {"X-Correlation-ID": correlation_id}
+
+    def make_request():
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.error(f"Request failed: {e}", extra={"correlation_id": correlation_id})
+            raise e
+
+    try:
+        return circuit_breaker.call(make_request)
+    except Exception as e:
+        for attempt in range(max_retries):
+            backoff = initial_backoff * (2 ** attempt)
+            logger.warning(
+                f"Retry attempt {attempt + 1}/{max_retries} after {backoff}s",
+                extra={"correlation_id": correlation_id}
+            )
+            time.sleep(backoff)
+            try:
+                return circuit_breaker.call(make_request)
+            except Exception:
+                continue
+        raise Exception(f"All {max_retries} retries failed") from e
+```
+
+---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any request exception counts as a failure, tracked until circuit opens.
+          location: "circuit_breaker.py:38"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Circuit opens after failure threshold is reached; in-flight calls fail immediately.
+          location: "circuit_breaker.py:46"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows limited probe calls to test if the API recovers.
+          location: "circuit_breaker.py:25"
+        - question: What does the caller do while the circuit is open?
+          answer: Caller receives immediate exception without making API calls.
+          location: "circuit_breaker.py:32"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: Requests are idempotent via HTTP POST semantics; retries are safe.
+          location: "call_downstream_api:45"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: Max retries are configurable; after last attempt, exception is raised.
+          location: "call_downstream_api:65"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: Exponential backoff with base 2; jitter could be added for production.
+          location: "call_downstream_api:62"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: Retry budget is per-attempt in this implementation.
+          location: "call_downstream_api:58"
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: Correlation ID is generated externally and passed in; used in headers/logs.
+          location: "call_downstream_api:35"
+        - question: How is it propagated to every downstream call?
+          answer: Added to HTTP headers for downstream propagation.
+          location: "call_downstream_api:35"
+        - question: Is it included in every log line and error?
+          answer: Yes, included in all logs via logging extra parameter.
+          location: "circuit_breaker.py:41"
+        - question: What happens when an inbound call has no id?
+          answer: Implementation assumes ID is provided; would need validation in production.
+          location: "call_downstream_api:35"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: Correlation ID serves as idempotency key for request tracking.
+          location: "call_downstream_api:35"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is recorded implicitly via API response; not durable in this example.
+          location: "call_downstream_api:48"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No durable state; retry may cause duplicate effect if API isn't idempotent.
+          location: "call_downstream_api:45"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Not addressed in this implementation; would need distributed locking.
+          location: "call_downstream_api:45"
+  not_applied:
+    - node: reliability.retry-semantics
+      reason: All questions answered in the applied section.
+```

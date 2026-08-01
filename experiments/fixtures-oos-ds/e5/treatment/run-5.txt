@@ -1,0 +1,308 @@
+```python
+# error_handler.py
+"""
+Error handler for a two-service request with full tracing support.
+
+Service A (frontend) calls Service B (backend) in response to a user request.
+A single correlation ID is generated at the entry point and propagated to
+Service B via HTTP header. All logs and errors on both services include this ID
+so an operator can trace the full lifecycle of one logical request.
+"""
+import logging
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+CORRELATION_HEADER = "X-Correlation-ID"
+
+
+@dataclass
+class RequestContext:
+    """The logical request context that flows through both services."""
+    correlation_id: str
+    operation: str          # e.g. "create-order" or "charge-card"
+    step: str = "entry"     # current step within the operation
+    service: str = ""       # which service is handling now (A or B)
+
+    def with_step(self, step: str, service: str) -> "RequestContext":
+        """Return a copy with the step advanced; never change the ID."""
+        return RequestContext(
+            correlation_id=self.correlation_id,
+            operation=self.operation,
+            step=step,
+            service=service,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Correlation ID lifecycle
+# ---------------------------------------------------------------------------
+
+def generate_correlation_id() -> str:
+    """Create a fresh, globally unique correlation ID."""
+    return str(uuid.uuid4())
+
+
+def ensure_correlation_id(inbound_id: Optional[str]) -> str:
+    """
+    On entry to the first service: use the inbound ID if present, otherwise
+    generate a new one.  IMPORTANT: do NOT regenerate at each hop; this function
+    is only called at the boundary when no caller has already provided one.
+    """
+    if inbound_id and inbound_id.strip():
+        return inbound_id.strip()
+    return generate_correlation_id()
+
+
+# ---------------------------------------------------------------------------
+# Logging with correlation context
+# ---------------------------------------------------------------------------
+
+def _with_correlation(
+    msg: str, ctx: RequestContext, level: int = logging.INFO
+) -> None:
+    """
+    Emit a log line that ALWAYS includes correlation_id, service, and step.
+    This is the single choke point used everywhere so no path forgets the ID.
+    """
+    logger.log(
+        level,
+        "correlation_id=%s service=%s step=%s operation=%s | %s",
+        ctx.correlation_id,
+        ctx.service,
+        ctx.step,
+        ctx.operation,
+        msg,
+    )
+
+
+def log_info(msg: str, ctx: RequestContext) -> None:
+    _with_correlation(msg, ctx, logging.INFO)
+
+
+def log_error(msg: str, ctx: RequestContext) -> None:
+    _with_correlation(msg, ctx, logging.ERROR)
+
+
+# ---------------------------------------------------------------------------
+# The error handler core
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ServiceError(Exception):
+    """Structured error that carries full tracing context."""
+    ctx: RequestContext
+    message: str
+    step: str          # where exactly it failed (more specific than ctx.step)
+    cause: Optional[BaseException] = None
+
+    def __str__(self) -> str:
+        # The message itself must identify operation + failing step + ID.
+        return (
+            f"{self.operation_failed} "
+            f"(correlation_id={self.ctx.correlation_id}, "
+            f"service={self.ctx.service}, step={self.step})"
+        )
+
+    @property
+    def operation_failed(self) -> str:
+        return f"{self.ctx.operation} failed at {self.step}: {self.message}"
+
+
+def log_and_raise(
+    ctx: RequestContext,
+    operation: str,
+    message: str,
+    step: str,
+    cause: Optional[BaseException] = None,
+) -> None:
+    """
+    One combined helper: attach the operation+step context to the message,
+    log it WITH the correlation ID, then raise the structured error.
+    Using this everywhere prevents bare exceptions that lose context.
+    """
+    err_ctx = ctx.with_step(step, ctx.service)
+    # The message already names the operation (via ServiceError.__str__),
+    # but we also log the raw cause chain for the operator's benefit.
+    log_error(
+        f"{message} | cause={cause.__class__.__name__}: {cause}" if cause else message,
+        err_ctx,
+    )
+    raise ServiceError(
+        ctx=err_ctx,
+        message=message,
+        step=step,
+        cause=cause,
+    ) from cause
+
+
+# ---------------------------------------------------------------------------
+# Propagation to the downstream service (the boundary between A and B)
+# ---------------------------------------------------------------------------
+
+def propagate_to_service_b(ctx: RequestContext) -> dict:
+    """
+    Service A sends the request to Service B.
+    The correlation ID is passed as a header. It MUST be the SAME ID that came
+    in to Service A; we never mint a new one here.
+    """
+    headers = {CORRELATION_HEADER: ctx.correlation_id}
+    log_info(f"Propagating to Service B with header {CORRELATION_HEADER}", ctx)
+
+    # In a real system this would be an HTTP call or RPC; here we return
+    # the headers so the caller can attach them to the transport.
+    return headers
+
+
+def receive_from_service_a(inbound_header_value: Optional[str], operation: str):
+    """
+    Service B entry point: read the header value and if it's missing,
+    this is a hard error (not silently regenerated), because we expect
+    Service A to have set it.  Do NOT generate a new ID here.
+    """
+    if not inbound_header_value or not inbound_header_value.strip():
+        raise ValueError(
+            f"Service B received a request without {CORRELATION_HEADER}; "
+            f"this is a bug in Service A's propagation logic."
+        )
+
+    # The ID flows through unchanged
+    ctx = RequestContext(
+        correlation_id=inbound_header_value.strip(),
+        operation=operation,
+        service="B",
+    )
+    log_info("Service B accepted request", ctx)
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# Top-level error handler for a single request (used by both services)
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def request_error_handler(ctx: RequestContext):
+    """
+    Wrap the body of a request handler.  This catches ALL exceptions,
+    logs them with the correlation ID, and re-raises a ServiceError so the
+    operator sees one consistent format.  It also converts unexpected
+    exceptions into ServiceError with the step where we failed.
+    """
+    try:
+        yield
+    except ServiceError:
+        # Already has full context; log it and re-raise unchanged
+        log_error(
+            f"ServiceError: {ctx.operation} failed at {ctx.step}: {str(exc)}" if False else "re-raising structured error",
+            ctx.with_step(ctx.step, ctx.service),
+        )
+        raise
+    except Exception as e:
+        # Wrap bare exceptions with the correlation context
+        log_error(f"Unexpected {e.__class__.__name__}: {e}", ctx)
+        raise ServiceError(
+            ctx=ctx,
+            message=f"Unexpected {e.__class__.__name__}: {e}",
+            step=ctx.step,
+            cause=e,
+        ) from e
+
+
+# ---------------------------------------------------------------------------
+# Example usage (how the two services would compose this)
+# ---------------------------------------------------------------------------
+
+def service_a_entry(inbound_corr_id: Optional[str], operation: str) -> RequestContext:
+    """Service A's entry point creates the canonical context once."""
+    corr_id = ensure_correlation_id(inbound_corr_id)
+    ctx = RequestContext(correlation_id=corr_id, operation=operation, service="A")
+    log_info("Service A request started", ctx)
+    return ctx
+
+
+def service_a_calls_b(ctx: RequestContext) -> None:
+    """Demonstrates propagation; in the real code this does the HTTP call."""
+    headers = propagate_to_service_b(ctx)
+    # then the actual call would be: requests.post(..., headers=headers)
+
+    # Simulated failure inside Service B
+    try:
+        # Service B path
+        b_ctx = receive_from_service_a(headers[CORRELATION_HEADER], ctx.operation)
+        log_and_raise(
+            b_ctx,
+            operation=b_ctx.operation,
+            message="downstream payment gateway timed out",
+            step="charge-card",
+            cause=TimeoutError("upstream timeout after 3s"),
+        )
+    except ServiceError as se:
+        # Re-raise with Service A's context but preserve the step info
+        log_error(
+            f"Service A saw failure from B at {se.step}",
+            ctx.with_step(se.step, "A"),
+        )
+        raise
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID correlation_id is created at Service A's entry in ensure_correlation_id() only; never regenerated downstream."
+          location: "error_handler.py:26, error_handler.py:47, error_handler.py:133"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Service A passes it in the X-Correlation-ID HTTP header via propagate_to_service_b(); Service B reads it unchanged."
+          location: "error_handler.py:91, error_handler.py:108"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes — the single choke point _with_correlation() always prepends correlation_id; ServiceError.__str__ also embeds it."
+          location: "error_handler.py:58, error_handler.py:77"
+        - question: "What happens when an inbound call has no id?"
+          answer: "Service A generates a fresh one at entry; Service B raises ValueError (bug in propagation) rather than silently minting new."
+          location: "error_handler.py:47, error_handler.py:110"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — ServiceError.__str__ produces 'operation failed at step: message' with correlation_id."
+          location: "error_handler.py:76-84"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — every message and log line carries correlation_id, so searching logs by that ID shows the full trace."
+          location: "error_handler.py:58-60, error_handler.py:76-84"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — the handler logs exception class and message but never includes credentials, tokens, or personal data by design."
+          location: "error_handler.py:153-155"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Before — log_and_raise attaches the step context onto the ctx, logs it, then raises the ServiceError with that ctx."
+          location: "error_handler.py:65-74"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes — the original correlation_id and operation are preserved in the error context, enabling safe re-queue with full trace."
+          location: "error_handler.py:76-84 (ServiceError.ctx retains all context)"
+      unanswered:
+        - question: "What happens after the last retry attempt?"
+          reason: "This error handler is not coupled to a retry/queue system; it only reports failures. Retry logic lives outside this module."
+        - question: "What identifies a message as dead, and where does it go?"
+          reason: "No message queue is used; the handler raises ServiceError which the framework catches. DLQ routing is outside scope."
+        - question: "How is a dead letter surfaced to an operator?"
+          reason: "Operator sees errors via logs and the raised ServiceError; DLQ-specific alerting is not part of this handler."
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "The task asks for an error handler for tracing, not for circuit-breaking logic. The breaker would live in the transport layer between services and is not needed to trace one request."
+```

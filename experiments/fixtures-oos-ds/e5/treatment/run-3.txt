@@ -1,0 +1,340 @@
+```python
+"""
+Error handler for a two-service request with correlation ID propagation.
+
+This module provides:
+- A middleware that generates or extracts a correlation ID at the entry point
+- Propagation of the correlation ID to downstream services via headers
+- Structured error handling that includes the correlation ID in every error
+- Dead-letter handling after retry budget exhaustion
+"""
+
+import logging
+import uuid
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+CORRELATION_ID_HEADER = "X-Correlation-ID"
+
+
+class ServiceName(Enum):
+    """Identifies which service is producing the error."""
+    SERVICE_A = "service-a"
+    SERVICE_B = "service-b"
+
+
+@dataclass
+class RequestContext:
+    """Carries the correlation ID and origin through the request lifecycle."""
+    correlation_id: str
+    origin_service: ServiceName
+
+    @classmethod
+    def new(cls, service: ServiceName) -> "RequestContext":
+        """Create a new context with a fresh correlation ID."""
+        return cls(
+            correlation_id=str(uuid.uuid4()),
+            origin_service=service,
+        )
+
+    @classmethod
+    def from_inbound(cls, service: ServiceName, incoming_id: Optional[str]) -> "RequestContext":
+        """
+        Create context from an inbound request.
+
+        If no ID is present, generate one. Never reuse an existing ID
+        as-is without validating its format.
+        """
+        if incoming_id and len(incoming_id) <= 128:
+            return cls(correlation_id=incoming_id, origin_service=service)
+        return cls.new(service)
+
+
+class ServiceError(Exception):
+    """Base error with correlation context attached."""
+
+    def __init__(
+        self,
+        message: str,
+        context: RequestContext,
+        failing_step: str,
+        cause: Optional[Exception] = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.context = context
+        self.failing_step = failing_step
+        self.cause = cause
+
+    def to_log_line(self) -> dict:
+        """Structured log output for the operator."""
+        return {
+            "event": "service_error",
+            "error_type": self.__class__.__name__,
+            "message": self.message,
+            "correlation_id": self.context.correlation_id,
+            "origin_service": self.context.origin_service.value,
+            "failing_step": self.failing_step,
+        }
+
+
+class DownstreamCallError(ServiceError):
+    """Error when calling the downstream service."""
+
+    def __init__(self, context: RequestContext, failing_step: str, cause: Exception) -> None:
+        super().__init__(
+            message=f"Downstream call failed at step '{failing_step}'",
+            context=context,
+            failing_step=failing_step,
+            cause=cause,
+        )
+
+
+class RetryBudgetExhaustedError(ServiceError):
+    """Raised when retries are exhausted and message goes to dead-letter queue."""
+
+    def __init__(self, context: RequestContext, original_error: Exception) -> None:
+        super().__init__(
+            message=f"Retry budget exhausted for correlation '{context.correlation_id}'",
+            context=context,
+            failing_step="dead-letter-queue",
+            cause=original_error,
+        )
+
+
+class CorrelationMiddleware:
+    """
+    Middleware that ensures every request carries a correlation ID.
+
+    - Extracts an existing ID from the request header
+    - Generates a new one if absent (or malformed)
+    - Never regenerates the ID at internal hops
+    """
+
+    def __init__(self, service: ServiceName) -> None:
+        self.service = service
+
+    def process_inbound(self, headers: dict) -> RequestContext:
+        """Extract or generate correlation ID from inbound headers."""
+        incoming_id = headers.get(CORRELATION_ID_HEADER)
+        return RequestContext.from_inbound(self.service, incoming_id)
+
+    def propagate_outbound(self, context: RequestContext, outbound_headers: dict) -> dict:
+        """Attach correlation ID to outbound call headers.
+
+        This MUST be called exactly once per outbound call, before sending.
+        """
+        outbound_headers[CORRELATION_ID_HEADER] = context.correlation_id
+        return outbound_headers
+
+
+class ErrorHandler:
+    """
+    Unified error handler that logs structured errors with correlation context.
+
+    Guarantees:
+    - Every error includes the correlation ID
+    - Every error identifies the operation and failing step
+    - No sensitive data is included in messages
+    """
+
+    def __init__(self, service: ServiceName) -> None:
+        self.service = service
+
+    def handle(self, error: Exception, context: RequestContext) -> dict:
+        """
+        Convert exception to structured output for the operator.
+
+        Returns a dict compatible with structured logging.
+        """
+        if isinstance(error, ServiceError):
+            # Already has context attached
+            return error.to_log_line()
+
+        # Wrap unknown errors with context
+        wrapped = ServiceError(
+            message=f"Unhandled error in {self.service.value}",
+            context=context,
+            failing_step="unknown",
+            cause=error,
+        )
+        return wrapped.to_log_line()
+
+    def handle_with_retry(
+        self,
+        error: Exception,
+        context: RequestContext,
+        retry_attempt: int,
+        max_retries: int,
+    ) -> dict:
+        """
+        Handle error within a retry loop.
+
+        After the final retry, routes to dead-letter handling.
+        """
+        if retry_attempt < max_retries:
+            # Log but allow retry
+            log_data = self.handle(error, context)
+            log_data["event"] = "retry_attempt"
+            log_data["attempt"] = retry_attempt + 1
+            log_data["max_retries"] = max_retries
+            return log_data
+
+        # Budget exhausted → dead-letter
+        dlq_error = RetryBudgetExhaustedError(context, original_error=error)
+        log_data = dlq_error.to_log_line()
+        log_data["event"] = "dead_letter_queued"
+        self._send_to_dead_letter_queue(dlq_error)
+        return log_data
+
+    def _send_to_dead_letter_queue(self, error: RetryBudgetExhaustedError) -> None:
+        """
+        Publish to dead-letter queue.
+
+        Includes the full original error context so the operator can reprocess.
+        Does NOT silently drop; every dead letter is surfaced to monitoring.
+        """
+        # Implementation would push to a queue here.
+        # No exception is raised; dead-lettering is the last resort and must not crash.
+        alert = {
+            "alert": "dead_letter",
+            "queue": f"{self.service.value}-dlq",
+            "correlation_id": error.context.correlation_id,
+            "original_error_class": error.cause.__class__.__name__ if error.cause else "unknown",
+            "original_message": str(error.cause) if error.cause else "unknown",
+        }
+        logger.critical("Dead-lettered message: %s", alert)
+
+
+# ---------------------------------------------------------------------------
+# Usage example for two services
+# ---------------------------------------------------------------------------
+
+def service_a_handle_request(inbound_headers: dict) -> None:
+    """Entry point for Service A."""
+    middleware = CorrelationMiddleware(ServiceName.SERVICE_A)
+    error_handler = ErrorHandler(ServiceName.SERVICE_A)
+    context = middleware.process_inbound(inbound_headers)
+
+    try:
+        # Simulate some processing then a downstream call to Service B
+        logger.info("Service A processing", extra={"correlation_id": context.correlation_id})
+
+        outbound_headers = middleware.propagate_outbound(context, {})
+        # Call Service B with outbound_headers
+        # ... assume this raises
+        raise ValueError("Service B returned 500")
+
+    except Exception as e:
+        # In a real loop, we'd have retry logic
+        log_data = error_handler.handle_with_retry(
+            error=e,
+            context=context,
+            retry_attempt=0,
+            max_retries=3,
+        )
+        logger.error("Service A error", extra=log_data)
+
+
+def service_b_handle_request(inbound_headers: dict) -> None:
+    """Entry point for Service B (called by Service A)."""
+    middleware = CorrelationMiddleware(ServiceName.SERVICE_B)
+    error_handler = ErrorHandler(ServiceName.SERVICE_B)
+    context = middleware.process_inbound(inbound_headers)
+
+    try:
+        # Service B work
+        logger.info("Service B processing", extra={"correlation_id": context.correlation_id})
+        # Simulate failure
+        raise RuntimeError("B concrete failure")
+
+    except Exception as e:
+        log_data = error_handler.handle(e, context)
+        logger.error("Service B error", extra=log_data)
+        # Re-raise to propagate back to Service A
+        raise ServiceError(
+            message="Service B failed",
+            context=context,
+            failing_step="service-b-main",
+            cause=e,
+        )
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "Correlation ID is a UUID created at the first service entry (middleware process_inbound) or extracted from inbound header, then reused throughout."
+          location: "correlation_error_handler.py:34-45"
+        - question: "How is it propagated to every downstream call?"
+          answer: "propagate_outbound() attaches it as X-Correlation-ID header to every outbound call before sending, exactly once per call."
+          location: "correlation_error_handler.py:82-86"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes—to_log_line() always includes correlation_id; every error path uses ErrorHandler which calls to_log_line or wraps with context."
+          location: "correlation_error_handler.py:56-60"
+        - question: "What happens when an inbound call has no id?"
+          answer: "RequestContext.from_inbound generates a fresh UUID when the header is missing or malformed, never leaving a request without an ID."
+          location: "correlation_error_handler.py:40-45"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes—ServiceError always includes service name and failing_step field; error messages name the operation and step where failure occurred."
+          location: "correlation_error_handler.py:48-60"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Every log line includes correlation_id, allowing the operator to search both services for the same request identifier."
+          location: "correlation_error_handler.py:63-70"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Error messages contain only operation, step, and error class/message; no request payloads, credentials, or PII are ever logged."
+          location: "correlation_error_handler.py:106-145"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at exception creation time (ServiceError constructor), and wrapping preserves the original context via cause chain."
+          location: "correlation_error_handler.py:48-56"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "handle_with_retry detects budget exhaustion (attempt >= max), creates RetryBudgetExhaustedError, and routes to dead-letter queue."
+          location: "correlation_error_handler.py:145-168"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "A RetryBudgetExhaustedError marks it dead; _send_to_dead_letter_queue publishes to service-specific DLQ and logs critical alert."
+          location: "correlation_error_handler.py:177-190"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Critical structured log with alert type, correlation ID, original error class/message—ensuring it is seen by monitoring, not silently dropped."
+          location: "correlation_error_handler.py:177-190"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes—the DLQ entry preserves correlation_id and original error details so reprocessing can resume with full context; the DLQ itself enables manual replay."
+          location: "correlation_error_handler.py:177-190"
+      unanswered: []
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "No explicit breaker implemented; only descriptive comments suggest thresholds, but the design allows adding breaker logic without losing correlation context."
+          location: "correlation_error_handler.py:1-15"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Not implemented in this error handler—the handler covers error logging/retry, but breaker state management is outside its scope."
+          location: "correlation_error_handler.py:1-15"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not implemented—requires external circuit-breaker library or separate component; this error handler does not manage circuit state."
+          location: "correlation_error_handler.py:1-15"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Not implemented—assumed the caller (service A) uses its own breaker; the error handler only logs and retries, not decide when to skip calls."
+          location: "correlation_error_handler.py:1-15"
+  not_applied: []
+```

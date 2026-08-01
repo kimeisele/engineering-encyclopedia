@@ -1,0 +1,186 @@
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+# Configure logging to include correlation ID
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class RequestContext:
+    correlation_id: str
+    service_name: str
+    operation: str
+    request_data: Dict[str, Any]
+
+class ErrorHandler:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for the request."""
+        return str(uuid.uuid4())
+
+    def propagate_correlation_id(self, headers: Optional[Dict[str, str]]) -> str:
+        """Extract or generate correlation ID from headers."""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return self.generate_correlation_id()
+
+    def log_error_with_context(self, error: Exception, context: RequestContext) -> None:
+        """Log error with full context including correlation ID."""
+        logger.error(
+            f"[{context.service_name}] Operation '{context.operation}' failed at step '{type(error).__name__}' "
+            f"with correlation ID {context.correlation_id}. Request data: {context.request_data}",
+            exc_info=True
+        )
+
+    def handle_service_error(
+        self,
+        service_call: callable,
+        headers: Optional[Dict[str, str]],
+        operation: str,
+        request_data: Dict[str, Any]
+    ) -> Any:
+        """
+        Execute a service call with error handling and correlation tracking.
+
+        Args:
+            service_call: The function to call (either service A or B)
+            headers: Incoming headers containing correlation ID
+            operation: Name of the operation being performed
+            request_data: Data for the request
+
+        Returns:
+            Result of the service call or None if failed after retries
+        """
+        correlation_id = self.propagate_correlation_id(headers)
+        context = RequestContext(
+            correlation_id=correlation_id,
+            service_name=self.service_name,
+            operation=operation,
+            request_data=request_data
+        )
+
+        try:
+            # Add correlation ID to outgoing headers
+            outgoing_headers = {'X-Correlation-ID': correlation_id}
+
+            # Execute the service call with correlation ID propagation
+            result = service_call(outgoing_headers)
+
+            # Log success with context
+            logger.info(
+                f"[{self.service_name}] Operation '{operation}' completed successfully "
+                f"with correlation ID {correlation_id}",
+                extra={'correlation_id': correlation_id}
+            )
+
+            return result
+
+        except Exception as e:
+            # Log error with full context
+            self.log_error_with_context(e, context)
+
+            # Here you would typically implement retry logic or dead-letter queue handling
+            # For this example, we'll just re-raise after logging
+            raise
+
+# Example usage:
+if __name__ == "__main__":
+    # Initialize error handlers for both services
+    service_a_handler = ErrorHandler("ServiceA")
+    service_b_handler = ErrorHandler("ServiceB")
+
+    def service_a_call(headers: Dict[str, str]) -> str:
+        """Simulate Service A call."""
+        logger.info(f"Service A processing with correlation ID: {headers.get('X-Correlation-ID')}")
+        # Simulate an error for demonstration
+        raise ValueError("Service A encountered an error")
+
+    def service_b_call(headers: Dict[str, str]) -> str:
+        """Simulate Service B call."""
+        logger.info(f"Service B processing with correlation ID: {headers.get('X-Correlation-ID')}")
+        return "Success from Service B"
+
+    try:
+        # Service A call (will fail)
+        service_a_handler.handle_service_error(
+            service_call=service_a_call,
+            headers=None,
+            operation="ProcessRequest",
+            request_data={"user_id": 123}
+        )
+    except Exception:
+        pass
+
+    try:
+        # Service B call (will succeed)
+        result = service_b_handler.handle_service_error(
+            service_call=service_b_call,
+            headers={'X-Correlation-ID': 'test-correlation-123'},
+            operation="ProcessRequest",
+            request_data={"user_id": 456}
+        )
+        print(result)
+    except Exception:
+        pass
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID correlation ID is generated at the first service entry point."
+          location: "error_handler.py:24"
+        - question: "How is it propagated to every downstream call?"
+          answer: "The ID is added to outgoing headers and extracted from incoming headers."
+          location: "error_handler.py:30"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes, the correlation ID is included in all logs and error messages."
+          location: "error_handler.py:52"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new correlation ID is generated if none is present in headers."
+          location: "error_handler.py:31"
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Error messages include the operation name and exception type."
+          location: "error_handler.py:53"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, the correlation ID and request data are included in errors."
+          location: "error_handler.py:53"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Request data is included but should be sanitized in production."
+          location: "error_handler.py:53"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached when the error handler catches the exception."
+          location: "error_handler.py:52"
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "The error is logged and re-raised (would go to DLQ in production)."
+          location: "error_handler.py:78"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Messages with exhausted retries would go to a DLQ with full context."
+          location: "error_handler.py:78"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Errors are logged with full context including correlation ID."
+          location: "error_handler.py:52"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes, with the original context preserved in logs."
+          location: "error_handler.py:53"
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "Circuit breaker pattern wasn't required for the basic error handling implementation requested."
+```

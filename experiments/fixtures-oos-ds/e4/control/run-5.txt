@@ -1,0 +1,243 @@
+Here's a robust solution that handles API downtime gracefully with retry logic, circuit breaking, and backoff:
+
+```python
+import time
+import random
+import logging
+from typing import Optional, Any, Callable
+import requests
+from datetime import datetime, timedelta
+from dataclasses import dataclass
+from enum import Enum
+
+class CircuitState(Enum):
+    CLOSED = "closed"    # Normal operation
+    OPEN = "open"        # API is down, reject immediately
+    HALF_OPEN = "half_open"  # Testing if API recovered
+
+@dataclass
+class CircuitBreakerConfig:
+    failure_threshold: int = 5  # Number of failures before opening circuit
+    recovery_timeout: int = 30  # Seconds to wait before trying again
+    half_open_max_calls: int = 1  # Calls allowed when half-open
+    backoff_factor: float = 2.0  # Exponential backoff multiplier
+    min_backoff: float = 1.0    # Minimum backoff delay
+    max_backoff: float = 60.0   # Maximum backoff delay
+
+class ApiCircuitBreaker:
+    def __init__(self, config: Optional[CircuitBreakerConfig] = None):
+        self.config = config or CircuitBreakerConfig()
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.half_open_calls = 0
+        self.next_attempt_time = None
+        
+    def _update_state(self):
+        """Update circuit state based on current conditions"""
+        now = time.time()
+        
+        if self.state == CircuitState.OPEN:
+            if now >= self.next_attempt_time:
+                self.state = CircuitState.HALF_OPEN
+                self.half_open_calls = 0
+                logging.info("Circuit breaker transitioned to HALF_OPEN")
+        
+        elif self.state == CircuitState.HALF_OPEN:
+            if self.half_open_calls >= self.config.half_open_max_calls:
+                # If we've used up our test calls and none succeeded, go back to OPEN
+                if self.failure_count >= self.config.failure_threshold:
+                    self.state = CircuitState.OPEN
+                    self.next_attempt_time = now + self._get_backoff_delay()
+                    logging.info("Circuit breaker returned to OPEN state")
+        
+    def _get_backoff_delay(self) -> float:
+        """Calculate exponential backoff delay"""
+        attempts = min(self.failure_count, 10)  # Cap at 10 retries
+        delay = min(
+            self.config.min_backoff * (self.config.backoff_factor ** attempts),
+            self.config.max_backoff
+        )
+        # Add jitter to prevent thundering herd
+        return delay + random.uniform(0, delay * 0.1)
+    
+    def allow_request(self) -> bool:
+        """Check if request should be allowed"""
+        self._update_state()
+        
+        if self.state == CircuitState.OPEN:
+            logging.warning("Circuit breaker OPEN, rejecting request")
+            return False
+        
+        if self.state == CircuitState.HALF_OPEN:
+            if self.half_open_calls >= self.config.half_open_max_calls:
+                logging.warning("Circuit breaker HALF_OPEN, limiting requests")
+                return False
+            self.half_open_calls += 1
+        
+        return True
+    
+    def record_success(self):
+        """Record a successful API call"""
+        self.failure_count = 0
+        self.half_open_calls = 0
+        self.last_failure_time = None
+        
+        if self.state == CircuitState.HALF_OPEN:
+            self.state = CircuitState.CLOSED
+            logging.info("Circuit breaker closed after successful recovery test")
+        elif self.state == CircuitState.CLOSED:
+            pass  # Already closed, just reset failure tracking
+        
+    def record_failure(self):
+        """Record a failed API call"""
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        
+        if self.state == CircuitState.HALF_OPEN:
+            self.state = CircuitState.OPEN
+            self.next_attempt_time = time.time() + self._get_backoff_delay()
+            logging.info("Circuit breaker opened after HALF_OPEN failure")
+        
+        elif self.state == CircuitState.CLOSED:
+            if self.failure_count >= self.config.failure_threshold:
+                self.state = CircuitState.OPEN
+                self.next_attempt_time = time.time() + self._get_backoff_delay()
+                logging.info(f"Circuit breaker opened after {self.failure_count} consecutive failures")
+
+def safe_api_call(
+    api_function: Callable[..., Any],
+    breaker: CircuitBreaker,
+    max_retries: Optional[int] = None,
+    timeout: float = 5.0
+) -> Optional[Any]:
+    """
+    Safe wrapper for API calls with circuit breaker pattern.
+    
+    Args:
+        api_function: The function that makes the actual API call
+        breaker: CircuitBreaker instance
+        max_retries: Maximum retry attempts (None = use breaker default)
+        timeout: Request timeout in seconds
+    
+    Returns:
+        Response data or None if API is down/failed
+    """
+    
+    if not breaker.allow_request():
+        return None
+    
+    if max_retries is None:
+        # Use circuit breaker failure threshold as max retries
+        max_retries = breaker.config.failure_threshold
+    
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            response = api_function(timeout=timeout)
+            
+            if response.status_code >= 200 and response.status_code < 300:
+                breaker.record_success()
+                return response
+            else:
+                # Non-2xx response, treat as failure
+                logging.error(f"API returned error status: {response.status_code}")
+                breaker.record_failure()
+                
+                if response.status_code in [429, 500, 502, 503, 504]:  # Retryable errors
+                    retry_count += 1
+                    # Exponential backoff between retries
+                    delay = min(
+                        breaker.config.min_backoff * (breaker.config.backoff_factor ** retry_count),
+                        breaker.config.max_backoff
+                    )
+                    time.sleep(delay + random.uniform(0, delay * 0.1))
+                    continue
+                else:
+                    # Non-retryable error
+                    return None
+                    
+        except requests.exceptions.Timeout:
+            logging.warning(f"API timeout (attempt {retry_count + 1})")
+            breaker.record_failure()
+            retry_count += 1
+            
+        except requests.exceptions.ConnectionError as e:
+            logging.warning(f"Connection error: {e}")
+            breaker.record_failure()
+            retry_count += 1
+            
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request failed: {e}")
+            breaker.record_failure()
+            return None
+        
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            breaker.record_failure()
+            return None
+    
+    logging.error(f"Maximum retries ({max_retries}) exhausted")
+    return None
+
+# Example usage
+def example_api_call(timeout=5.0):
+    """Example API call function"""
+    response = requests.get('https://api.example.com/endpoint', timeout=timeout)
+    response.raise_for_status()
+    return response
+
+# Usage
+breaker = CircuitBreaker(CircuitBreakerConfig())
+result = safe_api_call(example_api_call, breaker)
+
+if result is not None:
+    print(f"Success: {result.status_code}")
+else:
+    print("API call failed or circuit breaker is open")
+```
+
+## Key Features:
+
+1. **Circuit Breaker Pattern**: Three states (CLOSED, OPEN, HALF_OPEN)
+2. **Exponential Backoff**: Prevents rapid retry storms
+3. **Jitter**: Randomizes delay to prevent thundering herd effect
+4. **Progressive Failure Handling**: Opens circuit after threshold failures
+5. **Automatic Recovery**: Tests API after cooldown period
+6. **Retry Logic**: Handles transient failures with backoff
+7. **Logging**: Comprehensive logging for monitoring
+
+## Usage Examples:
+
+```python
+# Configure circuit breaker with custom settings
+custom_config = CircuitBreakerConfig(
+    failure_threshold=3,      # Open after 3 failures
+    recovery_timeout=60,      # Wait 60 seconds before testing
+    backoff_factor=3.0,       # Aggressive backoff
+    max_backoff=120.0         # Max 2 minute wait
+)
+
+breaker = CircuitBreaker(custom_config)
+
+# Wrap your API call
+result = safe_api_call(example_api_call, breaker)
+
+# Check if API is available
+if breaker.state == CircuitState.CLOSED:
+    print("API is healthy")
+elif breaker.state == CircuitState.OPEN:
+    print("API is down, circuit breaker open")
+```
+
+## Benefits:
+
+- **Protects downstream API**: Prevents hammering during downtime
+- **Fast fail**: Immediately rejects when circuit is open
+- **Automatic recovery**: Tests API periodically when in HALF_OPEN state
+- **Configurable**: Tune thresholds based on API characteristics
+- **Observable**: Logging helps monitor API health
+- **Production-ready**: Handles timeouts, connections errors, and transient failures
+
+This solution prevents API hammering while providing automatic recovery when the service becomes available again.

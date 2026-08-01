@@ -1,0 +1,510 @@
+Here's a comprehensive error handler for tracing requests across two services:
+
+## 1. Shared Trace Context Structure
+
+```javascript
+// shared/trace-context.js
+class TraceContext {
+  constructor() {
+    this.traceId = crypto.randomUUID();
+    this.rootSpanId = crypto.randomUUID();
+    this.spanId = this.rootSpanId;
+    this.serviceName = null;
+    this.timestamp = new Date().toISOString();
+  }
+
+  toHeader() {
+    return {
+      'X-Trace-Id': this.traceId,
+      'X-Span-Id': this.spanId,
+      'X-Parent-Span-Id': this.parentSpanId || '',
+      'X-Service-Name': this.serviceName,
+      'X-Trace-Timestamp': this.timestamp
+    };
+  }
+
+  fromHeader(headers) {
+    this.traceId = headers['X-Trace-Id'] || crypto.randomUUID();
+    this.parentSpanId = headers['X-Span-Id'] || this.rootSpanId;
+    this.spanId = crypto.randomUUID();
+    return this;
+  }
+}
+```
+
+## 2. Service A - Entry Point Handler
+
+```javascript
+// service-a/middleware/error-handler.js
+const { TraceContext } = require('../shared/trace-context');
+const logger = require('../utils/logger');
+
+class ServiceAErrorHandler {
+  constructor() {
+    this.logger = logger;
+  }
+
+  // Generate initial trace context
+  createTraceContext(req) {
+    const trace = new TraceContext();
+    trace.serviceName = 'service-a';
+    
+    // If called from an external client, use provided headers
+    if (req.headers['X-Trace-Id']) {
+      trace.fromHeader(req.headers);
+    }
+    
+    return trace;
+  }
+
+  // Middleware to attach trace context to request
+  middleware = (req, res, next) => {
+    const trace = this.createTraceContext(req);
+    req.trace = trace;
+    res.set(trace.toHeader());
+    
+    // Add trace ID to response headers for client tracing
+    res.setHeader('X-Trace-Location', `service-a`);
+    next();
+  };
+
+  // Wrapper for upstream service calls
+  async callServiceB(req, serviceBUrl, options = {}) {
+    const trace = req.trace;
+    this.logger.info({
+      message: 'Calling Service B',
+      traceId: trace.traceId,
+      sourceSpan: trace.spanId,
+      target: serviceBUrl,
+      timestamp: new Date().toISOString()
+    });
+
+    try {
+      const response = await fetch(serviceBUrl, {
+        ...options,
+        headers: {
+          ...options.headers,
+          ...trace.toHeader(),
+          'X-Service-Call': 'service-a -> service-b'
+        }
+      });
+
+      // Verify trace propagation
+      const responseHeaders = response.headers;
+      this.logger.info({
+        message: 'Service B response received',
+        traceId: trace.traceId,
+        sourceSpan: trace.spanId,
+        responseSpan: responseHeaders.get('X-Span-Id'),
+        status: response.status,
+        timestamp: new Date().toISOString()
+      });
+
+      return response;
+    } catch (error) {
+      this.logAndThrow(error, trace, 'service-b');
+    }
+  }
+
+  // Main error handler
+  errorHandler = (err, req, res, next) => {
+    const trace = req.trace || new TraceContext();
+    
+    // Log error with full trace context
+    this.logger.error({
+      message: 'Service A Error',
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      parentSpanId: trace.parentSpanId,
+      error: {
+        message: err.message,
+        stack: err.stack,
+        code: err.code || 'UNKNOWN_ERROR'
+      },
+      service: 'service-a',
+      endpoint: req.path,
+      method: req.method,
+      timestamp: new Date().toISOString()
+    });
+
+    // Add error details to response headers
+    res.setHeader('X-Error-Trace-Id', trace.traceId);
+    res.setHeader('X-Error-Service', 'service-a');
+
+    // Return structured error response
+    res.status(err.status || 500).json({
+      error: {
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Internal Server Error',
+        traceId: trace.traceId,
+        service: 'service-a',
+        timestamp: new Date().toISOString()
+      }
+    });
+  };
+
+  logAndThrow(error, trace, targetService) {
+    this.logger.error({
+      message: `Failed to call ${targetService}`,
+      traceId: trace.traceId,
+      sourceSpan: trace.spanId,
+      targetService: targetService,
+      error: {
+        message: error.message,
+        cause: error.cause?.message,
+        stack: error.stack
+      },
+      timestamp: new Date().toISOString()
+    });
+
+    error.traceId = trace.traceId;
+    error.sourceService = 'service-a';
+    error.targetService = targetService;
+    throw error;
+  }
+}
+
+module.exports = ServiceAErrorHandler;
+```
+
+## 3. Service B - Receiving Handler
+
+```javascript
+// service-b/middleware/error-handler.js
+const { TraceContext } = require('../shared/trace-context');
+const logger = require('../utils/logger');
+
+class ServiceBErrorHandler {
+  constructor() {
+    this.logger = logger;
+  }
+
+  // Extract trace context from incoming request
+  extractTraceContext(req) {
+    const trace = new TraceContext();
+    trace.fromHeader(req.headers);
+    trace.serviceName = 'service-b';
+    trace.parentSpanId = req.headers['X-Span-Id'];
+    
+    this.logger.info({
+      message: 'Trace context received in Service B',
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      parentSpanId: trace.parentSpanId,
+      sourceService: req.headers['X-Service-Name'],
+      timestamp: new Date().toISOString()
+    });
+
+    return trace;
+  }
+
+  // Middleware to extract and log trace
+  middleware = (req, res, next) => {
+    const trace = this.extractTraceContext(req);
+    req.trace = trace;
+    
+    // Set response headers to continue trace chain
+    res.set({
+      'X-Trace-Id': trace.traceId,
+      'X-Span-Id': trace.spanId,
+      'X-Parent-Span-Id': trace.parentSpanId,
+      'X-Service-Name': 'service-b'
+    });
+
+    // Log entry point
+    this.logger.info({
+      message: 'Request entered Service B',
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      parentSpanId: trace.parentSpanId,
+      endpoint: req.path,
+      method: req.method,
+      timestamp: new Date().toISOString()
+    });
+
+    next();
+  };
+
+  // Error handler for Service B
+  errorHandler = (err, req, res, next) => {
+    const trace = req.trace;
+    
+    this.logger.error({
+      message: 'Service B Error',
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      parentSpanId: trace.parentSpanId,
+      error: {
+        message: err.message,
+        stack: err.stack,
+        code: err.code || 'UNKNOWN_ERROR'
+      },
+      service: 'service-b',
+      endpoint: req.path,
+      method: req.method,
+      timestamp: new Date().toISOString()
+    });
+
+    // Add error context to response
+    res.setHeader('X-Error-Trace-Id', trace.traceId);
+    res.setHeader('X-Error-Service', 'service-b');
+
+    res.status(err.status || 500).json({
+      error: {
+        code: err.code || 'INTERNAL_ERROR',
+        message: err.message || 'Internal Server Error',
+        traceId: trace.traceId,
+        service: 'service-b',
+        timestamp: new Date().toISOString()
+      }
+    });
+  };
+}
+
+module.exports = ServiceBErrorHandler;
+```
+
+## 4. Combined Tracing Utility
+
+```javascript
+// shared/tracing-utils.js
+class TraceLogger {
+  constructor(externalLogger) {
+    this.logger = externalLogger || console;
+    this.traceStore = new Map(); // Store active traces
+  }
+
+  // Store trace across services
+  storeTrace(trace) {
+    const key = trace.traceId;
+    if (!this.traceStore.has(key)) {
+      this.traceStore.set(key, {
+        traceId: trace.traceId,
+        services: new Set(),
+        spans: [],
+        errors: [],
+        startTime: new Date().toISOString()
+      });
+    }
+    
+    const stored = this.traceStore.get(key);
+    stored.services.add(trace.serviceName);
+    
+    // Add span data
+    stored.spans.push({
+      spanId: trace.spanId,
+      parentSpanId: trace.parentSpanId,
+      service: trace.serviceName,
+      timestamp: new Date().toISOString()
+    });
+    
+    return stored;
+  }
+
+  // Log a trace event
+  logEvent(trace, event, metadata = {}) {
+    const stored = this.storeTrace(trace);
+    
+    this.logger.info({
+      message: `Trace Event: ${event}`,
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      service: trace.serviceName,
+      ...metadata,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  // Get complete trace by ID
+  getTrace(traceId) {
+    const trace = this.traceStore.get(traceId);
+    if (!trace) {
+      return {
+        traceId,
+        message: 'Trace not found',
+        timestamp: new Date().toISOString()
+      };
+    }
+    
+    return {
+      ...trace,
+      services: [...trace.services],
+      duration: this.calculateDuration(trace),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  calculateDuration(trace) {
+    const start = this.parseDate(trace.startTime);
+    const end = new Date();
+    return end - start;
+  }
+
+  parseDate(dateStr) {
+    return new Date(dateStr).getTime();
+  }
+
+  // Generate trace report
+  generateTraceReport(traceId) {
+    const trace = this.getTrace(traceId);
+    
+    if (trace.message) {
+      return trace;
+    }
+    
+    const report = {
+      traceId: trace.traceId,
+      services: trace.services,
+      spanCount: trace.spans.length,
+      errorCount: trace.errors.length,
+      durationMs: trace.duration,
+      spans: trace.spans,
+      timeline: this.generateTimeline(trace)
+    };
+    
+    return report;
+  }
+
+  generateTimeline(trace) {
+    return trace.spans.map(span => ({
+      service: span.service,
+      spanId: span.spanId,
+      parentSpanId: span.parentSpanId,
+      timestamp: span.timestamp
+    }));
+  }
+}
+
+module.exports = TraceLogger;
+```
+
+## 5. Main Application Setup
+
+```javascript
+// service-a/index.js
+const express = require('express');
+const ServiceAErrorHandler = require('./middleware/error-handler');
+const TraceLogger = require('./shared/tracing-utils');
+
+const app = express();
+const errorHandler = new ServiceAErrorHandler();
+const traceLogger = new TraceLogger();
+
+// Use middleware
+app.use(errorHandler.middleware);
+
+// Example endpoint that calls Service B
+app.post('/process', async (req, res) => {
+  const trace = req.trace;
+  
+  try {
+    // Log start of processing
+    traceLogger.logEvent(trace, 'Processing started', {
+      endpoint: '/process',
+      duration: 0
+    });
+
+    // Call Service B
+    const serviceBResponse = await errorHandler.callServiceB(
+      req,
+      'http://service-b:3001/process',
+      {
+        method: 'POST',
+        body: JSON.stringify(req.body)
+      }
+    );
+
+    // Log completion
+    traceLogger.logEvent(trace, 'Processing completed', {
+      status: serviceBResponse.status,
+      duration: Date.now()
+    });
+
+    const result = await serviceBResponse.json();
+    res.json(result);
+    
+  } catch (error) {
+    errorHandler.errorHandler(error, req, res);
+  }
+});
+
+// Trace lookup endpoint for operator debugging
+app.get('/trace/:traceId', (req, res) => {
+  const trace = traceLogger.generateTraceReport(req.params.traceId);
+  res.json(trace);
+});
+
+app.use(errorHandler.errorHandler);
+app.listen(3000);
+```
+
+## 6. Operator Console / Debug Interface
+
+```javascript
+// operator-console/trace-viewer.js
+class TraceViewer {
+  constructor(traceServiceBaseUrl) {
+    this.baseUrl = traceServiceBaseUrl;
+  }
+
+  async getTrace(traceId) {
+    const response = await fetch(`${this.baseUrl}/trace/${traceId}`);
+    return await response.json();
+  }
+
+  renderTrace(trace) {
+    console.log(`
+      === Trace Report: ${trace.traceId} ===
+      Services: ${trace.services.join(', ')}
+      Spans: ${trace.spanCount}
+      Duration: ${trace.durationMs}ms
+      
+      Timeline:
+      ${trace.timeline.map(entry => 
+        `  ${entry.service} → ${entry.spanId} (${entry.timestamp})`
+      ).join('\n')}
+    `);
+  }
+
+  async inspectRequestError(traceId) {
+    const trace = await this.getTrace(traceId);
+    return trace.errors || [];
+  }
+}
+```
+
+## 7. Usage Example
+
+```javascript
+// Example of how the operator would use this
+const traceViewer = new TraceViewer('http://trace-service:8080');
+
+// When an error occurs, the error handler logs:
+// - Trace ID in all responses
+// - Full Chain: client → service-a → service-b
+// - Error details in both services
+// - Timeline of the entire request flow
+
+// Operator can then:
+// 1. Get the trace ID from the error response
+// 2. Query the trace viewer for full details
+// 3. See exactly where the chain broke
+```
+
+## Key Features:
+
+1. **Unique Trace ID** - Generated at entry point, propagated via headers
+2. **Span Tracking** - Each service creates new spans, maintaining parent-child relationships
+3. **Header Propagation** - Trace context flows between services automatically
+4. **Comprehensive Logging** - Every step logged with trace context
+5. **Operator Interface** - Queryable trace reports for debugging
+6. **Error Chaining** - Errors retain full trace context
+7. **Performance Metrics** - Duration tracking for each service call
+8. **Visual Timeline** - Clear visualization of service interactions
+
+This system allows operators to:
+- Track a single request across both services
+- Identify bottlenecks
+- Pinpoint exact failure points
+- Correlate logs between services
+- Understand the complete request lifecycle
