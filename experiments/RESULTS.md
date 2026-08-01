@@ -41,11 +41,16 @@ in-sample tables.
 | e5 correlation-id | DeepSeek | 5.00 | 5.40 | 5.00 | +0.40 | 0.00 |
 | e5 correlation-id | Mistral | 5.40 | 5.60 | 4.20 | +0.20 | −1.20 |
 
-With the repaired instrument the out-of-sample result is no longer negative:
-three of four cells are positive (+3.20, +0.40, +0.20) and the fourth is
-flat at a control of 5.60/6.00. The instrument-caught negative cell
-(Mistral e5, −1.40) is +0.20 after repair. The corpus-rule judgment on
-these numbers is stated in the judgment section below.
+With the repaired instrument the out-of-sample result is: **one clear
+effect** (e4-Mistral +3.20, placebo at control), **one ceiling-limited flat
+cell** (e4-DeepSeek, control 5.60/6.00), and **two cells too small to call**
+(e5-DeepSeek +0.40, e5-Mistral +0.20 — both inside within-arm spread at
+n=5; e5-Mistral moved from −1.40 to +0.20 by rescoring alone, so it is not
+evidence in either direction). The instrument-caught negative cell is gone,
+but "three of four positive" would overstate the data: the rule **survives
+in direction** on a single strong cell, with modest support. The
+corpus-rule judgment on these numbers is stated in the judgment section
+below.
 
 ## Instrument repair (rubric audit) — before/after
 
@@ -140,17 +145,18 @@ means the delta is larger than that spread. No significance testing.
 
 Out-of-sample, per cell: e4-Mistral +3.20 exceeds its spread; e4-DeepSeek
 0.00 is a ceiling pair (control 5.60/6.00); e5-DeepSeek +0.40 and
-e5-Mistral +0.20 are inside their spreads. Plain: the out-of-sample effect
-is positive in direction on three of four cells and flat on the fourth at
-control ceiling; none is negative.
+e5-Mistral +0.20 are inside their spreads. Plain: **one clear effect, one
+ceiling-limited flat cell, two cells too small to call** — none negative,
+but only e4-Mistral is evidence of an effect.
 
 ## Judgment (corpus rule, repaired instrument)
 
 With the repaired instrument the corpus rule **survives out-of-sample in
-direction**: no negative cell remains, three of four out-of-sample cells
-are positive (one strongly, two weakly), and the flat cell sits at a
-5.60/6.00 control ceiling. The out-of-sample deltas are small (+0.20 to
-+0.40) except e4-Mistral (+3.20), so the support is modest: the rule is
+direction**, and that is the defensible claim: no negative cell remains,
+but the support rests on a **single strong cell** (e4-Mistral +3.20 with
+the placebo at control). e4-DeepSeek is flat at a 5.60/6.00 control
+ceiling, and the two e5 cells (+0.40, +0.20) are inside within-arm spread
+at n=5 — "three of four positive" would overstate the data. The rule is
 supported, not proven, and control-arm headroom (the flat cell) remains the
 plainest caveat.
 
