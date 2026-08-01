@@ -113,6 +113,46 @@ e2-both, e3-Mistral; the deltas inside their spread are e1-DeepSeek and
 e3-DeepSeek. The one structural anomaly (Mistral e2 placebo +1.20 over
 control, inside the treatment's range) is unchanged by this analysis.
 
+## Out-of-sample (E4, E5) — reported separately
+
+The three tasks above were written alongside the nodes they test. E4 and E5
+test two nodes added later (`reliability.circuit-breaker`,
+`observability.correlation-id`) with fresh task prompts — the first
+out-of-sample check. Same pipeline, three arms, both providers, n=5. These
+tables are **not merged** with the in-sample ones.
+
+| Task | Provider | Control | Treatment | Placebo | T−C | P−C |
+|---|---|---|---|---|---|---|
+| e4 circuit-breaker | DeepSeek | 5.40 | 5.20 | 4.80 | −0.20 | −0.60 |
+| e4 circuit-breaker | Mistral | 2.80 | 6.00 | 2.60 | +3.20 | −0.20 |
+| e5 correlation-id | DeepSeek | 4.80 | 4.80 | 4.40 | 0.00 | −0.40 |
+| e5 correlation-id | Mistral | 5.20 | 3.80 | 2.80 | −1.40 | −2.40 |
+
+Raw scores per arm:
+
+| Task / arm | run-1 | run-2 | run-3 | run-4 | run-5 | mean | stdev |
+|---|---|---|---|---|---|---|---|
+| e4 DeepSeek control | 6 | 6 | 5 | 5 | 5 | 5.40 | 0.55 |
+| e4 DeepSeek treatment | 6 | 4 | 6 | 4 | 6 | 5.20 | 1.10 |
+| e4 DeepSeek placebo | 6 | 6 | 2 | 4 | 6 | 4.80 | 1.79 |
+| e4 Mistral control | 2 | 6 | 2 | 2 | 2 | 2.80 | 1.79 |
+| e4 Mistral treatment | 6 | 6 | 6 | 6 | 6 | 6.00 | 0.00 |
+| e4 Mistral placebo | 2 | 3 | 3 | 2 | 3 | 2.60 | 0.55 |
+| e5 DeepSeek control | 5 | 3 | 6 | 5 | 5 | 4.80 | 1.10 |
+| e5 DeepSeek treatment | 6 | 3 | 5 | 5 | 5 | 4.80 | 1.10 |
+| e5 DeepSeek placebo | 4 | 5 | 4 | 5 | 4 | 4.40 | 0.55 |
+| e5 Mistral control | 5 | 4 | 6 | 5 | 6 | 5.20 | 0.84 |
+| e5 Mistral treatment | 4 | 4 | 5 | 4 | 2 | 3.80 | 1.10 |
+| e5 Mistral placebo | 5 | 3 | 3 | 2 | 1 | 2.80 | 1.48 |
+
+Plain reading: **the in-sample effect does not generalise cleanly.** One of
+four cells reproduces the in-sample direction (e4-Mistral +3.20, with the
+placebo at control); two are flat (e4-DeepSeek, whose control already scores
+5.40; e5-DeepSeek); one is negative (e5-Mistral, treatment −1.40, and its
+placebo −2.40). The negative cell is examined in `docs/OOS_DIAGNOSIS.md`
+(and its implications proposed in `docs/OOS_PROPOSAL.md`); no conclusion
+about the nodes is drawn from the numbers alone.
+
 ## Limitation
 
 Two providers, n=5 per arm, three tasks, one rubric per task, five run

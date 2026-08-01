@@ -43,8 +43,14 @@ The placebo arm (a structurally identical pack with irrelevant content)
 matches control — or scores below it — on five of six task×provider cells,
 so the effect is not prompt length; on one cell (Mistral e2) the placebo
 sits at the treatment level, so a structural component cannot be ruled out
-there. Honest bounds: n=5 per arm, three tasks, two providers, one anomaly.
-The knowledge is **supported** by this result, never claimed as proven.
+there. An out-of-sample check on two later nodes (circuit-breaker,
+correlation-id) does **not** generalise cleanly: one of four cells
+reproduced the effect, two were flat, one negative (see
+`experiments/RESULTS.md`, `docs/OOS_DIAGNOSIS.md`). Honest bounds: n=5 per
+arm, three in-sample and two out-of-sample tasks, two providers, one
+in-sample anomaly and one out-of-sample negative cell. The knowledge is
+**supported** by the in-sample result, never claimed as proven, and the
+claim does not currently extend beyond the tasks measured.
 Out-of-sample tasks on later nodes are reported separately. Full detail,
 raw scores and caveats: `experiments/RESULTS.md`.
 
