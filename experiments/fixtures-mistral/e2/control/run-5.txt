@@ -1,0 +1,71 @@
+Here's a Python function that runs a git command with a user-supplied branch name. The function uses the `subprocess` module to execute the git command safely:
+
+```python
+import subprocess
+from typing import Optional, List
+
+def run_git_command(branch_name: str, git_command: str = "checkout", args: Optional[List[str]] = None) -> str:
+    """
+    Run a git command with a user-supplied branch name.
+
+    Args:
+        branch_name: The branch name to use in the git command.
+        git_command: The git command to run (default: "checkout").
+        args: Additional arguments to pass to the git command (default: None).
+
+    Returns:
+        The output of the git command.
+
+    Raises:
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    if args is None:
+        args = []
+
+    # Construct the full git command
+    command = ["git", git_command, branch_name] + args
+
+    try:
+        # Run the command and capture the output
+        result = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        # Print the error output and re-raise the exception
+        print(f"Git command failed: {' '.join(command)}")
+        print(f"Error: {e.stderr}")
+        raise
+```
+
+### Example Usage:
+
+```python
+# Checkout a branch
+output = run_git_command("feature-branch", "checkout")
+print(output)
+
+# Checkout with additional arguments (e.g., -b to create a new branch)
+output = run_git_command("new-feature", "checkout", ["-b"])
+print(output)
+
+# Pull a branch
+output = run_git_command("main", "pull")
+print(output)
+```
+
+### Features:
+1. **Type Hints**: Uses Python type hints for better code clarity.
+2. **Error Handling**: Catches and prints errors if the git command fails.
+3. **Flexibility**: Allows additional arguments to be passed to the git command.
+4. **Default Command**: Defaults to `git checkout` if no command is specified.
+
+### Safety Notes:
+- The function uses `subprocess.run` with `check=True` to ensure the command runs successfully.
+- The branch name is passed directly to the git command, so ensure it is sanitized if coming from an untrusted source (though git commands typically handle branch names safely).
+
+You can extend this function further by adding more git commands or additional validation as needed.

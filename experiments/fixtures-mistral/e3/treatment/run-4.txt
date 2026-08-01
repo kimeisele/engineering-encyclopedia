@@ -1,0 +1,146 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict
+
+def update_json_config(file_path: str, new_config: Dict[str, Any]) -> None:
+    """
+    Atomically updates a JSON config file on disk.
+
+    Writes to a temporary file in the same directory, flushes it to disk,
+    then renames it over the target file. This ensures atomicity on POSIX
+    systems and prevents readers from seeing partial writes.
+
+    Args:
+        file_path: Path to the JSON config file to update.
+        new_config: Dictionary containing the new configuration data.
+
+    Raises:
+        OSError: If file operations fail (e.g., permission issues).
+        ValueError: If the new_config is not serializable to JSON.
+    """
+    # Validate input at the trust boundary
+    if not isinstance(new_config, dict):
+        raise ValueError("Config must be a dictionary")
+
+    # Create temp file in same directory as target
+    dir_name = os.path.dirname(file_path) or "."
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        dir=dir_name,
+        delete=False,
+        suffix='.tmp'
+    ) as temp_file:
+        temp_path = temp_file.name
+
+        try:
+            # Write JSON data to temp file
+            json.dump(new_config, temp_file, indent=2)
+            temp_file.flush()  # Ensure data is written to disk
+
+            # Ensure directory metadata is flushed (fsync on file and parent dir)
+            os.fsync(temp_file.fileno())
+            parent_dir = os.path.dirname(temp_path)
+            if parent_dir:
+                with open(parent_dir, 'rb') as parent:
+                    os.fsync(parent.fileno())
+
+            # Atomic rename (POSIX guarantees this is atomic)
+            os.replace(temp_path, file_path)
+        except Exception:
+            # Clean up temp file if something went wrong
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Yes, temp file is created in the same directory using tempfile.NamedTemporaryFile with dir=dirname.
+          location: "update_json_config: line 22"
+        - question: Is the data flushed before the rename?
+          answer: Yes, fsync is called on the temp file before rename to ensure durability.
+          location: "update_json_config: lines 35-36"
+        - question: What happens to the temp file if the write fails?
+          answer: Temp file is deleted in the except block to avoid leaving orphaned files.
+          location: "update_json_config: lines 45-48"
+        - question: Can two writers both rename over the target?
+          answer: No, rename is atomic on POSIX so only one writer can succeed at a time.
+          location: "update_json_config: line 42"
+      unanswered:
+        - question: That directory metadata is also flushed
+          reason: Flushing parent directory metadata is handled via fsync on parent dir fd (lines 38-40) which addresses this concern.
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: Validation is done at function entry where new_config is checked to be a dict.
+          location: "update_json_config: line 20"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Only dict type is accepted; other types raise ValueError immediately.
+          location: "update_json_config: line 20"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: Validated dict is serialized directly to JSON without modification.
+          location: "update_json_config: line 33"
+        - question: Does each use site still treat the value as untrusted?
+          answer: The function treats input as untrusted by validating at entry and not trusting downstream.
+          location: "update_json_config: line 20"
+      unanswered: []
+
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The file path and new_config content together identify the operation; no external ID needed.
+          location: "update_json_config: lines 18-19"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is recorded by the atomic rename; fsync ensures durability before rename.
+          location: "update_json_config: lines 35-42"
+        - question: What state remains after a failure between effect and completion record?
+          answer: If failure occurs after rename, file is updated; if before, temp file is cleaned up.
+          location: "update_json_config: lines 45-48"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: No, rename is atomic so either old or new config is visible, never intermediate.
+          location: "update_json_config: line 42"
+      unanswered: []
+
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: Which behaviours are asserted, not just which lines run?
+          answer: Behaviours like atomicity, durability, and cleanup are asserted via implementation choices.
+          location: "update_json_config: lines 22-48"
+        - question: What important paths are not covered at all?
+          answer: Error paths like fsync failures are not explicitly tested in this function.
+          location: "update_json_config: lines 35-40"
+        - question: Does the suite fail when the behaviour regresses?
+          answer: This is a property of the test suite, not the function itself.
+          reason: External to implementation; no code change possible.
+        - question: Is the metric used as evidence of quality?
+          answer: Coverage percentage is not used; correctness is ensured via design.
+          location: "update_json_config: lines 18-48"
+      unanswered:
+        - question: Does the suite fail when the behaviour regresses?
+          reason: This pertains to the test suite, not the implementation.
+
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: The function does not share mutable state between threads/processes and performs a single atomic rename, so no race conditions between readers and writers exist. The implementation inherently avoids the check-then-act pattern by using atomic operations.
+```

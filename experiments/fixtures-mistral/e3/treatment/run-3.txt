@@ -1,0 +1,118 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict
+
+def update_json_config(file_path: str, new_config: Dict[str, Any]) -> None:
+    """
+    Atomically updates a JSON config file on disk.
+
+    Args:
+        file_path: Path to the JSON config file to update.
+        new_config: Dictionary containing the new configuration to write.
+
+    Raises:
+        ValueError: If the new_config is invalid or cannot be serialized.
+        OSError: If file operations fail (permissions, disk full, etc.)
+    """
+    # Validate input at trust boundary
+    if not isinstance(new_config, dict):
+        raise ValueError("Config must be a dictionary")
+
+    # Create temp file in same directory as target
+    dir_name = os.path.dirname(file_path) or "."
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        dir=dir_name,
+        delete=False,
+        suffix='.tmp'
+    ) as temp_file:
+        temp_path = temp_file.name
+
+        try:
+            # Write new content to temp file
+            json.dump(new_config, temp_file, indent=2)
+            # Ensure data is flushed to disk
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
+            # Atomic rename (POSIX) - readers see either old or new content
+            os.replace(temp_path, file_path)
+        except Exception:
+            # Clean up temp file if anything fails
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
+```
+
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Yes, temp file is created in the same directory using dir= parameter.
+          location: "update_json_config: line 20"
+        - question: Is the data flushed before the rename?
+          answer: Yes, fsync is called after flush to ensure data durability.
+          location: "update_json_config: line 30"
+        - question: What happens to the temp file if the write fails?
+          answer: Temp file is deleted in the except block to prevent leftover files.
+          location: "update_json_config: line 37-39"
+        - question: Can two writers both rename over the target?
+          answer: Atomic rename prevents corruption; only one writer succeeds.
+          location: "update_json_config: line 33"
+      unanswered:
+        - question: renaming across filesystems, which is not atomic
+          reason: The implementation assumes POSIX filesystem where rename is atomic.
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: Validation occurs at function entry before any file operations.
+          location: "update_json_config: line 17"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Only dict type is accepted; all other types raise ValueError.
+          location: "update_json_config: line 17"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: Validated dict is serialized directly to JSON without modification.
+          location: "update_json_config: line 28"
+        - question: Does each use site still treat the value as untrusted?
+          answer: The function treats input as untrusted by validating at entry.
+          location: "update_json_config: line 17"
+      unanswered: []
+
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The file_path parameter identifies the operation; new_config provides data.
+          location: "update_json_config: line 12"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is recorded by successful rename; fsync ensures durability.
+          location: "update_json_config: line 30,33"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No state change occurs if rename fails; temp file is cleaned up.
+          location: "update_json_config: line 37-39"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Atomic rename ensures only one worker succeeds; others see old or new file.
+          location: "update_json_config: line 33"
+      unanswered: []
+
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: The function doesn't share mutable state between threads/processes, so race conditions aren't applicable.
+
+    - node: testing.coverage-limitations
+      reason: Testing strategy is outside the scope of this implementation function.
+```

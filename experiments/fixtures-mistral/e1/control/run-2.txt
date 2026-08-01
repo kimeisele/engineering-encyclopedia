@@ -1,0 +1,144 @@
+# Worker for Charging Customers from a Queue
+
+Here's a Python implementation of a worker that consumes jobs from a queue and processes customer charges. This example uses Redis as the queue backend, but you could adapt it for other message brokers like RabbitMQ or AWS SQS.
+
+```python
+import json
+import logging
+from redis import Redis
+from time import sleep
+from typing import Dict, Any
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class ChargeWorker:
+    def __init__(self, redis_host: str = 'localhost', redis_port: int = 6379, queue_name: str = 'charge_queue'):
+        """
+        Initialize the worker with Redis connection details.
+
+        Args:
+            redis_host: Redis server host
+            redis_port: Redis server port
+            queue_name: Name of the queue to consume from
+        """
+        self.redis = Redis(host=redis_host, port=redis_port)
+        self.queue_name = queue_name
+        self.max_retries = 3  # Maximum number of retry attempts for failed charges
+
+    def process_charge(self, job_data: Dict[str, Any]) -> bool:
+        """
+        Process a single charge job.
+
+        Args:
+            job_data: Dictionary containing charge details
+
+        Returns:
+            bool: True if charge was successful, False otherwise
+        """
+        try:
+            # Extract charge details from job data
+            customer_id = job_data.get('customer_id')
+            amount = job_data.get('amount')
+            currency = job_data.get('currency', 'USD')
+            charge_id = job_data.get('charge_id')
+
+            if not all([customer_id, amount]):
+                logger.error(f"Invalid job data: missing required fields. Data: {job_data}")
+                return False
+
+            # Here you would integrate with your payment processor
+            # This is a mock implementation
+            logger.info(f"Processing charge for customer {customer_id}: {amount} {currency}")
+
+            # Simulate payment processing
+            sleep(0.5)  # Simulate network delay
+
+            # Mock payment success/failure (80% success rate for demo)
+            import random
+            if random.random() < 0.8:
+                logger.info(f"Successfully charged customer {customer_id} for {amount} {currency}")
+                return True
+            else:
+                logger.warning(f"Failed to charge customer {customer_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error processing charge: {str(e)}")
+            return False
+
+    def run(self):
+        """
+        Main worker loop that consumes jobs from the queue.
+        """
+        logger.info(f"Starting charge worker. Listening on queue: {self.queue_name}")
+
+        while True:
+            try:
+                # Blocking pop from the queue with timeout
+                _, job_data = self.redis.blpop(self.queue_name, timeout=5)
+
+                if job_data is None:
+                    continue  # Timeout occurred, no job received
+
+                try:
+                    job = json.loads(job_data.decode('utf-8'))
+                    logger.info(f"Received job: {job}")
+
+                    # Process the charge
+                    success = self.process_charge(job)
+
+                    if success:
+                        # Remove the job from the queue if successful
+                        logger.info(f"Successfully processed charge for job {job.get('charge_id')}")
+                    else:
+                        # Handle failed charge (retry logic)
+                        retries = job.get('retries', 0)
+                        if retries < self.max_retries:
+                            job['retries'] = retries + 1
+                            # Push back to queue with delay (exponential backoff)
+                            delay = min(2 ** retries, 30)  # Max 30 seconds delay
+                            self.redis.rpush(self.queue_name, json.dumps(job))
+                            logger.info(f"Requeued failed job {job.get('charge_id')} (attempt {retries + 1}/{self.max_retries})")
+                        else:
+                            logger.error(f"Max retries exceeded for job {job.get('charge_id')}. Marking as failed.")
+                            # Here you might want to notify an admin or log to a failed jobs queue
+
+                except json.JSONDecodeError:
+                    logger.error("Invalid JSON data in queue")
+                except Exception as e:
+                    logger.error(f"Error processing job: {str(e)}")
+
+            except Exception as e:
+                logger.error(f"Worker error: {str(e)}")
+                sleep(1)  # Prevent tight error loop
+
+if __name__ == "__main__":
+    worker = ChargeWorker()
+    worker.run()
+```
+
+## Key Features:
+
+1. **Queue Consumption**: Uses Redis' blocking list operations to efficiently consume jobs
+2. **Error Handling**: Implements retry logic with exponential backoff for failed charges
+3. **Logging**: Comprehensive logging for monitoring and debugging
+4. **Configuration**: Easy to configure Redis connection and queue name
+5. **Mock Payment Processing**: Includes a mock payment processor that simulates success/failure
+
+## How to Use:
+
+1. Start a Redis server
+2. Push jobs to the queue (e.g., using `redis-cli LPUSH charge_queue '{"customer_id": "123", "amount": 99.99, "charge_id": "ch_12345"}'`)
+3. Run the worker script
+
+## Production Considerations:
+
+1. **Payment Processor Integration**: Replace the mock `process_charge` method with real integration to Stripe, PayPal, etc.
+2. **Scaling**: Run multiple worker instances for parallel processing
+3. **Monitoring**: Add metrics collection (e.g., Prometheus) and health checks
+4. **Security**: Secure Redis with authentication and use TLS
+5. **Persistence**: Consider using a more durable queue system for critical operations
+
+Would you like me to modify any part of this implementation or add specific features?

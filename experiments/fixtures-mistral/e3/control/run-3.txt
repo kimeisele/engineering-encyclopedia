@@ -1,0 +1,102 @@
+# Function to Update a JSON Config File
+
+Here's a Python function that updates a JSON configuration file on disk:
+
+```python
+import json
+import os
+from typing import Any, Dict, Union
+
+def update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    create_if_missing: bool = False,
+    indent: int = 4
+) -> bool:
+    """
+    Update a JSON configuration file with new values.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update
+        create_if_missing: If True, create the file if it doesn't exist
+        indent: Indentation level for pretty-printing (None for compact)
+
+    Returns:
+        bool: True if successful, False if failed
+
+    Raises:
+        FileNotFoundError: If file doesn't exist and create_if_missing is False
+        json.JSONDecodeError: If file contains invalid JSON
+        OSError: For other file system errors
+    """
+    # Check if file exists
+    file_exists = os.path.exists(file_path)
+
+    if not file_exists and not create_if_missing:
+        raise FileNotFoundError(f"Config file not found: {file_path}")
+
+    try:
+        # Read existing config or initialize empty dict
+        if file_exists:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        else:
+            config = {}
+
+        # Apply updates
+        config.update(updates)
+
+        # Write back to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=indent, ensure_ascii=False)
+
+        return True
+
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(f"Invalid JSON in config file: {e.msg}", e.doc, e.pos)
+    except OSError as e:
+        raise OSError(f"Failed to update config file: {e}")
+```
+
+## Usage Examples
+
+```python
+# Example 1: Update existing file
+try:
+    success = update_json_config(
+        "config.json",
+        {"timeout": 30, "debug": True}
+    )
+    if success:
+        print("Config updated successfully")
+except Exception as e:
+    print(f"Error updating config: {e}")
+
+# Example 2: Create new file if it doesn't exist
+try:
+    success = update_json_config(
+        "new_config.json",
+        {"version": "1.0", "enabled": False},
+        create_if_missing=True
+    )
+    if success:
+        print("Config created successfully")
+except Exception as e:
+    print(f"Error creating config: {e}")
+```
+
+## Features
+
+1. **Safe updates**: Preserves existing configuration while applying new values
+2. **Error handling**: Properly handles file not found, invalid JSON, and other errors
+3. **Flexible**: Can create new files if they don't exist
+4. **Pretty printing**: Optional indentation for human-readable output
+5. **Type hints**: Clear function signature with type annotations
+
+## Notes
+
+- The function preserves all existing configuration keys that aren't being updated
+- For security, it uses UTF-8 encoding and ensures ASCII characters are preserved
+- The `create_if_missing` parameter allows for safe initialization of new config files
+- You can control the output formatting with the `indent` parameter

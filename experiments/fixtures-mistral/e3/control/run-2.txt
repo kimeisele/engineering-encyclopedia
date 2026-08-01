@@ -1,0 +1,125 @@
+# Function to Update a JSON Config File
+
+Here's a Python function that safely updates a JSON configuration file on disk:
+
+```python
+import json
+import os
+from typing import Dict, Any
+
+def update_json_config(file_path: str, updates: Dict[str, Any]) -> bool:
+    """
+    Safely updates a JSON configuration file with new values.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update in the config
+
+    Returns:
+        bool: True if update was successful, False otherwise
+    """
+    try:
+        # Read existing config
+        if not os.path.exists(file_path):
+            # Create empty config if file doesn't exist
+            config = {}
+        else:
+            with open(file_path, 'r') as f:
+                config = json.load(f)
+
+        # Apply updates
+        config.update(updates)
+
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return True
+    except Exception as e:
+        print(f"Error updating config file: {e}")
+        return False
+```
+
+## Usage Example
+
+```python
+# Example usage
+config_updates = {
+    "timeout": 30,
+    "debug_mode": True,
+    "api_key": "abc123xyz"
+}
+
+success = update_json_config("config.json", config_updates)
+if success:
+    print("Config updated successfully!")
+else:
+    print("Failed to update config.")
+```
+
+## Features
+
+1. **Safe file handling**: Creates the file if it doesn't exist
+2. **Error handling**: Catches and reports exceptions
+3. **Preserves existing data**: Only updates specified keys
+4. **Pretty printing**: Maintains readable JSON formatting with indentation
+5. **Type hints**: Includes type annotations for better code clarity
+
+## Alternative Version (More Robust)
+
+For production use, you might want a more robust version that handles edge cases better:
+
+```python
+import json
+import os
+from typing import Dict, Any, Optional
+
+def update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    default_config: Optional[Dict[str, Any]] = None
+) -> bool:
+    """
+    Safely updates a JSON configuration file with new values.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update in the config
+        default_config: Default config to use if file doesn't exist
+
+    Returns:
+        bool: True if update was successful, False otherwise
+    """
+    try:
+        # Read existing config or create new one
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                config = json.load(f)
+        else:
+            config = default_config if default_config is not None else {}
+
+        # Validate updates
+        if not isinstance(updates, dict):
+            raise ValueError("Updates must be a dictionary")
+
+        # Apply updates
+        config.update(updates)
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return True
+    except Exception as e:
+        print(f"Error updating config file: {e}")
+        return False
+```
+
+This version adds:
+- Support for default config values
+- Directory creation if needed
+- Input validation
+- More comprehensive error handling

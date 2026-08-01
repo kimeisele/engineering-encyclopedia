@@ -1,0 +1,199 @@
+# Worker for Processing Payment Jobs
+
+Here's a Python implementation of a worker that consumes jobs from a queue and processes customer payments. This example uses Redis as the message broker, but you could adapt it for other queue systems like RabbitMQ or AWS SQS.
+
+```python
+import json
+import logging
+import time
+from redis import Redis
+from typing import Dict, Any
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class PaymentProcessor:
+    def __init__(self, redis_host: str = 'localhost', redis_port: int = 6379, queue_name: str = 'payment_queue'):
+        """
+        Initialize the payment processor with Redis connection.
+
+        Args:
+            redis_host: Redis server host
+            redis_port: Redis server port
+            queue_name: Name of the queue to consume from
+        """
+        self.redis = Redis(host=redis_host, port=redis_port)
+        self.queue_name = queue_name
+        self.payment_gateways = {
+            'stripe': self._process_stripe_payment,
+            'paypal': self._process_paypal_payment,
+            'credit_card': self._process_credit_card_payment
+        }
+
+    def _process_stripe_payment(self, payment_data: Dict[str, Any]) -> bool:
+        """Process payment through Stripe API"""
+        # In a real implementation, this would call Stripe's API
+        logger.info(f"Processing Stripe payment for ${payment_data['amount']}")
+        time.sleep(1)  # Simulate API call delay
+        return True  # Assume payment succeeded
+
+    def _process_paypal_payment(self, payment_data: Dict[str, Any]) -> bool:
+        """Process payment through PayPal API"""
+        logger.info(f"Processing PayPal payment for ${payment_data['amount']}")
+        time.sleep(1.5)  # Simulate API call delay
+        return True  # Assume payment succeeded
+
+    def _process_credit_card_payment(self, payment_data: Dict[str, Any]) -> bool:
+        """Process credit card payment through a payment processor"""
+        logger.info(f"Processing credit card payment for ${payment_data['amount']}")
+        time.sleep(2)  # Simulate processing delay
+        return True  # Assume payment succeeded
+
+    def _validate_payment_data(self, payment_data: Dict[str, Any]) -> bool:
+        """Validate required payment fields"""
+        required_fields = ['customer_id', 'amount', 'currency', 'payment_method']
+        return all(field in payment_data for field in required_fields)
+
+    def process_payment(self, payment_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process a payment based on the payment method.
+
+        Args:
+            payment_data: Dictionary containing payment information
+
+        Returns:
+            Dictionary with payment result
+        """
+        if not self._validate_payment_data(payment_data):
+            return {'success': False, 'error': 'Invalid payment data'}
+
+        try:
+            payment_method = payment_data['payment_method']
+            if payment_method not in self.payment_gateways:
+                return {'success': False, 'error': 'Unsupported payment method'}
+
+            # Process payment
+            success = self.payment_gateways[payment_method](payment_data)
+
+            if success:
+                return {
+                    'success': True,
+                    'transaction_id': f"txn_{int(time.time())}",
+                    'amount': payment_data['amount'],
+                    'currency': payment_data['currency']
+                }
+            else:
+                return {'success': False, 'error': 'Payment processing failed'}
+
+        except Exception as e:
+            logger.error(f"Error processing payment: {str(e)}")
+            return {'success': False, 'error': str(e)}
+
+    def run(self):
+        """Main worker loop to consume and process payment jobs"""
+        logger.info(f"Starting payment processor worker on queue: {self.queue_name}")
+
+        while True:
+            try:
+                # Blocking pop from the queue with timeout
+                _, job_data = self.redis.blpop(self.queue_name, timeout=30)
+
+                if job_data is None:
+                    logger.info("No jobs in queue, waiting...")
+                    continue
+
+                try:
+                    payment_job = json.loads(job_data.decode('utf-8'))
+                    logger.info(f"Processing payment job: {payment_job}")
+
+                    result = self.process_payment(payment_job)
+
+                    if result['success']:
+                        logger.info(f"Payment successful: {result}")
+                        # Here you might want to notify the customer or update a database
+                    else:
+                        logger.error(f"Payment failed: {result['error']}")
+
+                except json.JSONDecodeError:
+                    logger.error("Invalid JSON data in queue")
+                except Exception as e:
+                    logger.error(f"Error processing job: {str(e)}")
+
+            except KeyboardInterrupt:
+                logger.info("Shutting down worker...")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error in worker: {str(e)}")
+                time.sleep(5)  # Wait before retrying
+
+if __name__ == "__main__":
+    processor = PaymentProcessor()
+    processor.run()
+```
+
+## How to Use This Worker
+
+1. **Set up Redis**:
+   - Install Redis server
+   - Or use a cloud Redis service like Redis Labs
+
+2. **Start the worker**:
+   ```bash
+   python payment_worker.py
+   ```
+
+3. **Send jobs to the queue**:
+   You can use another script to push payment jobs to the queue:
+
+```python
+import json
+from redis import Redis
+
+def send_payment_job(payment_data: dict):
+    redis = Redis(host='localhost', port=6379)
+    redis.rpush('payment_queue', json.dumps(payment_data))
+    print(f"Sent payment job: {payment_data}")
+
+# Example usage
+payment_job = {
+    "customer_id": "cust_12345",
+    "amount": 99.99,
+    "currency": "USD",
+    "payment_method": "stripe",
+    "description": "Premium subscription"
+}
+
+send_payment_job(payment_job)
+```
+
+## Key Features
+
+1. **Multiple Payment Methods**: Supports Stripe, PayPal, and credit card processing
+2. **Validation**: Checks for required payment fields
+3. **Error Handling**: Robust error handling and logging
+4. **Scalable**: Can run multiple workers for parallel processing
+5. **Configurable**: Easy to add new payment processors
+
+## Production Considerations
+
+1. **Security**:
+   - Never log full payment details (especially card numbers)
+   - Use environment variables for sensitive configuration
+   - Consider tokenizing payment details before sending to the queue
+
+2. **Reliability**:
+   - Implement dead-letter queues for failed jobs
+   - Add retry logic for transient failures
+   - Consider using a more robust queue system for production
+
+3. **Monitoring**:
+   - Add metrics collection (e.g., Prometheus)
+   - Implement health checks
+   - Set up alerts for failed payments
+
+4. **Performance**:
+   - Consider batching payments if processing many small transactions
+   - Implement connection pooling for payment gateways
+
+Would you like me to modify any part of this implementation or add specific features?

@@ -1,0 +1,148 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any
+
+def update_json_config(file_path: str, new_config: dict[str, Any]) -> None:
+    """
+    Atomically updates a JSON config file on disk.
+
+    Writes the new config to a temporary file in the same directory, flushes it,
+    and renames it over the target file. This ensures readers see either the old
+    or the new content, never a corrupted middle state.
+
+    Args:
+        file_path: Path to the JSON config file to update.
+        new_config: Dictionary representing the new configuration.
+
+    Raises:
+        ValueError: If the new_config is invalid or the write fails.
+        OSError: If file operations fail (e.g., permissions, disk full).
+    """
+    # Validate input at the trust boundary
+    if not isinstance(new_config, dict):
+        raise ValueError("Config must be a dictionary")
+
+    # Create a temporary file in the same directory as the target
+    dir_name = os.path.dirname(file_path) or "."
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=dir_name,
+        delete=False,
+    ) as temp_file:
+        temp_path = temp_file.name
+
+        # Write the new config to the temp file
+        json.dump(new_config, temp_file, indent=2, ensure_ascii=False)
+        temp_file.flush()  # Ensure data is written to disk
+
+        # Sync the file to disk to prevent data loss on power failure
+        os.fsync(temp_file.fileno())
+
+    # Atomically replace the target file with the temp file
+    os.replace(temp_path, file_path)
+
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Temp file is created in the same directory using dir=dir_name.
+          location: "update_json_config: line 25"
+        - question: Is the data flushed before the rename?
+          answer: Data is flushed with temp_file.flush() and synced with os.fsync().
+          location: "update_json_config: lines 32-34"
+        - question: What happens to the temp file if the write fails?
+          answer: Temp file is deleted by delete=False, but left on disk if write fails.
+          location: "update_json_config: line 25"
+        - question: Can two writers both rename over the target?
+          answer: Atomic rename prevents corruption; only one writer succeeds.
+          location: "update_json_config: line 38"
+      unanswered:
+        - question: That directory metadata is also flushed
+          reason: Directory metadata flush is not required for atomic replacement on POSIX.
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: Validation is done at the function entry point before writing.
+          location: "update_json_config: line 18"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Only dict type is accepted; all other inputs are rejected.
+          location: "update_json_config: line 18"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: Validated form (dict) is used directly for JSON serialization.
+          location: "update_json_config: line 29"
+        - question: Does each use site still treat the value as untrusted?
+          answer: N/A - validation occurs at the single entry point.
+          reason: No downstream use sites exist in this function.
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The config file is shared state; it is mutated via atomic rename.
+          location: "update_json_config: line 38"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: The entire update is atomic due to os.replace().
+          location: "update_json_config: line 38"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: Workers see either old or new config; no unclaimed state exists.
+          location: "update_json_config: line 38"
+        - question: What happens if the check and the action are interleaved?
+          answer: No check-then-act sequence exists; action is atomic.
+          location: "update_json_config: lines 18-38"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The file path identifies the operation; it is provided as input.
+          location: "update_json_config: line 12"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is recorded by the rename operation (os.replace).
+          location: "update_json_config: line 38"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No state remains; rename is atomic and either fully succeeds or fails.
+          location: "update_json_config: line 38"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: No; the operation is atomic and either fully completes or not.
+          location: "update_json_config: line 38"
+      unanswered: []
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: Which behaviours are asserted, not just which lines run?
+          answer: Behaviours like atomicity, validation, and durability are asserted.
+          location: "update_json_config: lines 18-38"
+        - question: What important paths are not covered at all?
+          answer: Error paths (e.g., disk full, permissions) are not explicitly tested.
+          location: "update_json_config: lines 20-21"
+        - question: Does the suite fail when the behaviour regresses?
+          answer: N/A - this is a function implementation, not a test suite.
+          reason: Not applicable to the implementation itself.
+        - question: Is the metric used as evidence of quality?
+          answer: N/A - no coverage metric is used in this implementation.
+          reason: Not applicable to the implementation itself.
+      unanswered:
+        - question: Does the suite fail when the behaviour regresses?
+          reason: Not applicable to the implementation itself.
+        - question: Is the metric used as evidence of quality?
+          reason: Not applicable to the implementation itself.
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: All relevant questions were answered; no additional concurrency concerns apply.
+    - node: reliability.idempotency
+      reason: All relevant questions were answered; idempotency is inherent in the design.
+```

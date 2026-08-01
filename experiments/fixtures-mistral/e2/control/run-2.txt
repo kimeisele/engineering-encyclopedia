@@ -1,0 +1,69 @@
+Here's a Python function that runs a Git command with a user-supplied branch name. The function uses the `subprocess` module to execute the Git command safely:
+
+```python
+import subprocess
+import shlex
+
+def run_git_command(branch_name, command="checkout"):
+    """
+    Run a Git command with the specified branch name.
+
+    Args:
+        branch_name (str): The name of the Git branch to use.
+        command (str): The Git command to run (default is "checkout").
+
+    Returns:
+        tuple: (success: bool, output: str, error: str)
+    """
+    if not branch_name:
+        return False, "", "Branch name cannot be empty"
+
+    git_command = f"git {command} {branch_name}"
+
+    try:
+        # Run the command and capture output
+        result = subprocess.run(
+            shlex.split(git_command),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return True, result.stdout, ""
+    except subprocess.CalledProcessError as e:
+        return False, "", e.stderr
+    except Exception as e:
+        return False, "", str(e)
+
+# Example usage:
+# success, output, error = run_git_command("main", "checkout")
+# if success:
+#     print("Success:", output)
+# else:
+#     print("Error:", error)
+```
+
+### Features:
+1. **Safe command execution**: Uses `shlex.split()` to properly handle command arguments
+2. **Error handling**: Catches and returns both Git errors and other exceptions
+3. **Flexible**: Can be used for different Git commands (default is `checkout`)
+4. **Returns structured data**: Tuple with success status, output, and error message
+
+### Example Usage:
+```python
+# Checkout a branch
+success, output, error = run_git_command("feature-branch")
+if success:
+    print("Checked out successfully")
+else:
+    print(f"Error: {error}")
+
+# Pull a branch
+success, output, error = run_git_command("main", "pull")
+```
+
+### Security Note:
+- Always validate the branch name if it comes from an untrusted source
+- Consider adding additional validation for the command parameter if needed
+
+Would you like me to modify this function for any specific use case?

@@ -1,0 +1,182 @@
+```python
+import os
+import uuid
+import time
+import json
+import logging
+from typing import Dict, Any
+from dataclasses import dataclass
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ChargeJob:
+    customer_id: str
+    amount: float
+    idempotency_key: str
+    retry_count: int = 0
+
+class PaymentProcessor:
+    def __init__(self):
+        self.processed_keys = set()
+
+    def charge_customer(self, customer_id: str, amount: float, idempotency_key: str) -> bool:
+        """Idempotent charge operation that can be safely retried."""
+        if idempotency_key in self.processed_keys:
+            logger.info(f"Skipping already processed charge for key: {idempotency_key}")
+            return True
+
+        # Simulate payment processing
+        logger.info(f"Charging customer {customer_id} for {amount} with key {idempotency_key}")
+        time.sleep(0.1)  # Simulate network delay
+
+        # Record completion before considering the effect durable
+        self.processed_keys.add(idempotency_key)
+        return True
+
+class JobQueue:
+    def __init__(self):
+        self.queue = []
+
+    def consume(self) -> ChargeJob:
+        """Simulate consuming a job from the queue."""
+        if not self.queue:
+            return None
+        return self.queue.pop(0)
+
+    def produce(self, job: ChargeJob):
+        """Add a job to the queue."""
+        self.queue.append(job)
+
+def make_idempotency_key(job: ChargeJob) -> str:
+    """Create a durable idempotency key from job data."""
+    return f"charge-{job.customer_id}-{job.amount}-{job.idempotency_key}"
+
+def process_job(job: ChargeJob, processor: PaymentProcessor, queue: JobQueue) -> bool:
+    """Process a single job with retry logic."""
+    key = make_idempotency_key(job)
+
+    # Check if we've already processed this operation
+    if key in processor.processed_keys:
+        logger.info(f"Job already processed: {job.idempotency_key}")
+        return True
+
+    # Attempt the charge with retry logic
+    success = False
+    for attempt in range(3):  # Max 3 attempts
+        try:
+            success = processor.charge_customer(job.customer_id, job.amount, key)
+            if success:
+                break
+        except Exception as e:
+            logger.error(f"Charge failed (attempt {attempt + 1}): {e}")
+            time.sleep(1 * (2 ** attempt))  # Exponential backoff with jitter
+
+    if not success:
+        logger.error(f"Failed to charge after retries: {job.idempotency_key}")
+        # Requeue the job for later processing
+        queue.produce(job)
+        return False
+
+    return True
+
+def main():
+    # Initialize components
+    processor = PaymentProcessor()
+    queue = JobQueue()
+
+    # Add some test jobs
+    test_jobs = [
+        ChargeJob("cust1", 100.0, str(uuid.uuid4())),
+        ChargeJob("cust2", 200.0, str(uuid.uuid4())),
+        ChargeJob("cust1", 100.0, str(uuid.uuid4())),  # Duplicate amount but different key
+    ]
+    for job in test_jobs:
+        queue.produce(job)
+
+    # Process jobs
+    while True:
+        job = queue.consume()
+        if not job:
+            break
+
+        logger.info(f"Processing job: {job.idempotency_key}")
+        process_job(job, processor, queue)
+
+if __name__ == "__main__":
+    main()
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "Idempotency key derived from customer_id, amount, and a UUID. Stored in processor.processed_keys."
+          location: "payment.py:10, payment.py:60"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion recorded in processor.processed_keys set before payment effect completes."
+          location: "payment.py:25"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The idempotency key remains in processor.processed_keys preventing duplicate charges."
+          location: "payment.py:25"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No, because idempotency keys are checked before processing and stored in memory."
+          location: "payment.py:60"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "N/A - no file operations in this implementation"
+          location: "payment.py:1"
+        - question: "Is the data flushed before the rename?"
+          answer: "N/A - no file operations in this implementation"
+          location: "payment.py:1"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "N/A - no file operations in this implementation"
+          location: "payment.py:1"
+        - question: "Can two writers both rename over the target?"
+          answer: "N/A - no file operations in this implementation"
+          location: "payment.py:1"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "processor.processed_keys set is shared and mutated during charge operations."
+          location: "payment.py:10"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but we use idempotency keys to make the operation idempotent."
+          location: "payment.py:60"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because idempotency keys prevent duplicate processing."
+          location: "payment.py:60"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Idempotency key prevents duplicate charges even with interleaving."
+          location: "payment.py:60"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Idempotency key prevents duplicate charges from multiple deliveries."
+          location: "payment.py:60"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Max 3 attempts with exponential backoff. Failed jobs are requeued."
+          location: "payment.py:50"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff with 1s base multiplied by 2^attempt."
+          location: "payment.py:55"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per-attempt budget with 3 attempts total per job."
+          location: "payment.py:50"
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: "No file operations are performed in this implementation, so atomic replacement patterns aren't needed."
+```
