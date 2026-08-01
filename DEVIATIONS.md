@@ -176,3 +176,21 @@ Alternative rejected: silently keeping the count assertion at 8 with ten
 files on disk (a weakened test), or regenerating the frozen packs (which
 would erase the hash evidence the recorded runs were made against).
 Reversibility: easy (remove the two nodes and revert the count assertion)
+
+### D11 — Node 11 `testing.evaluation-contamination` (Sections 1 and 4)
+Section: 1, 4
+Brief says: the corpus is exactly the eight nodes of Section 4, and any node
+beyond them is a defect.
+Problem: the E2 analysis of the Section 8 experiment exposed a contract
+defect — the Application Report reproduces a node's questions verbatim, and
+an artifact scored together with its own description is contaminated. The
+owner instructed that this be written up as a node (it requires a design
+decision: where the artifact ends and its description begins), per the
+decision-vs-idiom corpus rule (`docs/CORPUS_RULE.md`).
+Decision: added `testing.evaluation-contamination` as node 11 at the Section
+3 quality bar and raised the count assertion 10 -> 11 as an intentional
+corpus change. The founding brief remains the historical v1 specification.
+Alternative rejected: leaving the finding only in `experiments/RESULTS.md` —
+the brief exists precisely to make such findings retrievable and inspectable
+(no second list of candidates; the node is delivered now, not deferred).
+Reversibility: easy (remove the node and revert the count assertion)

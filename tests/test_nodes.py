@@ -1,7 +1,7 @@
-"""Corpus tests: exactly ten nodes, schema rules, hard limits, relations,
+"""Corpus tests: exactly eleven nodes, schema rules, hard limits, relations,
 taxonomy bindings (Sections 3 and 4 of the founding brief; corpus extended
-from eight to ten nodes by owner decision, see docs/CORPUS_RULE.md and
-DEVIATIONS D10)."""
+from eight to eleven nodes by owner decision, see docs/CORPUS_RULE.md and
+DEVIATIONS D10/D11)."""
 
 import unittest
 from pathlib import Path
@@ -29,6 +29,7 @@ EXPECTED_IDS = {
     "observability.error-context",
     "reliability.outbox-pattern",
     "performance.cache-invalidation",
+    "testing.evaluation-contamination",
 }
 
 REQUIRED_FIELDS = {
@@ -43,13 +44,13 @@ LIST_FIELDS = ENTRY_WORD_CHECKED_FIELDS
 
 
 class TestCorpus(unittest.TestCase):
-    def test_exactly_ten_nodes(self):
+    def test_exactly_eleven_nodes(self):
         # The count is asserted: a short corpus fails rather than lowering
-        # the expectation (Section 10). Raised 8 -> 10 by owner decision —
-        # an intentional corpus change (docs/CORPUS_RULE.md), not a
-        # weakened test.
+        # the expectation (Section 10). Raised 8 -> 10 -> 11 by owner
+        # decision — an intentional corpus change (docs/CORPUS_RULE.md,
+        # DEVIATIONS D10/D11), not a weakened test.
         nodes = load_nodes()
-        self.assertEqual(len(nodes), 10)
+        self.assertEqual(len(nodes), 11)
         self.assertEqual({n.id for n in nodes}, EXPECTED_IDS)
 
     def test_no_duplicate_ids(self):

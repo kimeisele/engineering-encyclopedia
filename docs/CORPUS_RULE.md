@@ -36,13 +36,17 @@ decision-vs-idiom rule; nothing in the data contradicts it.
 
 ## Consequence of this change
 
-The corpus grows from eight to ten nodes, both chosen by this rule because
+The corpus grows from eight to eleven nodes, all chosen by this rule because
 they require a decision rather than recall:
 
 - `reliability.outbox-pattern` — what durably records the intent, and what
   identifies a row as published;
 - `performance.cache-invalidation` — what identifies a cached entry, and
-  what invalidates it.
+  what invalidates it;
+- `testing.evaluation-contamination` — where the artifact ends and its own
+  description begins (discovered in the E2 analysis; the report reproduces
+  the check strings verbatim, so an artifact scored together with its
+  description is contaminated).
 
 ## How the rule is applied later
 
