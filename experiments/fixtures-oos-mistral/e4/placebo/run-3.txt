@@ -1,0 +1,95 @@
+Here's a Python function that calls a downstream HTTP API with backoff retry logic to avoid hammering it when it's down:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
+
+def call_downstream_api(
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    backoff_factor: float = 2.0,
+    timeout: int = 10
+) -> Dict[str, Any]:
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The API endpoint URL
+        payload: Optional request payload
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        backoff_factor: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary containing the API response
+
+    Raises:
+        RequestException: If all retry attempts fail
+    """
+    retry_count = 0
+    backoff = initial_backoff
+
+    while retry_count <= max_retries:
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+
+        except RequestException as e:
+            if retry_count == max_retries:
+                # Final attempt failed - raise with context
+                raise RequestException(
+                    f"API call failed after {max_retries} retries. "
+                    f"Last error: {str(e)}"
+                ) from e
+
+            # Wait with exponential backoff
+            time.sleep(backoff)
+            backoff *= backoff_factor
+            retry_count += 1
+
+    # This line should theoretically never be reached
+    raise RequestException("Unexpected error in API call retry logic")
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes retry count and last error details.
+          location: "call_downstream_api:45"
+        - question: Can the operator find the request or job from the message?
+          answer: The error includes the API URL and retry context.
+          location: "call_downstream_api:45"
+        - question: Is sensitive data excluded from the message?
+          answer: Only the error message is included, no sensitive payload data.
+          location: "call_downstream_api:45"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is added when the final exception is raised.
+          location: "call_downstream_api:45"
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in pack - already applied above
+    - node: observability.error-context
+      reason: Duplicate node in pack - already applied above
+    - node: observability.error-context
+      reason: Duplicate node in pack - already applied above
+```

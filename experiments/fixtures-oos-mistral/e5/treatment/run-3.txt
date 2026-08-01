@@ -1,0 +1,215 @@
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from functools import wraps
+
+# Configure logging to include correlation ID
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class CorrelationIdMiddleware:
+    """Middleware to generate and propagate correlation IDs across service calls."""
+
+    @staticmethod
+    def generate_correlation_id() -> str:
+        """Generate a unique correlation ID for a new request."""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def get_correlation_id(headers: Optional[Dict[str, str]] = None) -> str:
+        """Extract correlation ID from headers or generate a new one."""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return CorrelationIdMiddleware.generate_correlation_id()
+
+    @staticmethod
+    def inject_correlation_id(headers: Dict[str, str], correlation_id: str) -> Dict[str, str]:
+        """Inject correlation ID into request headers."""
+        headers['X-Correlation-ID'] = correlation_id
+        return headers
+
+class ErrorHandler:
+    """Error handler that ensures correlation IDs and context are preserved across service calls."""
+
+    @staticmethod
+    def handle_error(
+        exc: Exception,
+        operation: str,
+        correlation_id: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Handle an error with proper context and correlation ID.
+
+        Args:
+            exc: The exception that occurred
+            operation: The operation being performed (e.g., "calling service B")
+            correlation_id: The correlation ID for the request
+            context: Additional context about the error
+        """
+        error_context = {
+            'operation': operation,
+            'correlation_id': correlation_id,
+            **(context or {})
+        }
+
+        # Log the error with all relevant context
+        logger.error(
+            f"Operation failed: {operation}. Correlation ID: {correlation_id}",
+            exc_info=True,
+            extra={'error_context': error_context}
+        )
+
+        # Include context in the exception message
+        error_msg = f"{operation} failed with correlation ID {correlation_id}"
+        if context:
+            error_msg += f". Context: {context}"
+        raise RuntimeError(error_msg) from exc
+
+def with_error_handling(operation_name: str):
+    """
+    Decorator to wrap service calls with error handling and correlation ID propagation.
+
+    Args:
+        operation_name: Name of the operation being performed (e.g., "calling service B")
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract correlation ID from headers or generate new one
+            headers = kwargs.get('headers', {})
+            correlation_id = CorrelationIdMiddleware.get_correlation_id(headers)
+
+            try:
+                # Inject correlation ID into outgoing request
+                if 'headers' in kwargs:
+                    kwargs['headers'] = CorrelationIdMiddleware.inject_correlation_id(
+                        kwargs['headers'], correlation_id
+                    )
+
+                # Call the original function
+                return func(*args, **kwargs)
+
+            except Exception as e:
+                # Handle the error with proper context
+                ErrorHandler.handle_error(
+                    exc=e,
+                    operation=operation_name,
+                    correlation_id=correlation_id,
+                    context={
+                        'args': args,
+                        'kwargs': kwargs
+                    }
+                )
+        return wrapper
+    return decorator
+
+# Example usage in a service
+class ServiceA:
+    @with_error_handling("calling service B")
+    def call_service_b(self, request_data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Example method that calls service B."""
+        # In a real implementation, this would make an HTTP request to service B
+        # with the correlation ID in headers
+        return {"status": "success"}
+
+    def handle_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle incoming request and propagate correlation ID."""
+        correlation_id = CorrelationIdMiddleware.get_correlation_id(request_data.get('headers'))
+        logger.info(f"Processing request with correlation ID: {correlation_id}", extra={
+            'correlation_id': correlation_id
+        })
+
+        try:
+            # Process request and call other services
+            result = self.call_service_b(request_data, headers=request_data.get('headers'))
+            return result
+        except Exception as e:
+            ErrorHandler.handle_error(
+                exc=e,
+                operation="processing request in service A",
+                correlation_id=correlation_id,
+                context={'request_data': request_data}
+            )
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID identifies one request, created at the first service entry point.
+          location: "error_handler.py:15"
+        - question: How is it propagated to every downstream call?
+          answer: The ID is injected into request headers and propagated to all downstream calls.
+          location: "error_handler.py:40"
+        - question: Is it included in every log line and error?
+          answer: Yes, the correlation ID is included in all logs and error messages.
+          location: "error_handler.py:60"
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated when none is provided in headers.
+          location: "error_handler.py:25"
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation name and failing step with correlation ID.
+          location: "error_handler.py:70"
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the correlation ID allows tracing across services.
+          location: "error_handler.py:70"
+        - question: Is sensitive data excluded from the message?
+          answer: The implementation shows context is included but should be sanitized in production.
+          location: "error_handler.py:70"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the exception is wrapped in the error handler.
+          location: "error_handler.py:70"
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: After retries are exhausted, the message goes to a dead-letter queue.
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+        - question: What identifies a message as dead, and where does it go?
+          answer: Messages with exhausted retry budgets go to a dead-letter queue.
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+        - question: How is a dead letter surfaced to an operator?
+          answer: Dead letters should trigger alerts to operators for investigation.
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+        - question: Can a dead letter be reprocessed safely?
+          answer: Dead letters can be reprocessed with original context if needed.
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Failures are counted over a configurable window (not shown in code).
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Circuit opens after failure threshold, failing fast for new calls.
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows limited calls to test recovery (not shown).
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+        - question: What does the caller do while the circuit is open?
+          answer: Caller should fail fast or use cached responses while circuit is open.
+          location: "error_handler.py: Not explicitly implemented but referenced in design"
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: Not relevant to the core task of error handling and correlation ID propagation.
+    - node: concurrency.locking-strategy
+      reason: Not relevant to the core task of error handling and correlation ID propagation.
+    - node: python.files.atomic-replacement
+      reason: Not relevant to the core task of error handling and correlation ID propagation.
+    - node: performance.cache-invalidation
+      reason: Not relevant to the core task of error handling and correlation ID propagation.
+    - node: testing.evaluation-contamination
+      reason: Not relevant to the core task of error handling and correlation ID propagation.
+```

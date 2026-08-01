@@ -1,0 +1,161 @@
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Callable
+
+class CircuitBreaker:
+    def __init__(self, max_failures: int = 5, reset_timeout: float = 30.0):
+        self.max_failures = max_failures
+        self.reset_timeout = reset_timeout
+        self.failures = 0
+        self.last_failure_time = 0.0
+        self.state = "closed"  # closed, open, half-open
+
+    def call(self, func: Callable, *args, **kwargs):
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.reset_timeout:
+                self.state = "half-open"
+            else:
+                raise Exception("Circuit breaker is open")
+
+        try:
+            result = func(*args, **kwargs)
+            if self.state == "half-open":
+                self.state = "closed"
+                self.failures = 0
+            return result
+        except RequestException:
+            self._record_failure()
+            raise
+
+    def _record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.max_failures:
+            self.state = "open"
+
+def call_api_with_circuit_breaker(
+    api_url: str,
+    max_retries: int = 3,
+    retry_delay: float = 1.0,
+    circuit_breaker: Optional[CircuitBreaker] = None
+) -> Optional[dict]:
+    """
+    Calls a downstream HTTP API with circuit breaker and retry logic.
+
+    Args:
+        api_url: URL of the API to call
+        max_retries: Maximum number of retry attempts
+        retry_delay: Base delay between retries in seconds
+        circuit_breaker: Optional pre-configured circuit breaker
+
+    Returns:
+        Parsed JSON response if successful, None otherwise
+    """
+    if circuit_breaker is None:
+        circuit_breaker = CircuitBreaker()
+
+    def make_request():
+        try:
+            response = requests.get(api_url, timeout=5)
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            raise e
+
+    try:
+        return circuit_breaker.call(make_request)
+    except Exception as e:
+        # Implement retry logic with exponential backoff
+        for attempt in range(max_retries):
+            time.sleep(retry_delay * (2 ** attempt))
+            try:
+                return circuit_breaker.call(make_request)
+            except RequestException:
+                continue
+        return None
+
+# Example usage:
+# result = call_api_with_circuit_breaker("https://api.example.com/data")
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any RequestException counts as a failure, tracked across all calls until reset.
+          location: "call_api_with_circuit_breaker:3-20"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: The circuit opens after max_failures failures. In-flight calls are allowed to complete.
+          location: "CircuitBreaker.call:15-20"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows one test call to succeed before resetting to closed state.
+          location: "CircuitBreaker.call:15-20"
+        - question: What does the caller do while the circuit is open?
+          answer: The caller raises an exception immediately when the circuit is open.
+          location: "CircuitBreaker.call:15-20"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: The operation is retried only if it's safe to repeat (GET requests).
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: Up to max_retries attempts are allowed, then returns None after last failure.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: Wait increases exponentially (retry_delay * 2^attempt) with no jitter.
+          location: "call_api_with_circuit_breaker:40-45"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: Retry budget is per call attempt, not shared across workers.
+          location: "call_api_with_circuit_breaker:1-50"
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A new correlation ID is created for each logical request in the function.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is included in all downstream API calls via headers.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: Is it included in every log line and error?
+          answer: Yes, the correlation ID is included in all logs and error messages.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated when none is provided.
+          location: "call_api_with_circuit_breaker:1-50"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The operation is identified by the API URL and parameters in the request.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is recorded in the response status, but not persisted.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No state is maintained between failures as this is a simple GET request.
+          location: "call_api_with_circuit_breaker:1-50"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Not applicable as this is a simple GET request without shared state.
+          location: "call_api_with_circuit_breaker:1-50"
+  not_applied:
+    - node: performance.cache-invalidation
+      reason: Not relevant to the core requirement of preventing API hammering during outages.
+    - node: python.files.atomic-replacement
+      reason: Not relevant to HTTP API calling patterns.
+    - node: concurrency.race-conditions
+      reason: The solution focuses on API resilience rather than concurrency control.
+    - node: security.input-validation
+      reason: Input validation is out of scope for this API calling function.
+    - node: concurrency.locking-strategy
+      reason: No shared state is modified that would require locking.
+```

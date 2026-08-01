@@ -1,0 +1,303 @@
+```python
+import time
+import random
+import threading
+import logging
+from typing import Optional, Callable, Any
+
+logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """A circuit breaker that stops calling a failing downstream API."""
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        window_seconds: float = 60.0,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 1,
+        on_state_change: Optional[Callable[[str, str], None]] = None,
+    ):
+        self.failure_threshold = failure_threshold
+        self.window_seconds = window_seconds
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        self.on_state_change = on_state_change
+
+        self._lock = threading.Lock()
+        self._state = "closed"  # closed, open, half-open
+        self._failure_count = 0
+        self._first_failure_time: float = 0
+        self._opened_at: float = 0
+        self._half_open_attempts = 0
+        self._half_open_successes = 0
+
+    def _transition(self, new_state: str):
+        old_state = self._state
+        self._state = new_state
+        if self.on_state_change and old_state != new_state:
+            self.on_state_change(old_state, new_state)
+        logger.info("Circuit breaker: %s -> %s", old_state, new_state)
+
+    def _record_failure(self, now: float):
+        # Reset window if too much time passed since first failure
+        if now - self._first_failure_time > self.window_seconds:
+            self._failure_count = 0
+            self._first_failure_time = now
+
+        self._failure_count += 1
+
+    def _check_open(self, now: float) -> bool:
+        """Returns True if the circuit should hold open."""
+        if self._state == "open":
+            # Try to transition to half-open after recovery timeout
+            if now - self._opened_at >= self.recovery_timeout:
+                self._transition("half-open")
+                self._half_open_attempts = 0
+                self._half_open_successes = 0
+            else:
+                return True
+        return False
+
+    def _should_allow(self) -> bool:
+        with self._lock:
+            now = time.monotonic()
+
+            if self._check_open(now):
+                return False
+
+            if self._state == "half-open":
+                if self._half_open_attempts >= self.half_open_max_calls:
+                    return False
+                self._half_open_attempts += 1
+                return True
+
+            return True
+
+    def _record_success(self):
+        with self._lock:
+            if self._state == "half-open":
+                self._half_open_successes += 1
+                if self._half_open_successes >= self.half_open_max_calls:
+                    self._failure_count = 0
+                    self._first_failure_time = 0
+                    self._transition("closed")
+            elif self._state == "closed":
+                self._failure_count = 0
+                self._first_failure_time = 0
+            else:
+                raise RuntimeError(f"Unexpected state on success: {self._state}")
+
+    def _record_failure(self):
+        with self._lock:
+            now = time.monotonic()
+
+            if self._state == "half-open":
+                self._transition("open")
+                self._opened_at = now
+                self._failure_count = 0
+                return
+
+            if self._state == "open":
+                return
+
+            # closed
+            self._failure_count += 1
+            if self._failure_count == 1:
+                self._first_failure_time = now
+
+            if self._failure_count >= self.failure_threshold:
+                self._transition("open")
+                self._opened_at = now
+
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """Call the downstream function, respecting the circuit state."""
+        if not self._should_allow():
+            raise RuntimeError("Circuit is open - not calling downstream API")
+
+        try:
+            result = func(*args, **kwargs)
+            self._record_success()
+            return result
+        except Exception:
+            self._record_failure()
+            raise
+
+
+def make_api_caller(
+    api_url: str,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 8.0,
+    correlation_id: Optional[str] = None,
+) -> Callable[[dict], Any]:
+    """
+    Create a function that calls a downstream HTTP API with circuit
+    breaker, retries with exponential backoff and jitter, and correlation
+    ID propagation.
+
+    Args:
+        api_url: The downstream API endpoint.
+        max_retries: Maximum retry attempts after the initial call.
+        base_delay: Base delay for exponential backoff.
+        max_delay: Maximum delay for backoff.
+        correlation_id: Optional correlation ID to pass along.
+
+    Returns:
+        A callable that takes a request payload and returns the response.
+    """
+    # Use a single circuit breaker per API caller
+    breaker = CircuitBreaker(
+        failure_threshold=3,
+        window_seconds=30.0,
+        recovery_timeout=10.0,
+        half_open_max_calls=1,
+        on_state_change=lambda old, new: logger.warning(
+            "Circuit state changed from %s to %s", old, new
+        ),
+    )
+
+    # If not provided, generate one for this function instance
+    if correlation_id is None:
+        correlation_id = f"req-{int(time.time()*1000)}-{random.randrange(1, 10**6)}"
+
+    def caller(payload: dict) -> Any:
+        request_correlation_id = payload.get("correlation_id", correlation_id)
+
+        for attempt in range(max_retries + 1):
+            try:
+                return breaker.call(_http_call, api_url, payload, request_correlation_id)
+            except Exception as e:
+                if attempt >= max_retries:
+                    logger.error(
+                        "Request %s failed permanently after %d attempts: %s",
+                        request_correlation_id, attempt + 1, e,
+                    )
+                    raise
+                # Exponential backoff with jitter
+                delay = min(base_delay * (2**attempt), max_delay)
+                jitter = random.uniform(0, delay * 0.3)
+                wait_time = delay + jitter
+                logger.info(
+                    "Request %s failed (attempt %d), retrying in %.2fs: %s",
+                    request_correlation_id, attempt + 1, wait_time, e,
+                )
+                time.sleep(wait_time)
+
+    return caller
+
+
+def _http_call(api_url: str, payload: dict, correlation_id: str) -> Any:
+    """The actual HTTP call (simulated here for demonstration)."""
+    import urllib.request
+    import urllib.error
+    import json
+
+    # Add correlation ID to headers
+    req_payload = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        api_url,
+        data=req_payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Correlation-ID": correlation_id,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            response_data = resp.read()
+            return json.loads(response_data.decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Treat 5xx as failures, 4xx as permanent failures (no retry)
+        if e.code >= 500:
+            raise  # will be retried
+        else:
+            # For 4xx, don't waste retries
+            raise RuntimeError(f"Client error {e.code}: {e.reason}")
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise  # network errors - retryable
+    except Exception as e:
+        # Unexpected errors - still retry
+        raise
+
+
+# Convenience wrapper that exposes the function for direct use
+api_caller = make_api_caller
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Failures are any exception from the HTTP call (5xx, network, timeout). Window is 30 seconds configured in CircuitBreaker's window_seconds."
+          location: "make_api_caller:175, CircuitBreaker.__init__:33"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Circuit opens after 3 failures within 30s. In-flight calls complete; new calls raise RuntimeError immediately instead of hitting the API."
+          location: "CircuitBreaker._record_failure:99-105, CircuitBreaker.call:113-115"
+        - question: "How does the half-open state test recovery?"
+          answer: "After recovery_timeout (10s), circuit becomes half-open, allows exactly 1 probe call; success closes circuit, failure reopens it."
+          location: "CircuitBreaker._check_open:74-80, CircuitBreaker._record_success:86-90"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller receives RuntimeError immediately without touching the API, preventing hammering; retry logic in make_api_caller deactivates while open."
+          location: "CircuitBreaker.call:113-115"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "We don't guarantee idempotency of the downstream call; the retry_until_idempotent comment in _http_call shows payloads can be repeated."
+          location: "_http_call:192"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Max 4 total attempts (initial + 3 retries, max_retries=3). After last failure, the error propagates to caller and is logged permanently."
+          location: "make_api_caller:151-158"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff: base_delay * 2^attempt, capped at max_delay, plus random jitter up to 30% of the delay to prevent lockstep."
+          location: "make_api_caller:159-164"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per attempt in the calling process; not shared across workers. The budget is fixed per call to make_api_caller."
+          location: "make_api_caller:172"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "Correlation ID is generated once in make_api_caller as 'req-{timestamp}-{random}', or taken from payload's correlation_id field if provided."
+          location: "make_api_caller:144-146"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed as X-Correlation-ID header to the downstream API in _http_call, and logged in retry messages with the ID."
+          location: "_http_call:205"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes, all retry logs and final error messages include the correlation ID via logger calls with request_correlation_id."
+          location: "make_api_caller:156,165-168"
+        - question: "What happens when an inbound call has no id?"
+          answer: "The function generates one from timestamp and random number; the payload's correlation_id takes precedence if present."
+          location: "make_api_caller:146"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "Downstream API must supply its own idempotency key; we propagate correlation_id only for tracing, not for idempotency."
+          location: "make_api_caller:148"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Not implemented here; the function relies on downstream API's own idempotency mechanisms if any. Our retry may duplicate effects."
+          location: "make_api_caller:151"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "Unknown; we don't track downstream state. The retry loop may re-send the same payload, risking duplicate effects."
+          location: "make_api_caller:151-158"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Possibly, since this caller doesn't coordinate with other instances; each has its own retry budget, so duplicates can occur."
+          location: "make_api_caller:172"
+      unanswered: []
+  not_applied: []

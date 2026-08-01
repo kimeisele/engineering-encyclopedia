@@ -1,0 +1,338 @@
+# Error Handler for Cross-Service Request Tracing
+
+Here's a comprehensive error handler that allows operators to trace a single request across two services. This implementation includes correlation IDs, structured logging, and error propagation.
+
+## Implementation (Node.js/Express Example)
+
+```javascript
+const { v4: uuidv4 } = require('uuid');
+const winston = require('winston');
+
+// Configure logger with correlation ID support
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [new winston.transports.Console()]
+});
+
+// Middleware to generate and attach correlation ID
+const correlationIdMiddleware = (req, res, next) => {
+  const correlationId = req.headers['x-correlation-id'] || uuidv4();
+  req.correlationId = correlationId;
+  res.setHeader('X-Correlation-ID', correlationId);
+  next();
+};
+
+// Error handler for cross-service requests
+const crossServiceErrorHandler = (serviceName) => {
+  return async (error, req, res, next) => {
+    const correlationId = req.correlationId;
+    const requestId = req.id || 'unknown';
+    const timestamp = new Date().toISOString();
+
+    // Log the error with context
+    logger.error({
+      message: `Error in ${serviceName}`,
+      correlationId,
+      requestId,
+      timestamp,
+      error: {
+        name: error.name,
+        message: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      },
+      service: serviceName,
+      path: req.path,
+      method: req.method,
+      userAgent: req.get('User-Agent'),
+      ip: req.ip
+    });
+
+    // Determine if this is the first service or second service
+    const isFirstService = serviceName === 'ServiceA';
+    const isSecondService = serviceName === 'ServiceB';
+
+    // If this is the first service, we need to propagate the correlation ID
+    if (isFirstService) {
+      // Add any additional context needed for ServiceB
+      const serviceBContext = {
+        someData: req.body.someField // Example data to pass to ServiceB
+      };
+
+      try {
+        // Make request to ServiceB
+        const response = await makeRequestToServiceB({
+          correlationId,
+          requestId,
+          ...serviceBContext
+        });
+
+        // If successful, continue
+        next();
+      } catch (serviceBError) {
+        // Log ServiceB error with same correlation ID
+        logger.error({
+          message: 'ServiceB request failed',
+          correlationId,
+          requestId,
+          timestamp,
+          error: {
+            name: serviceBError.name,
+            message: serviceBError.message,
+            stack: process.env.NODE_ENV === 'development' ? serviceBError.stack : undefined
+          },
+          service: 'ServiceB',
+          originatingService: serviceName
+        });
+
+        // Return combined error response
+        res.status(500).json({
+          error: 'Service communication failed',
+          correlationId,
+          details: {
+            serviceAError: error.message,
+            serviceBError: serviceBError.message
+          }
+        });
+      }
+    }
+    // If this is the second service, just handle the error normally
+    else if (isSecondService) {
+      res.status(500).json({
+        error: error.message,
+        correlationId
+      });
+    }
+    else {
+      // Fallback for unknown services
+      res.status(500).json({
+        error: 'Internal server error',
+        correlationId
+      });
+    }
+  };
+};
+
+// Helper function to make request to ServiceB
+async function makeRequestToServiceB(context) {
+  // Implementation would use axios/fetch/etc.
+  // This is just a placeholder
+  console.log(`Making request to ServiceB with correlationId: ${context.correlationId}`);
+  // Simulate possible error
+  if (Math.random() > 0.7) {
+    throw new Error('ServiceB unavailable');
+  }
+  return { success: true };
+}
+
+// Usage in Express app
+const express = require('express');
+const app = express();
+
+// Add correlation ID middleware
+app.use(correlationIdMiddleware);
+
+// ServiceA routes
+app.post('/api/serviceA', async (req, res, next) => {
+  try {
+    // Process request
+    // ...
+    // Then call ServiceB
+    await makeRequestToServiceB({
+      correlationId: req.correlationId,
+      requestId: req.id
+    });
+    res.json({ success: true });
+  } catch (error) {
+    next(error);
+  }
+}, crossServiceErrorHandler('ServiceA'));
+
+// ServiceB routes
+app.post('/api/serviceB', crossServiceErrorHandler('ServiceB'), (req, res) => {
+  // Process request
+  res.json({ success: true });
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  const correlationId = req.correlationId;
+  logger.error({
+    message: 'Unhandled error',
+    correlationId,
+    error: {
+      name: error.name,
+      message: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    }
+  });
+  res.status(500).json({
+    error: 'Internal server error',
+    correlationId
+  });
+});
+
+app.listen(3000, () => console.log('Server running on port 3000'));
+```
+
+## Key Features
+
+1. **Correlation ID Propagation**:
+   - Generates a unique ID for each request
+   - Passes it between services via headers
+   - Includes it in all logs and error responses
+
+2. **Structured Logging**:
+   - Consistent log format across services
+   - Includes all relevant context (service name, correlation ID, timestamps, etc.)
+   - Separates error details from metadata
+
+3. **Error Handling**:
+   - Differentiates between first and second service errors
+   - Combines errors from both services when they occur
+   - Preserves stack traces in development
+
+4. **Request Context**:
+   - Tracks the full request flow
+   - Maintains context when moving between services
+
+## Alternative Implementation (Python/Flask Example)
+
+```python
+import uuid
+import logging
+from flask import Flask, request, jsonify
+import requests
+
+app = Flask(__name__)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Middleware to generate correlation ID
+@app.before_request
+def add_correlation_id():
+    correlation_id = request.headers.get('X-Correlation-ID') or str(uuid.uuid4())
+    request.correlation_id = correlation_id
+    request.environ['X-Correlation-ID'] = correlation_id
+
+# Error handler decorator
+def cross_service_error_handler(service_name):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            try:
+                return f(*args, **kwargs)
+            except Exception as e:
+                correlation_id = request.correlation_id
+                request_id = request.headers.get('X-Request-ID', 'unknown')
+
+                # Log the error with context
+                logger.error(
+                    msg=f"Error in {service_name}",
+                    extra={
+                        'correlation_id': correlation_id,
+                        'request_id': request_id,
+                        'service': service_name,
+                        'path': request.path,
+                        'method': request.method,
+                        'error': {
+                            'name': type(e).__name__,
+                            'message': str(e),
+                            'stack': e.__traceback__ if app.debug else None
+                        }
+                    }
+                )
+
+                # Handle based on service
+                if service_name == 'ServiceA':
+                    try:
+                        # Call ServiceB
+                        response = requests.post(
+                            'http://service-b/api',
+                            json={
+                                'correlation_id': correlation_id,
+                                'data': request.json
+                            },
+                            headers={'X-Correlation-ID': correlation_id}
+                        )
+                        response.raise_for_status()
+                        return jsonify({'success': True})
+                    except requests.exceptions.RequestException as service_b_error:
+                        logger.error(
+                            msg="ServiceB request failed",
+                            extra={
+                                'correlation_id': correlation_id,
+                                'request_id': request_id,
+                                'originating_service': service_name,
+                                'service': 'ServiceB',
+                                'error': {
+                                    'name': type(service_b_error).__name__,
+                                    'message': str(service_b_error)
+                                }
+                            }
+                        )
+                        return jsonify({
+                            'error': 'Service communication failed',
+                            'correlation_id': correlation_id,
+                            'details': {
+                                'serviceAError': str(e),
+                                'serviceBError': str(service_b_error)
+                            }
+                        }), 500
+                else:
+                    return jsonify({
+                        'error': str(e),
+                        'correlation_id': correlation_id
+                    }), 500
+        return wrapper
+    return decorator
+
+# ServiceA endpoint
+@app.route('/api/serviceA', methods=['POST'])
+@cross_service_error_handler('ServiceA')
+def service_a():
+    # Process request
+    return jsonify({'message': 'Processed by ServiceA'})
+
+# ServiceB endpoint
+@app.route('/api/serviceB', methods=['POST'])
+@cross_service_error_handler('ServiceB')
+def service_b():
+    # Process request
+    return jsonify({'message': 'Processed by ServiceB'})
+
+if __name__ == '__main__':
+    app.run(port=5000)
+```
+
+## Best Practices for Implementation
+
+1. **Standard Headers**:
+   - Use `X-Correlation-ID` as the standard header name
+   - Consider adding `X-Request-ID` for individual request tracking
+
+2. **Log Aggregation**:
+   - Ensure your logging system can index and search by correlation ID
+   - Tools like ELK Stack, Splunk, or Datadog work well for this
+
+3. **Error Response Format**:
+   - Always include the correlation ID in error responses
+   - Consider including timestamps and service names
+
+4. **Monitoring**:
+   - Set up alerts for high error rates with the same correlation ID
+   - Track request duration across both services
+
+5. **Testing**:
+   - Verify error handling works when:
+     - ServiceA fails before calling ServiceB
+     - ServiceB fails after being called
+     - Both services fail
+     - Network issues occur between services
+
+This implementation provides a robust way to trace requests across service boundaries while maintaining good observability for operators.

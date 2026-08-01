@@ -1,0 +1,132 @@
+```python
+import time
+import logging
+from functools import wraps
+from typing import Callable, Any
+
+logger = logging.getLogger(__name__)
+
+def circuit_breaker(
+    failure_threshold: int = 5,
+    recovery_timeout: float = 30.0,
+    half_open_max_calls: int = 1
+):
+    """
+    Decorator that protects a downstream HTTP API from being hammered while
+    it is down by implementing a circuit breaker pattern.
+    
+    States:
+    - CLOSED: normal operation, calls pass through
+    - OPEN: API is down, calls fail fast without hitting the API
+    - HALF_OPEN: probing the API with limited calls to check recovery
+    """
+    def decorator(func: Callable) -> Callable:
+        state = {"status": "closed", "failures": 0, "opened_at": 0.0, "half_open_calls": 0}
+        
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            current_time = time.monotonic()
+            
+            # OPEN state: fail fast unless recovery timeout has elapsed
+            if state["status"] == "open":
+                if current_time - state["opened_at"] >= recovery_timeout:
+                    state["status"] = "half_open"
+                    state["half_open_calls"] = 0
+                    logger.info("Circuit half-open, probing downstream API")
+                else:
+                    raise ConnectionError("Downstream API is unavailable (circuit open)")
+            
+            # HALF_OPEN: limit concurrent probes
+            if state["status"] == "half_open":
+                if state["half_open_calls"] >= half_open_max_calls:
+                    raise ConnectionError("Downstream API is in half-open state, call rejected")
+                state["half_open_calls"] += 1
+            
+            try:
+                result = func(*args, **kwargs)
+                # Success - reset circuit
+                if state["status"] != "closed":
+                    logger.info("Downstream API recovered, closing circuit")
+                state["status"] = "closed"
+                state["failures"] = 0
+                state["half_open_calls"] = 0
+                return result
+                
+            except Exception as e:
+                state["failures"] += 1
+                
+                if state["status"] == "half_open":
+                    # Failed probe - re-open immediately
+                    state["status"] = "open"
+                    state["opened_at"] = time.monotonic()
+                    logger.warning("Half-open probe failed, circuit re-opened")
+                elif state["failures"] >= failure_threshold:
+                    # Transition to open
+                    state["status"] = "open"
+                    state["opened_at"] = time.monotonic()
+                    logger.warning("Circuit opened after %d consecutive failures", failure_threshold)
+                else:
+                    logger.warning("Call failed (%d/%d), circuit still closed", 
+                                   state["failures"], failure_threshold)
+                
+                raise
+            
+        return wrapper
+    return decorator
+
+
+# Example usage:
+@circuit_breaker(failure_threshold=3, recovery_timeout=10.0)
+def call_downstream_api():
+    # This would be your actual HTTP call
+    import requests
+    response = requests.get("https://example.com/api", timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+# Fallback pattern for non-decorator usage:
+class ResilientClient:
+    """
+    Alternative class-based implementation with the same protection.
+    Useful when you need to wrap an existing client object.
+    """
+    def __init__(self, api_func, failure_threshold=5, recovery_timeout=30.0):
+        self.api_func = api_func
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.circuit_open = False
+        self.opened_at = 0.0
+        
+    def call(self, *args, **kwargs):
+        if self.circuit_open:
+            if time.monotonic() - self.opened_at < self.recovery_timeout:
+                raise ConnectionError("Circuit open, failing fast")
+            else:
+                self.circuit_open = False
+                self.failures = 0
+                
+        try:
+            result = self.api_func(*args, **kwargs)
+            self.failures = 0
+            self.circuit_open = False
+            return result
+        except Exception as e:
+            self.failures += 1
+            if self.failures >= self.failure_threshold:
+                self.circuit_open = True
+                self.opened_at = time.monotonic()
+            raise
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 78f8ed3b745d
+  applied: []
+  not_applied:
+    - node: observability.error-context
+      version: "1"
+      hash: 20ed9656a731
+      reason: The context pack provided only contains observability/error-context guidance which is unrelated to circuit breaker implementation for rate limiting downstream API calls. No questions from this node could be applied to the task of HTTP API resilience.

@@ -1,0 +1,164 @@
+TASK
+Write an error handler for a two-service request so an operator can trace one request across both services.
+
+CONTEXT PACK
+You receive the following context pack of engineering knowledge.
+
+context_pack:
+  primary:
+  - does_not_imply:
+    - that the correlation id is an idempotency key
+    - that it replaces a trace system
+    - that generating one per service is enough
+    - that it must be exposed to users
+    hash: 8fc0127ccecb
+    id: observability.correlation-id
+    questions:
+    - What value identifies one logical request, and where is it created?
+    - How is it propagated to every downstream call?
+    - Is it included in every log line and error?
+    - What happens when an inbound call has no id?
+    relevance: trace one request across services
+    risks:
+    - regenerating the id at each hop
+    - logging without the id in some paths
+    - using the idempotency key as the correlation id
+    - an id that is not unique across requests
+    summary: 'A correlation id identifies one logical request across every service
+      and log line it touches. The decision is what generates the id, where it is
+      created, and how it is propagated without being regenerated or conflated with
+      other identifiers.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that more logging is better
+    - that the message replaces a stack trace
+    - that context at raise time survives every wrapping layer
+    hash: 20ed9656a731
+    id: observability.error-context
+    questions:
+    - Does the message identify the operation and the failing step?
+    - Can the operator find the request or job from the message?
+    - Is sensitive data excluded from the message?
+    - Is the context attached before or after the exception is wrapped?
+    relevance: include the operation in the error message
+    risks:
+    - logging secrets or personal data in context
+    - a generic handler that strips the useful context
+    - retry loops that overwrite the original error
+    - context that names the code but not the instance
+    summary: 'An error message must say what failed, where it failed, and with which
+      state. A bare exception without context is a dead end for the operator; the
+      fix is to include the operation, identifier and failing step at the point where
+      the failure is known.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that dead letters are processed automatically
+    - that a dead-letter queue replaces monitoring
+    - that moving to the dead-letter queue fixes the message
+    - that retries should be unbounded first
+    hash: 7671ca8e163b
+    id: reliability.dead-letter-queue
+    questions:
+    - What happens after the last retry attempt?
+    - What identifies a message as dead, and where does it go?
+    - How is a dead letter surfaced to an operator?
+    - Can a dead letter be reprocessed safely?
+    relevance: dead letters need operator attention
+    risks:
+    - silently dropping messages at the end of the budget
+    - unbounded retries that never reach the dead-letter queue
+    - dead letters that no one looks at
+    - reprocessing without the original context
+    summary: 'A dead-letter queue is where a message goes after the retry budget is
+      exhausted, so a poison message stops retrying without being lost. The decision
+      is what happens at the end of the budget and how the dead letter is surfaced
+      to an operator.
+
+      '
+    version: 1
+  supporting:
+  - does_not_imply:
+    - that the breaker replaces timeouts or retries
+    - that open is permanent
+    - that a breaker hides the failure from operators
+    - that thresholds are one-size-fits-all
+    hash: ac14eb9e8f5b
+    id: reliability.circuit-breaker
+    questions:
+    - What counts as a failure, and over what window?
+    - When does the circuit open, and what happens to in-flight calls?
+    - How does the half-open state test recovery?
+    - What does the caller do while the circuit is open?
+    relevance: do not hammer the failing service
+    risks:
+    - thresholds chosen without data
+    - opening the circuit on transient single failures
+    - the half-open probe hammering a slow dependency
+    - a breaker that never reports to operators
+    summary: 'A circuit breaker stops calling a failing dependency so failures do
+      not cascade and the dependency can recover. The decision is what counts as a
+      failure, when the circuit opens, and how recovery is probed without hammering
+      the dependency.
+
+      '
+    version: 1
+context_pack_hash: 4ca94ac393ba
+knowledge_revision: 2c381f397385
+request:
+  original: Write an error handler for a two-service request so an operator can trace
+    one request across both services.
+retrieval_backend: fts5
+trace:
+  excluded:
+  - concurrency.race-conditions
+  - concurrency.locking-strategy
+  - python.files.atomic-replacement
+  - performance.cache-invalidation
+  - testing.evaluation-contamination
+  selected:
+  - observability.correlation-id
+  - observability.error-context
+  - reliability.dead-letter-queue
+  - reliability.circuit-breaker
+  truncated: true
+
+APPLICATION REPORT
+Alongside your code, return an application report in this exact YAML form:
+
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: <node id from the pack>
+      version: <version of that node>
+      hash: <hash of that node>
+      questions_answered:
+        - question: "<a question of that node, copied verbatim>"
+          answer: "<your answer, non-empty, at most 40 words>"
+          location: "<file:line where you applied it>"
+      unanswered:
+        - question: "<a question of that node, copied verbatim>"
+          reason: "<why you did not answer it>"
+  not_applied:
+    - node: <any other node id from the pack>
+      reason: "<why you did not apply it>"
+
+Rules:
+- Every node in the pack must appear exactly once across `applied` and
+  `not_applied`. Omission, duplication and double-listing all fail.
+- Questions must be copied verbatim from the node's `questions` list in the
+  pack; altered question text fails.
+- Every question of an applied node must appear in `questions_answered` or
+  `unanswered`.
+- Answers are non-empty and at most 40 words; locations are non-empty;
+  every `not_applied` entry has a non-empty reason.
+
+FORMAT
+Separate your implementation from the application report with the exact
+line: ---APPLICATION_REPORT---
+Everything above that line is the artifact to be evaluated; everything
+below it is the report.

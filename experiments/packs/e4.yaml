@@ -1,0 +1,119 @@
+context_pack:
+  primary:
+  - does_not_imply:
+    - that the breaker replaces timeouts or retries
+    - that open is permanent
+    - that a breaker hides the failure from operators
+    - that thresholds are one-size-fits-all
+    hash: ac14eb9e8f5b
+    id: reliability.circuit-breaker
+    questions:
+    - What counts as a failure, and over what window?
+    - When does the circuit open, and what happens to in-flight calls?
+    - How does the half-open state test recovery?
+    - What does the caller do while the circuit is open?
+    relevance: stop calling the api while it is down
+    risks:
+    - thresholds chosen without data
+    - opening the circuit on transient single failures
+    - the half-open probe hammering a slow dependency
+    - a breaker that never reports to operators
+    summary: 'A circuit breaker stops calling a failing dependency so failures do
+      not cascade and the dependency can recover. The decision is what counts as a
+      failure, when the circuit opens, and how recovery is probed without hammering
+      the dependency.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that the operation is idempotent
+    - that retrying will eventually succeed
+    - that more attempts make the system more reliable
+    - that backoff alone prevents overload
+    hash: 5f6b8be02160
+    id: reliability.retry-semantics
+    questions:
+    - What happens when the same attempt is delivered more than once?
+    - How many attempts are allowed, and what happens after the last one?
+    - How is the wait between attempts chosen, and is jitter added?
+    - Is the retry budget shared across workers or per attempt?
+    relevance: retry the job after it fails
+    risks:
+    - retry storms when many clients retry in lockstep
+    - retrying operations that are not idempotent
+    - unbounded retries masking a real outage
+    summary: 'A retry repeats an operation that failed. Retrying is only correct when
+      the operation is safe to repeat, the retry budget is explicit, and backoff prevents
+      amplification; a retry without a policy is a loop that hides the failure.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that the correlation id is an idempotency key
+    - that it replaces a trace system
+    - that generating one per service is enough
+    - that it must be exposed to users
+    hash: 8fc0127ccecb
+    id: observability.correlation-id
+    questions:
+    - What value identifies one logical request, and where is it created?
+    - How is it propagated to every downstream call?
+    - Is it included in every log line and error?
+    - What happens when an inbound call has no id?
+    relevance: A correlation id identifies one logical request across every service
+      and log line it touches.
+    risks:
+    - regenerating the id at each hop
+    - logging without the id in some paths
+    - using the idempotency key as the correlation id
+    - an id that is not unique across requests
+    summary: 'A correlation id identifies one logical request across every service
+      and log line it touches. The decision is what generates the id, where it is
+      created, and how it is propagated without being regenerated or conflated with
+      other identifiers.
+
+      '
+    version: 1
+  supporting:
+  - does_not_imply:
+    - exactly-once delivery
+    - absence of concurrency
+    - transactional safety across systems
+    - that a retry loop is now correct
+    hash: 4cbc1598c0d7
+    id: reliability.idempotency
+    questions:
+    - What value identifies one logical operation, and where does it come from?
+    - Where is completion recorded, and is that record durable before the effect?
+    - What state remains after a failure between effect and completion record?
+    - Can two workers observe the same operation as not-yet-done simultaneously?
+    relevance: must not run twice
+    risks:
+    - check-then-act races between the completion lookup and the effect
+    - deduplication state that is not durable across process restart
+    - keys derived from timestamps or request arrival order
+    summary: 'An idempotent operation can be repeated for the same logical intent
+      without producing unintended additional effects. Repetition is made safe by
+      identity and recorded completion, not by hoping the operation runs only once.
+
+      '
+    version: 1
+context_pack_hash: 59095c09d015
+knowledge_revision: 2c381f397385
+request:
+  original: Write a function that calls a downstream HTTP API and must not hammer
+    it while it is down.
+retrieval_backend: fts5
+trace:
+  excluded:
+  - performance.cache-invalidation
+  - python.files.atomic-replacement
+  - concurrency.race-conditions
+  - security.input-validation
+  - concurrency.locking-strategy
+  selected:
+  - reliability.circuit-breaker
+  - reliability.retry-semantics
+  - observability.correlation-id
+  - reliability.idempotency
+  truncated: true

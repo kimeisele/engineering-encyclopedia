@@ -1,0 +1,107 @@
+# HTTP API Caller with Backoff and Retry Logic
+
+Here's a robust function that calls a downstream HTTP API with proper backoff and retry logic to avoid hammering a downed service:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    max_backoff: float = 30.0,
+    backoff_factor: float = 2.0,
+    timeout: int = 10
+) -> Optional[Dict[str, Any]]:
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        headers: Optional request headers
+        data: Optional request body data
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        max_backoff: Maximum backoff time in seconds
+        backoff_factor: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+
+    Returns:
+        Parsed JSON response if successful, None if all retries fail
+    """
+    headers = headers or {}
+    headers.setdefault("Content-Type", "application/json")
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=data,
+                timeout=timeout
+            )
+
+            # Check for successful response
+            if response.status_code < 500:
+                try:
+                    return response.json()
+                except ValueError:
+                    return {"status_code": response.status_code, "text": response.text}
+
+            # Server error - will retry
+            error_msg = f"Server error {response.status_code} for {url}"
+            print(f"Attempt {attempt + 1} failed: {error_msg}")
+
+        except RequestException as e:
+            error_msg = f"Request failed: {str(e)}"
+            print(f"Attempt {attempt + 1} failed: {error_msg}")
+
+        # Don't sleep on last attempt
+        if attempt < max_retries:
+            backoff = min(initial_backoff * (backoff_factor ** attempt), max_backoff)
+            print(f"Retrying in {backoff:.2f} seconds...")
+            time.sleep(backoff)
+
+    print(f"All {max_retries} attempts failed for {url}")
+    return None
+```
+
+## Key Features:
+
+1. **Exponential Backoff**: Waits longer between retries (1s, 2s, 4s, etc.) up to a maximum
+2. **Retry on Failures**: Retries on connection errors, timeouts, and 5xx server errors
+3. **Configurable Parameters**:
+   - Maximum retry attempts
+   - Initial and maximum backoff times
+   - Backoff multiplier
+   - Timeout duration
+4. **Proper Error Handling**:
+   - Catches network errors and timeouts
+   - Handles non-JSON responses
+   - Returns None if all retries fail
+5. **Logging**: Prints status messages for debugging
+
+## Example Usage:
+
+```python
+# Simple GET request
+result = call_downstream_api("https://api.example.com/data")
+
+# POST request with data
+result = call_downstream_api(
+    url="https://api.example.com/create",
+    method="POST",
+    data={"key": "value"},
+    headers={"Authorization": "Bearer token123"}
+)
+```
+
+This implementation follows best practices for making resilient HTTP calls while being considerate to downstream services.

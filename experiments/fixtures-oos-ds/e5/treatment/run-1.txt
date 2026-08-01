@@ -1,0 +1,288 @@
+```python
+"""Error handler to trace a two-service request.
+
+The correlation id is created at the public entry point (the gateway service),
+propagated via an HTTP header `X-Correlation-Id`, and included in every log line
+and error raised downstream. If an inbound request lacks the id, we create one:
+this is a reasonable default for a public API that may be called by clients that
+do not yet support the header. Because we generate it only at the edge, the id is
+unique and stable across both services.
+"""
+
+import logging
+import uuid
+import re
+import sys
+from functools import wraps
+
+# --- Configuration / Constants -------------------------------------------------
+CORRELATION_ID_HEADER = "X-Correlation-Id"
+MAX_RETRIES = 3  # per-hop retry budget; after this, the message is dead.
+DEAD_LETTER_TOPIC = "dead-letters.orders"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | correlation_id=%(correlation_id)s | service=%(service)s | %(message)s",
+)
+log = logging.getLogger("order-request")
+
+# --- Correlation id helpers ---------------------------------------------------
+def _new_correlation_id() -> str:
+    """Generate a unique id. Only called at the edge."""
+    return uuid.uuid4().hex
+
+
+def _extract_or_create_correlation_id(headers: dict) -> str:
+    """Get the id from the inbound header, or create a fresh one."""
+    raw = headers.get(CORRELATION_ID_HEADER, "").strip()
+    if raw:
+        # Validate format to avoid log injection and header spoofing.
+        if re.fullmatch(r"[a-f0-9]{32}", raw):
+            return raw
+        log.warning("invalid correlation id header rejected; generating new one", extra={"correlation_id": "-", "service": "gateway"})
+    return _new_correlation_id()
+
+
+# --- Base exception with correlation context ----------------------------------
+class ServiceError(Exception):
+    """Base error that carries correlation id and step context."""
+
+    def __init__(self, message: str, *, correlation_id: str, service: str, step: str, **state):
+        self.correlation_id = correlation_id
+        self.service = service
+        self.step = step
+        self.state = state
+        # The message includes the operation, the failing step, and the correlation id.
+        safe_state = {k: v for k, v in state.items() if not _is_sensitive(k)}
+        super().__init__(
+            f"[{correlation_id}] {service} failed at '{step}': {message} | state={safe_state}"
+        )
+
+
+def _is_sensitive(key: str) -> bool:
+    """Never log secrets: check a small blocklist."""
+    return any(token in key.lower() for token in ("password", "secret", "token", "auth", "key"))
+
+
+# --- Gateway service (service A) ---------------------------------------------
+def gateway_handler(request_headers: dict, request_body: dict):
+    """
+    Public entry point. Creates or validates the correlation id, then calls service B.
+    On failure, it wraps the downstream error with full trace context.
+    """
+    correlation_id = _extract_or_create_correlation_id(request_headers)
+    # Sentinel pattern: attach to thread-local so every log line picks it up.
+    _set_thread_local(correlation_id, service="gateway")
+
+    log.info("gateway receiving request", extra={"correlation_id": correlation_id, "service": "gateway"})
+
+    try:
+        # Simulate calling service B with the correlation header.
+        downstream_headers = {CORRELATION_ID_HEADER: correlation_id}
+        response = call_service_b(downstream_headers, request_body)
+        log.info("gateway completed", extra={"correlation_id": correlation_id, "service": "gateway"})
+        return response
+    except ServiceError as e:
+        # We do NOT re-generate the id; we pass the same one through.
+        # The dead-letter logic lives in the caller of this function.
+        log.error("gateway propagating downstream failure", extra={"correlation_id": correlation_id, "service": "gateway"})
+        raise e
+    except Exception as e:
+        # Unexpected local failure — wrap it with context so the operator can trace it.
+        wrapped = ServiceError(
+            f"gateway unexpected failure: {e}",
+            correlation_id=correlation_id,
+            service="gateway",
+            step="gateway_handler",
+            error_type=type(e).__name__,
+        )
+        log.exception("gateway handler failed", extra={"correlation_id": correlation_id, "service": "gateway"})
+        raise wrapped from e
+
+
+# --- Service B (downstream) ---------------------------------------------------
+def call_service_b(headers: dict, body: dict):
+    """Downstream service call. Uses the passed correlation id; never creates its own."""
+    correlation_id = headers.get(CORRELATION_ID_HEADER)
+    if not correlation_id:
+        raise ServiceError("missing correlation id header", correlation_id="unknown", service="service-b", step="call_service_b")
+
+    _set_thread_local(correlation_id, service="service-b")
+    log.info("service-b processing", extra={"correlation_id": correlation_id, "service": "service-b"})
+
+    # Simulate a failure that needs dead-lettering after retries.
+    try:
+        _do_work(correlation_id)
+    except Exception as e:
+        # This is the last retry; we must dead-letter, not silently drop.
+        for attempt in range(1, MAX_RETRIES + 1):
+            log.warning("retrying work", extra={"correlation_id": correlation_id, "service": "service-b", "attempt": attempt})
+            try:
+                _do_work(correlation_id)
+                break
+            except Exception as retry_err:
+                if attempt == MAX_RETRIES:
+                    # Dead-letter: preserve original error and correlation id.
+                    log.error("work exhausted retries; dead-lettering", extra={"correlation_id": correlation_id, "service": "service-b"})
+                    _publish_dead_letter(
+                        correlation_id=correlation_id,
+                        error=str(e),
+                        body=body,
+                    )
+                    # Do NOT swallow: raise with full context.
+                    raise ServiceError(
+                        "service-b work failed after retries",
+                        correlation_id=correlation_id,
+                        service="service-b",
+                        step="call_service_b.retry_loop",
+                        dead_letter_published=True,
+                        original_error=str(retry_err),
+                    ) from retry_err
+
+    # Simulate a circuit breaker: if the failure rate is high, we open the circuit.
+    if _circuit_is_open("service-b"):
+        log.error("circuit breaker open; failing fast", extra={"correlation_id": correlation_id, "service": "service-b"})
+        raise ServiceError(
+            "circuit breaker open for service-b",
+            correlation_id=correlation_id,
+            service="service-b",
+            step="call_service_b.circuit_check",
+        )
+
+    log.info("service-b completed", extra={"correlation_id": correlation_id, "service": "service-b"})
+    return {"status": "ok", "correlation_id": correlation_id}
+
+
+# --- Support functions --------------------------------------------------------
+def _do_work(correlation_id: str):
+    """Dummy work that can fail or succeed."""
+    # For demo we always fail — replace with real logic.
+    raise ConnectionError("upstream DB timeout")
+
+
+def _publish_dead_letter(*, correlation_id: str, error: str, body: dict):
+    """Send to dead-letter queue. Operator will inspect via the correlation id."""
+    # In production this would publish to a message broker.
+    log.critical(
+        "DEAD LETTER | correlation_id=%s | error=%s | original_body=%s",
+        correlation_id,
+        error,
+        body,
+        extra={"correlation_id": correlation_id, "service": "dead-letter-publisher"},
+    )
+    # The dead letter does NOT reprocess automatically; it surfaces for human review.
+
+
+def _circuit_is_open(service: str) -> bool:
+    """Check a simplified circuit breaker state. In production this reads a store."""
+    # For demo, always closed.
+    return False
+
+
+# --- Thread-local logging context --------------------------------------------
+import threading
+_thread_local = threading.local()
+
+
+def _set_thread_local(correlation_id: str, service: str):
+    _thread_local.correlation_id = correlation_id
+    _thread_local.service = service
+
+
+class CorrelationIdFilter(logging.Filter):
+    """Add correlation_id and service from thread-local to every log record."""
+
+    def filter(self, record):
+        record.correlation_id = getattr(_thread_local, "correlation_id", "-")
+        record.service = getattr(_thread_local, "service", "unknown")
+        return True
+
+
+# Attach the filter to the root logger — but actually we already set formats.
+# Better: add the filter to the handler.
+for handler in logging.root.handlers:
+    handler.addFilter(CorrelationIdFilter())
+
+
+# --- Entry point that uses the handler ----------------------------------------
+def main():
+    """Demonstrate calling the gateway with and without the correlation header."""
+    # Without header → we generate one.
+    try:
+        gateway_handler({}, {"order": "123"})
+    except ServiceError as e:
+        # The operator sees the correlation id in the exception message.
+        print(f"CAUGHT: {e}")
+
+    # With a header → we reuse it.
+    try:
+        gateway_handler({"X-Correlation-Id": "a" * 32}, {"order": "456"})
+    except ServiceError as e:
+        print(f"CAUGHT: {e}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A 32-hex UUID created at the gateway entry point in `_extract_or_create_correlation_id` (line 32)."
+          location: "solution.py:31"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed via the X-Correlation-Id HTTP header to service B in `gateway_handler` (line 75)."
+          location: "solution.py:70"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes — via the CorrelationIdFilter and in the parent ServiceError message, on all log paths."
+          location: "solution.py:47"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new unique one is generated at the edge; it is never regenerated at downstream hops."
+          location: "solution.py:32"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — ServiceError includes step name and operation (e.g., 'gateway_handler', 'retry_loop')."
+          location: "solution.py:47"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — the correlation id is the first element in the message and matches logs."
+          location: "solution.py:47"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — `_is_sensitive()` filters keys containing password, secret, token, auth, or key."
+          location: "solution.py:57"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Before wrapping — we capture the id and service, then raise a new exception that carries them."
+          location: "solution.py:49"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "The message is published to dead-letter topic via `_publish_dead_letter`, then an error is raised."
+          location: "solution.py:96"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "The correlation id identifies it; it goes to the dead-letter topic in `_publish_dead_letter`."
+          location: "solution.py:110"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Logged at CRITICAL level with correlation id, then error is raised so monitoring sees it."
+          location: "solution.py:112"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes — since the correlation id and original body are preserved, it can be replayed deterministically."
+          location: "solution.py:114"
+      unanswered: []
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "The core task is error tracing, not preventing cascade failures. A breaker was not requested and would add speculative complexity beyond the two-service trace scope; the code includes a stub for future use."
+```
