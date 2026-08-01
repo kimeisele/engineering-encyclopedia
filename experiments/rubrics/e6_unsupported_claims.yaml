@@ -1,0 +1,39 @@
+task: e6
+node: review.unsupported-claims
+description: >
+  Deterministic rubric for E6 (DESIGN ONLY — not run; the owner decides
+  before any runs). Does the produced review answer the contract questions
+  with located, evidence-backed claims? Every criterion is a boolean (regex
+  matched with re.search + re.DOTALL over the scored artifact); the score is
+  the count of satisfied criteria. Patterns are draft proposals for owner
+  approval. Scoring caveat for the owner: the e6 artifact is prose, so the
+  e6 run must NOT apply strip_comments/extract_artifact the way code tasks
+  do — a review may contain "PR #7" (a # would eat the rest of the line) and
+  may quote application_report: (the report-boundary cut would truncate it).
+  The scorer must branch on task before e6 is run.
+
+criteria:
+  - id: claims_located
+    description: "claims are tied to a location (line, file:line, output excerpt)"
+    kind: present
+    pattern: "(line\\s*\\d+|:\\d+\\b|L\\d+|location|at\\s+[\\w./-]+\\.\\w+)"
+  - id: raw_output_cited
+    description: "the raw output or evidence is cited, not only the report"
+    kind: present
+    pattern: "(raw output|stdout|\\blog\\b|output\\b|evidence|shown?\\s+in)"
+  - id: order_parts_addressed
+    description: "unaddressed parts of the order are named"
+    kind: present
+    pattern: "(unaddressed|not addressed|not covered|no part of the order)"
+  - id: alternatives_excluded
+    description: "alternative explanations are named, not silently assumed away"
+    kind: present
+    pattern: "(alternative|another explanation|could also|might instead|not excluded|instead of)"
+  - id: contradictions_checked
+    description: "contradictions with earlier decisions or within the evidence are checked"
+    kind: present
+    pattern: "(contradict|inconsistent|conflict|earlier decision|disagrees with)"
+  - id: no_attitude_only
+    description: "the review is checks, not attitude words alone"
+    kind: absent
+    pattern: "(I think|in my opinion|carefully|diligently|thoroughly)"

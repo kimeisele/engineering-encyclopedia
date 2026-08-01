@@ -214,3 +214,19 @@ The founding brief remains the historical v1 specification.
 Alternative rejected: expanding the corpus without the three criteria — the
 rule exists to gate exactly this.
 Reversibility: easy (remove the four nodes and revert the count assertion)
+
+### D13 — Node 16 `review.unsupported-claims` (Sections 1 and 4)
+Section: 1, 4
+Brief says: the corpus is exactly the eight nodes of Section 4, and any node
+beyond them is a defect.
+Problem: the owner instructed a new namespace (`review.*`) with one node —
+prompts as machine contracts: a review instruction becomes verifiable when
+written as questions demanding locations, not as an attitude.
+Decision: added `review.unsupported-claims` at the Section 3 bar (kind
+principle, five location-answering questions) and raised the count assertion
+15 -> 16 as an intentional corpus change. The rubric (`e6_unsupported_claims`)
+and the three-arm design are delivered in the same change, **not run** — the
+owner decides before any runs. Personas and role text remain excluded.
+Alternative rejected: a review node without verifiable questions — that is
+exactly what the placebo arm punished.
+Reversibility: easy (remove the node and revert the count assertion)
