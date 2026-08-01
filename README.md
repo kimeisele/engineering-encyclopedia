@@ -27,6 +27,27 @@ The product is the **Application Report**: the mechanism by which an agent
 names the node it applied, the question it answered, and where in the artifact
 it answered it. Retrieval is a means to that end.
 
+## Measured result
+
+The thesis is now supported by measurement, not just argument. A three-arm
+experiment (control / treatment / placebo, n=5 per arm, two providers, final
+scoring pipeline) measured whether the knowledge pack changes agent output:
+
+| Task | DeepSeek (C / T / P) | Mistral (C / T / P) |
+|---|---|---|
+| e1 idempotency | 3.80 / 4.80 / 2.20 | 2.80 / 4.60 / 2.40 |
+| e2 subprocess-safety | 3.60 / 5.00 / 2.80 | 3.60 / 5.00 / 4.80 |
+| e3 atomic-replacement | 5.60 / 6.00 / 5.20 | 1.40 / 5.80 / 1.40 |
+
+The placebo arm (a structurally identical pack with irrelevant content)
+matches control — or scores below it — on five of six task×provider cells,
+so the effect is not prompt length; on one cell (Mistral e2) the placebo
+sits at the treatment level, so a structural component cannot be ruled out
+there. Honest bounds: n=5 per arm, three tasks, two providers, one anomaly.
+The knowledge is **supported** by this result, never claimed as proven.
+Out-of-sample tasks on later nodes are reported separately. Full detail,
+raw scores and caveats: `experiments/RESULTS.md`.
+
 ## Repository layout
 
 ```
