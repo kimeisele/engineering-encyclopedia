@@ -36,7 +36,7 @@ decision-vs-idiom rule; nothing in the data contradicts it.
 
 ## Consequence of this change
 
-The corpus grows from eight to eleven nodes, all chosen by this rule because
+The corpus grows from eight to fifteen nodes, all chosen by this rule because
 they require a decision rather than recall:
 
 - `reliability.outbox-pattern` — what durably records the intent, and what
@@ -46,7 +46,24 @@ they require a decision rather than recall:
 - `testing.evaluation-contamination` — where the artifact ends and its own
   description begins (discovered in the E2 analysis; the report reproduces
   the check strings verbatim, so an artifact scored together with its
-  description is contaminated).
+  description is contaminated);
+- `reliability.circuit-breaker` — what counts as a failure and when the
+  circuit opens (a model that knows the pattern still retries through an
+  outage);
+- `reliability.dead-letter-queue` — what happens when the retry budget is
+  exhausted (a model that knows the concept still drops or retries forever);
+- `observability.correlation-id` — what identifies one request end to end
+  and how it is propagated (a model that knows tracing still logs without an
+  id or regenerates it per hop);
+- `concurrency.locking-strategy` — which locking strategy and what version
+  detects conflict (a model that knows locks still locks everything or
+  nothing).
+
+Each of the last four is reachable by relations from the existing corpus
+(circuit-breaker and dead-letter-queue from `reliability.retry-semantics`,
+correlation-id from `observability.error-context`, locking-strategy from
+`concurrency.race-conditions`), and all four are out-of-sample candidates for
+the experiment (the tasks are written after the nodes, not alongside them).
 
 ## How the rule is applied later
 

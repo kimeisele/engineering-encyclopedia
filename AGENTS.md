@@ -27,7 +27,7 @@ encyclopedia verify-report <report> --pack <pack>   # verify an application repo
   hashes), `canonical` (deterministic serialisation + hashing), `validate`
   (schema + hard limits), `retrieval` (FTS5 with token-overlap fallback),
   `pack` (context pack composer), `report` (`verify-report`), `cli`.
-- `knowledge/<area>/<name>.yaml` — the eleven nodes. `knowledge/LICENSE` is CC
+- `knowledge/<area>/<name>.yaml` — the fifteen nodes. `knowledge/LICENSE` is CC
   BY 4.0, do not touch.
 - `taxonomy/` — enumerations (`node-kinds`, `contexts`, `relation-types`).
 - `evaluations/queries.yaml` — 10 regression queries with required /
@@ -62,7 +62,7 @@ No LLM routers or model calls in the query path. No embeddings, vector stores,
 RAG frameworks, graph databases. No network access during `query`, `search`,
 `show`, `related`, `validate`. No federation, sync, manifests, trust models,
 signatures. No web servers, daemons, orchestration. No scheduled workflows.
-No empty placeholder files/directories/modules. No nodes beyond the eleven.
+No empty placeholder files/directories/modules. No nodes beyond the fifteen.
 Adding anything from this list is a defect, not initiative.
 
 ## Experiments

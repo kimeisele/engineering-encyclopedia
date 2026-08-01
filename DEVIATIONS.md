@@ -194,3 +194,23 @@ Alternative rejected: leaving the finding only in `experiments/RESULTS.md` —
 the brief exists precisely to make such findings retrievable and inspectable
 (no second list of candidates; the node is delivered now, not deferred).
 Reversibility: easy (remove the node and revert the count assertion)
+
+### D12 — Nodes 12–15 chosen by the corpus rule (Sections 1 and 4)
+Section: 1, 4
+Brief says: the corpus is exactly the eight nodes of Section 4, and any node
+beyond them is a defect.
+Problem: after the placebo-controlled experiment supported the thesis, the
+owner instructed four further nodes at the Section 3 bar, chosen by the
+decision-vs-idiom corpus rule with three criteria (decision required;
+failure a model plausibly makes despite knowing the concept; reachable by
+relations from the corpus).
+Decision: added `reliability.circuit-breaker`, `reliability.dead-letter-queue`,
+`observability.correlation-id` and `concurrency.locking-strategy`, raising
+the count assertion 11 -> 15 as an intentional corpus change. Each is
+reachable from an existing node (retry-semantics ×2, error-context,
+race-conditions) and none of the eleven existing nodes was modified. Two of
+them (circuit-breaker, correlation-id) become out-of-sample experiment tasks.
+The founding brief remains the historical v1 specification.
+Alternative rejected: expanding the corpus without the three criteria — the
+rule exists to gate exactly this.
+Reversibility: easy (remove the four nodes and revert the count assertion)

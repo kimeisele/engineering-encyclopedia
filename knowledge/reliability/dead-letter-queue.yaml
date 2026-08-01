@@ -1,0 +1,83 @@
+id: reliability.dead-letter-queue
+version: 1
+title: Dead-letter queue
+kind: pattern
+status: established
+
+summary: >
+  A dead-letter queue is where a message goes after the retry budget is
+  exhausted, so a poison message stops retrying without being lost. The
+  decision is what happens at the end of the budget and how the dead letter
+  is surfaced to an operator.
+
+intent_signals:
+  - the job failed all retries
+  - move the poison message somewhere safe
+  - retry budget exhausted, do not drop silently
+  - dead letters need operator attention
+  - a message that always fails blocks the queue
+
+applies_when:
+  - a message can fail permanently despite retries
+  - one bad message must not block the rest of the queue
+  - failed messages must be inspectable later
+
+does_not_apply_when:
+  - the failure is permanent and needs no later inspection
+
+does_not_imply:
+  - that dead letters are processed automatically
+  - that a dead-letter queue replaces monitoring
+  - that moving to the dead-letter queue fixes the message
+  - that retries should be unbounded first
+
+questions:
+  - What happens after the last retry attempt?
+  - What identifies a message as dead, and where does it go?
+  - How is a dead letter surfaced to an operator?
+  - Can a dead letter be reprocessed safely?
+
+techniques:
+  - a separate dead-letter queue or table
+  - recording the final error with the dead letter
+  - alerting when the dead-letter count grows
+  - replaying dead letters after a fix
+
+risks:
+  - silently dropping messages at the end of the budget
+  - unbounded retries that never reach the dead-letter queue
+  - dead letters that no one looks at
+  - reprocessing without the original context
+
+tradeoffs:
+  - technique: dedicated dead-letter queue
+    benefit: isolation and inspectability
+    cost: extra storage and tooling
+    choose_when: poison messages are expected
+  - technique: drop with a logged error
+    benefit: no extra state
+    cost: the message is gone
+    choose_when: the message has no value after failure
+
+relations:
+  related:
+    - reliability.retry-semantics
+  requires_consideration_of:
+    - reliability.idempotency
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Models know the dead-letter concept and still drop or retry forever at
+    the end of a retry budget; the node records the decision about where the
+    message goes and how it is surfaced.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [dead letter queue, poison message, retry budget, message replay, DLQ]
