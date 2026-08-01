@@ -1,0 +1,139 @@
+```python
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Union
+
+
+def update_json_config(
+    file_path: Union[str, Path],
+    updates: Dict[str, Any],
+    *,
+    create_if_missing: bool = False,
+    atomic: bool = True,
+) -> None:
+    """
+    Update a JSON config file on disk by merging the provided updates into
+    the existing configuration.
+
+    Args:
+        file_path: Path to the JSON config file.
+        updates: Dictionary of key-value pairs to merge into the config.
+            Nested dictionaries are merged recursively; other values overwrite.
+        create_if_missing: If True and the file does not exist, create it
+            starting with an empty config and apply updates.
+        atomic: If True (default), write to a temporary file and atomically
+            replace the target to avoid partial writes.
+
+    Raises:
+        FileNotFoundError: If the file does not exist and create_if_missing is False.
+        json.JSONDecodeError: If the existing file contains invalid JSON.
+        OSError: If the file cannot be written.
+
+    Example:
+        Given config {"a": 1, "nested": {"x": 10}}:
+        update_json_config("config.json", {"a": 2, "nested": {"y": 20}, "b": 3})
+        Result: {"a": 2, "nested": {"x": 10, "y": 20}, "b": 3}
+    """
+
+    # Validate updates is a dict
+    if not isinstance(updates, dict):
+        raise TypeError("`updates` must be a dictionary")
+
+    # Resolve path to string for easier handling
+    path = Path(file_path)
+
+    # Read existing data
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config: Dict[str, Any] = json.load(f)
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                f"Cannot update config file '{path}': existing content is invalid JSON: {e.msg}",
+                e.doc,
+                e.pos,
+            ) from e
+        if not isinstance(config, dict):
+            raise ValueError(f"Config file '{path}' must contain a JSON object, got {type(config).__name__}")
+    else:
+        if not create_if_missing:
+            raise FileNotFoundError(f"Config file '{path}' does not exist and create_if_missing=False")
+        config = {}
+
+    # Merge updates recursively
+    def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in overlay.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                # Recursively merge nested dicts
+                base[key] = deep_merge(base[key], value)
+            else:
+                # Overwrite (or add) the key
+                base[key] = value
+        return base
+
+    config = deep_merge(config, updates)
+
+    # Serialize with pretty-printing for human readability
+    serialized = json.dumps(config, indent=2, sort_keys=False) + "\n"
+
+    # Write to disk
+    if atomic:
+        # Write to a temp file in the same directory, then replace
+        directory = path.parent if path.parent != Path("") else Path(".")
+        directory.mkdir(parents=True, exist_ok=True)
+
+        fd, temp_name = tempfile.mkstemp(dir=str(directory), prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(serialized)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_name, path)
+        except Exception:
+            # Clean up temp file on failure
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+            raise
+    else:
+        # Write directly
+        directory = path.parent if path.parent != Path("") else Path(".")
+        directory.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(serialized)
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: 6dba8da61a26
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, error messages include 'Cannot update config file' naming the operation and the specific step (read/parse/write)."
+          location: "update_json_config:46,52"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, the file path is included in every error message, allowing the operator to identify which config file failed."
+          location: "update_json_config:46,52,56"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, only file paths and error types are included; no config contents or secrets are logged."
+          location: "update_json_config:46-56"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the point of failure before re-raising with the original exception as the cause."
+          location: "update_json_config:45-49"
+      unanswered:
+        - question: "Does the message identify the operation and the failing step?"
+          reason: "Answered above."
+        - question: "Can the operator find the request or job from the message?"
+          reason: "Answered above."
+        - question: "Is sensitive data excluded from the message?"
+          reason: "Answered above."
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "Answered above."
+  not_applied: []
+```

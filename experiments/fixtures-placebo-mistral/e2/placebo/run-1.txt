@@ -1,0 +1,67 @@
+```python
+import subprocess
+
+def run_git_command(branch_name):
+    """
+    Runs a git command with the user-supplied branch name.
+
+    Args:
+        branch_name (str): The name of the branch to use in the git command.
+
+    Returns:
+        str: The output of the git command.
+
+    Raises:
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    try:
+        # Example git command: git checkout <branch_name>
+        result = subprocess.run(
+            ["git", "checkout", branch_name],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        raise subprocess.CalledProcessError(
+            e.returncode,
+            e.cmd,
+            output=e.stdout,
+            stderr=e.stderr
+        ) from e
+```
+
+---
+```yaml
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: c4a4796d0072
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function includes the git command and branch name in error context.
+          location: file:git_command.py:22
+        - question: Can the operator find the request or job from the message?
+          answer: The branch name is part of the error context, aiding identification.
+          location: file:git_command.py:22
+        - question: Is sensitive data excluded from the message?
+          answer: No sensitive data is included in error messages or context.
+          location: file:git_command.py:10
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached at the point where the failure is known (in except block).
+          location: file:git_command.py:22
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+```

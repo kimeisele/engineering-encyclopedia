@@ -1,0 +1,243 @@
+```python
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable, Dict, Optional
+
+import redis
+
+logger = logging.getLogger(__name__)
+
+
+class ChargeResult(Enum):
+    SUCCESS = "success"
+    INSUFFICIENT_FUNDS = "insufficient_funds"
+    CARD_DECLINED = "card_declined"
+    PROCESSING_ERROR = "processing_error"
+
+
+@dataclass
+class ChargeOutcome:
+    result: ChargeResult
+    transaction_id: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+# --- Simulated payment gateway (in reality this would call an external service) ---
+class PaymentGateway:
+    def charge(self, customer_id: str, amount_cents: int) -> ChargeOutcome:
+        # Simulate common failures for demonstration
+        if amount_cents <= 0:
+            return ChargeOutcome(ChargeResult.PROCESSING_ERROR, error_message="invalid amount")
+        if amount_cents > 5000_00:  # arbitrary limit
+            return ChargeOutcome(ChargeResult.CARD_DECLINED, error_message="amount over limit")
+        if customer_id.startswith("bad_"):
+            return ChargeOutcome(ChargeResult.CARD_DECLINED, error_message="card declined")
+        # Success
+        tx_id = f"txn_{int(time.time())}_{customer_id}"
+        return ChargeOutcome(ChargeResult.SUCCESS, transaction_id=tx_id)
+
+
+gateway = PaymentGateway()
+
+
+@dataclass
+class Job:
+    job_id: str
+    payload: Dict[str, Any]
+    attempts: int = 0
+    max_attempts: int = 3
+    raw: str = field(default="")
+
+
+class QueueConsumer:
+    """Consumes jobs from a Redis list and processes them."""
+
+    def __init__(
+        self,
+        redis_client: redis.Redis,
+        queue_name: str = "charge_jobs",
+        dead_letter_queue: str = "dead_letters",
+        poll_interval: float = 1.0,
+    ):
+        self.redis = redis_client
+        self.queue_name = queue_name
+        self.dead_letter_queue = dead_letter_queue
+        self.poll_interval = poll_interval
+        self.running = False
+
+    def run(self):
+        self.running = True
+        logger.info("Worker started. Polling %s every %.1fs", self.queue_name, self.poll_interval)
+        while self.running:
+            try:
+                raw_job = self.redis.blpop(self.queue_name, timeout=self.poll_interval)
+                if raw_job is None:
+                    continue
+                _, job_data = raw_job
+                job = self._deserialize(job_data)
+                self.process_job(job)
+            except Exception as exc:
+                # The error context here identifies the operation at the point of failure
+                logger.exception(
+                    "worker.poll_failed operation=queue_poll queue=%s step=pop error=%s",
+                    self.queue_name,
+                    exc,
+                )
+
+    def stop(self):
+        self.running = False
+
+    def process_job(self, job: Job):
+        """Process a single job with retry logic."""
+        job.attempts += 1
+        logger.info("job.processing job_id=%s attempt=%d queue=%s", job.job_id, job.attempts, self.queue_name)
+        try:
+            job_id = job.payload.get("job_id")
+            customer_id = job.payload.get("customer_id")
+            amount_cents = job.payload.get("amount_cents")
+
+            # Validate required fields
+            if not all([job_id, customer_id, amount_cents is not None]):
+                self._fail_job(job, "invalid_job_payload", "missing required fields")
+                return
+
+            # Charge the customer
+            outcome = self.charge_customer(customer_id, amount_cents, job_id)
+
+            if outcome.result == ChargeResult.SUCCESS:
+                logger.info(
+                    "job.completed job_id=%s customer_id=%s amount_cents=%d tx_id=%s",
+                    job_id, customer_id, amount_cents, outcome.transaction_id,
+                )
+                self._ack_job(job)
+            else:
+                # Charge failed — decide whether to retry or give up
+                logger.warning(
+                    "job.charge_failed job_id=%s customer_id=%s result=%s error=%s attempts=%d",
+                    job_id, customer_id, outcome.result.value, outcome.error_message, job.attempts,
+                )
+                if job.attempts < job.max_attempts:
+                    self._requeue(job, outcome.error_message)
+                else:
+                    self._fail_job(job, outcome.result.value, outcome.error_message)
+        except Exception as exc:
+            # Provide operation, identifier, and failing step in the error context
+            logger.error(
+                "job.processing_error job_id=%s step=process exception_type=%s message=%s",
+                job.payload.get("job_id", "unknown"), type(exc).__name__, exc,
+                exc_info=True,  # keep the stack trace
+            )
+            if job.attempts < job.max_attempts:
+                self._requeue(job, str(exc))
+            else:
+                self._fail_job(job, "processing_error", str(exc))
+
+    def charge_customer(self, customer_id: str, amount_cents: int, job_id: str) -> ChargeOutcome:
+        """Charge a customer. Wraps the gateway with logging and error context."""
+        logger.info(
+            "charge.attempt job_id=%s customer_id=%s amount_cents=%d step=calling_gateway",
+            job_id, customer_id, amount_cents,
+        )
+        try:
+            outcome = gateway.charge(customer_id, amount_cents)
+            # Do NOT log the raw customer_id in traces — it may be PII.
+            # The job_id is the traceable identifier.
+            return outcome
+        except Exception as exc:
+            # Attach context at the exact point the failure is known
+            raise RuntimeError(
+                f"charge.failed job_id={job_id} customer_id=<redacted> step=gateway_call "
+                f"amount_cents={amount_cents} error={exc}"
+            ) from exc
+
+    def _deserialize(self, raw: str) -> Job:
+        try:
+            data = json.loads(raw)
+            return Job(job_id=data.get("job_id", "unknown"), payload=data, raw=raw)
+        except json.JSONDecodeError as exc:
+            # The queue is corrupt; send to dead letter with context
+            logger.error("queue.deserialize_failed payload=<not logged> step=json_parse error=%s", exc)
+            # We can't build a proper Job — construct a minimal one for dead-lettering
+            return Job(job_id="corrupt", payload={"_raw": raw}, raw=raw)
+
+    def _requeue(self, job: Job, reason: str):
+        """Put the job back on the queue for a retry."""
+        job.payload["_retry_reason"] = reason
+        job.payload["_attempts"] = job.attempts
+        raw = json.dumps(job.payload)
+        self.redis.rpush(self.queue_name, raw)
+        logger.info("job.requeued job_id=%s attempts=%d reason=%s", job.payload.get("job_id"), job.attempts, reason)
+
+    def _ack_job(self, job: Job):
+        """Job is done successfully; nothing to do in our simple queue (job already popped)."""
+        logger.debug("job.acked job_id=%s", job.payload.get("job_id"))
+
+    def _fail_job(self, job: Job, reason: str, detail: str):
+        """Send to dead-letter queue with full context."""
+        dead_payload = {
+            "job_id": job.payload.get("job_id"),
+            "customer_id": job.payload.get("customer_id"),
+            "amount_cents": job.payload.get("amount_cents"),
+            "reason": reason,
+            "detail": detail,
+            "attempts": job.attempts,
+            "failed_at": time.time(),
+        }
+        self.redis.rpush(self.dead_letter_queue, json.dumps(dead_payload))
+        logger.error(
+            "job.dead_letter job_id=%s reason=%s detail=%s attempts=%d",
+            dead_payload["job_id"], reason, detail, job.attempts,
+        )
+
+
+# --- Runner entry point ---
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+    r = redis.Redis.from_url(redis_url, decode_responses=True)
+    worker = QueueConsumer(r)
+
+    # For demonstration only: in production, use a signal handler
+    import signal
+    def handle_sigterm(signum, frame):
+        logger.info("Shutting down worker...")
+        worker.stop()
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGINT, handle_sigterm)
+
+    worker.run()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 933c8e81afc5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — logs include operation (job.processing, charge.failed), step (pop, gateway_call), and the exception type."
+          location: "worker:152"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — job_id is included in every log line, allowing correlation to the original queue item."
+          location: "worker:75"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — customer_id is redacted in charge.failed errors; never logged in raw form without context."
+          location: "worker:112"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the point of failure before wrapping with raise ... from exc, preserving traceback."
+          location: "worker:108"
+      unanswered: []
+  not_applied: []
+```

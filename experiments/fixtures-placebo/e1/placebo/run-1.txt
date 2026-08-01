@@ -1,0 +1,239 @@
+```python
+import json
+import logging
+import os
+import time
+import uuid
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+# --- Interfaces (simplified stubs for the queue/billing systems) ---
+
+
+class Queue:
+    """Minimal queue interface. In production, use your queue client."""
+
+    def __init__(self, conn_str: str = "memory://"):
+        self._conn_str = conn_str
+        self._memory_queue: list = []
+        self._leased_jobs: dict[str, dict] = {}
+
+    def enqueue(self, job: dict) -> str:
+        job_id = str(uuid.uuid4())
+        job["job_id"] = job_id
+        self._memory_queue.append(job)
+        return job_id
+
+    def lease(self, timeout: int = 60) -> Optional[dict]:
+        if not self._memory_queue:
+            return None
+        job = self._memory_queue.pop(0)
+        self._leased_jobs[job["job_id"]] = job
+        return job
+
+    def complete(self, job_id: str, result: Any = None) -> None:
+        if job_id not in self._leased_jobs:
+            raise KeyError(f"Job {job_id} is not leased")
+        logger.info("Completed job %s with result %s", job_id, result)
+        del self._leased_jobs[job_id]
+
+    def abandon(self, job_id: str, reason: str = "") -> None:
+        if job_id not in self._leased_jobs:
+            raise KeyError(f"Job {job_id} is not leased")
+        job = self._leased_jobs[job_id]
+        logger.warning("Abandoning job %s: %s", job_id, reason)
+        self._memory_queue.append(job)  # Retry later
+        del self._leased_jobs[job_id]
+
+
+class BillingService:
+    """Stub billing client."""
+
+    def charge(self, customer_id: str, amount_cents: int) -> dict:
+        # This would call a real payment API
+        # Simulate failures for demo purposes
+        if amount_cents <= 0:
+            raise ValueError(f"Invalid amount: {amount_cents}")
+        return {"charge_id": f"ch_{uuid.uuid4()}", "status": "succeeded"}
+
+
+class ChargeError(Exception):
+    """Raised when a charge fails"""
+
+    def __init__(self, message: str, job_id: str, customer_id: str, step: str):
+        super().__init__(message)
+        self.job_id = job_id
+        self.customer_id = customer_id
+        self.step = step
+
+
+def parse_job(job: dict) -> tuple[str, int]:
+    """Extract customer_id and amount from a job."""
+    job_id = job.get("job_id", "<no-job-id>")
+    customer_id = job.get("customer_id")
+    amount_cents = job.get("amount_cents")
+
+    if not customer_id or not isinstance(customer_id, str):
+        raise ValueError(
+            f"Job {job_id}: missing or invalid customer_id (expected non-null string)"
+        )
+
+    if not isinstance(amount_cents, int) or amount_cents <= 0:
+        raise ValueError(
+            f"Job {job_id}: invalid amount_cents for customer {customer_id} "
+            f"(expected positive int, got {amount_cents!r})"
+        )
+
+    return customer_id, amount_cents
+
+
+def process_job(
+    job: dict,
+    billing: BillingService,
+    *,
+    retry_attempt: int = 0,
+    max_retries: int = 3,
+) -> dict:
+    """
+    Process a single job: parse → charge → return result.
+
+    Implements a small retry loop for transient billing failures.
+    The error message always includes: operation (charge-job),
+    step (parse/charge), and job_id + customer_id to trace the request.
+    """
+    step = "parse"
+    job_id = job.get("job_id", "<no-job-id>")
+    try:
+        customer_id, amount_cents = parse_job(job)
+        step = "charge"
+
+        try:
+            return billing.charge(customer_id, amount_cents)
+        except Exception as exc:
+            # Only retry transient errors are the responsibility of the caller;
+            # here we just wrap with context and let the worker retry.
+            if retry_attempt >= max_retries:
+                raise ChargeError(
+                    f"Charge job failed after {max_retries} attempts",
+                    job_id=job_id,
+                    customer_id=customer_id,
+                    step=step,
+                ) from exc
+            logger.warning(
+                "Charge job %s for customer %s failed (attempt %d): %s",
+                job_id,
+                customer_id,
+                retry_attempt + 1,
+                exc,
+            )
+            return process_job(
+                job, billing, retry_attempt=retry_attempt + 1, max_retries=max_retries
+            )
+    except ValueError as exc:
+        # This is a permanent failure: bad job shape.
+        raise ChargeError(
+            f"Charge job failed at {step} for job {job_id}: {exc}",
+            job_id=job_id,
+            customer_id=job.get("customer_id", "<none>"),
+            step=step,
+        ) from exc
+
+
+def worker_loop(
+    queue: Queue,
+    billing: BillingService,
+    *,
+    poll_interval_sec: float = 1.0,
+    max_retries: int = 3,
+    shutdown_event: Optional[Callable[[], bool]] = None,
+) -> None:
+    """
+    Consume jobs from the queue and charge the customer in each job.
+
+    Loops until shutdown_event() returns True (or forever if None).
+    Each job is executed once with up to `max_retries` attempts,
+    then either completed (result) or abandoned (for retry elsewhere / DLQ).
+    """
+    logger.info("Worker started")
+    while True:
+        if shutdown_event and shutdown_event():
+            logger.info("Shutdown requested — stopping")
+            break
+
+        job = queue.lease(timeout=60)
+        if job is None:
+            time.sleep(poll_interval_sec)
+            continue
+
+        job_id = job.get("job_id", "<no-job-id>")
+        try:
+            result = process_job(job, billing, max_retries=max_retries)
+            queue.complete(job_id, result)
+        except ChargeError as exc:
+            # Job permanently failed or retries exhausted.
+            logger.error(
+                "Charge worker error: op=charge-job step=%s job_id=%s "
+                "customer_id=%s msg=%s",
+                exc.step,
+                exc.job_id,
+                exc.customer_id,
+                exc,
+            )
+            # For permanent failures: abandon (→ DLQ or retry later).
+            # Avoid logging sensitive data: customer_id is an identifier, OK;
+            # but do NOT log the job payload or amount.
+            queue.abandon(job_id, reason=str(exc))
+        except Exception as exc:
+            # Unexecpected error — do not kill the worker, log with context.
+            logger.error(
+                "Unexpected worker error for job %s: %s",
+                job_id,
+                exc,
+                exc_info=True,
+            )
+            queue.abandon(job_id, reason="unexpected-error")
+
+
+# --- Driver / example ---
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    q = Queue()
+    b = BillingService()
+    q.enqueue({"customer_id": "cust_123", "amount_cents": 4500})
+    q.enqueue({"amount_cents": -100})  # bad job
+    # Run a few iterations, then stop
+    try:
+        worker_loop(q, b, poll_interval_sec=0.1, max_retries=1)
+    except KeyboardInterrupt:
+        pass
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 933c8e81afc5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes. Every ChargeError includes 'op=charge-job' and the exact step ('parse' or 'charge') where the failure occurred."
+          location: "worker.py:106-114"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes. All error log entries include job_id and customer_id so the operator can trace back to the exact queue job."
+          location: "worker.py:106-114"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes. Only identifiers (job_id, customer_id) are logged; the job payload, amount, and any payment credentials are never included in messages."
+          location: "worker.py:106-114"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context (step, job_id, customer_id) is captured at failure point and wrapped into ChargeError before the exception propagates, preserving it across layers."
+          location: "worker.py:78-88"
+      unanswered: []
+  not_applied: []
+```

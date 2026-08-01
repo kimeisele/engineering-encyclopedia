@@ -1,0 +1,97 @@
+```python
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Union
+
+
+def update_json_config(
+    file_path: Union[str, Path],
+    updates: Dict[str, Any],
+    *,
+    create: bool = False,
+    atomic: bool = True,
+) -> None:
+    """
+    Update a JSON config file on disk with the given updates.
+
+    Args:
+        file_path: Path to the JSON config file.
+        updates: Dictionary of key-value pairs to update in the config.
+        create: If True, create the file if it doesn't exist. If False and file
+            doesn't exist, raises FileNotFoundError.
+        atomic: If True, write to a temp file then atomically rename to avoid
+            partial writes. If False, write directly.
+
+    Raises:
+        FileNotFoundError: If file doesn't exist and create=False.
+        json.JSONDecodeError: If existing file contains invalid JSON.
+        OSError: For file I/O errors.
+
+    Examples:
+        >>> update_json_config("config.json", {"debug": True})
+        >>> update_json_config("config.json", {"nested": {"key": 1}}, create=True)
+    """
+    path = Path(file_path)
+
+    # Step 1: Read existing config (or start fresh)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                f"Failed to parse existing JSON config at {path}: {e.msg}",
+                e.doc,
+                e.pos,
+            ) from e
+    elif create:
+        config = {}
+    else:
+        raise FileNotFoundError(f"Config file not found: {path} (create=False)")
+
+    # Step 2: Apply updates (deep merge for nested dicts)
+    def deep_merge(base: Dict[str, Any], new: Dict[str, Any]) -> None:
+        for key, value in new.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                deep_merge(base[key], value)
+            else:
+                base[key] = value
+
+    deep_merge(config, updates)
+
+    # Step 3: Write back to disk
+    if atomic:
+        # Write to temp file in same directory, then atomic rename
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+                f.write("\n")  # Ensure final newline
+            os.replace(tmp_path, path)
+        except Exception:
+            # Clean up temp file on error
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: 6dba8da61a26
+  applied: []
+  not_applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: "The context pack contains only error-context guidance about logging exceptions, which is unrelated to this task of updating JSON config files. No error-handling, logging, or exception-wrapping decisions in this implementation were materially informed by that guidance."

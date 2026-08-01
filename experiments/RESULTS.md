@@ -1,80 +1,117 @@
 # Experiment results
 
-Three tasks from the founding brief, Section 8. Five runs per arm, ten per
-task, thirty in total per run set. Rubrics are fixed and deterministic
-(`experiments/rubrics/`); the score is the count of satisfied criteria.
+Three tasks from the founding brief, Section 8. Five runs per arm per
+provider. Rubrics are fixed and deterministic (`experiments/rubrics/`);
+the score is the count of satisfied criteria. Scoring pipeline v2:
+`runner.py score` applies `extract_artifact` (report excluded) and
+`strip_comments` (Python `#` comments removed) before the rubric.
 
-Scoring pipeline v2 (this file): `runner.py score` applies
-`extract_artifact` **and** `strip_comments` before the rubric runs —
-the report is excluded (boundary: `---APPLICATION_REPORT---` delimiter, else
-`application_report:` / `knowledge_revision:` / `context_pack_hash:`), and
-Python `#` comments are removed so the rubric's absent-patterns are not
-tripped by prose the model wrote as comments (e.g. a line `# no shell=True`
-in an otherwise safe artifact).
+**Three arms per provider, unpooled:**
 
-Three run sets are recorded:
+- **control** — task prompt only
+- **treatment** — task + knowledge pack + report instruction
+- **placebo** — task + a structurally identical pack whose content is a node
+  irrelevant to the task (`observability.error-context`), same slot count,
+  same number of questions, same formatting (`experiments/packs-placebo/`,
+  prompts within ~1% of the treatment prompts in length)
 
-- **Set A — DeepSeek, original harness** (`experiments/fixtures/`): scored
-  the raw completion, including the Application Report (confounded).
-- **Set B — DeepSeek, corrected harness** (`experiments/fixtures-corrected/`).
-- **Set C — Mistral, corrected harness** (`experiments/fixtures-mistral/`),
-  second provider (`mistral-small-latest`).
+Five run sets: Set A (DeepSeek, original harness, confounded — kept as
+evidence), Set B (DeepSeek, corrected), Set C (Mistral, corrected),
+Set P-DS (DeepSeek placebo), Set P-MR (Mistral placebo).
 
-## Before / after — comment stripping (Sets A/B/C)
+## Three arms, per provider (final pipeline)
 
-"Before" = extraction only (the previously recorded numbers); "after" =
-extraction + comment stripping. Control mean / treatment mean / delta.
+| Task | Provider | Control | Treatment | Placebo | T−C | P−C |
+|---|---|---|---|---|---|---|
+| e1 idempotency | DeepSeek | 3.80 | 4.80 | 2.20 | +1.00 | −1.60 |
+| e1 idempotency | Mistral | 2.80 | 4.60 | 2.40 | +1.80 | −0.40 |
+| e2 subprocess-safety | DeepSeek | 3.60 | 5.00 | 2.80 | +1.40 | −0.80 |
+| e2 subprocess-safety | Mistral | 3.60 | 5.00 | 4.80 | +1.40 | +1.20 |
+| e3 atomic-replacement | DeepSeek | 5.60 | 6.00 | 5.20 | +0.40 | −0.40 |
+| e3 atomic-replacement | Mistral | 1.40 | 5.80 | 1.40 | +4.40 | 0.00 |
 
-| Set | Task | Before | After |
-|---|---|---|---|
-| A | e1 idempotency | 4.40 / 5.80 (+1.40) | 4.00 / 5.60 (+1.60) |
-| A | e2 subprocess-safety | 3.80 / 3.80 (0.00) | 3.80 / 4.80 (+1.00) |
-| A | e3 atomic-replacement | 5.00 / 6.00 (+1.00) | 5.00 / 6.00 (+1.00) |
-| B | e1 idempotency | 3.80 / 5.00 (+1.20) | 3.80 / 4.80 (+1.00) |
-| B | e2 subprocess-safety | 3.60 / 4.00 (+0.40) | 3.60 / 5.00 (+1.40) |
-| B | e3 atomic-replacement | 5.60 / 6.00 (+0.40) | 5.60 / 6.00 (+0.40) |
-| C | e1 idempotency | 2.80 / 5.00 (+2.20) | 2.80 / 4.60 (+1.80) |
-| C | e2 subprocess-safety | 3.60 / 4.00 (+0.40) | 3.60 / 5.00 (+1.40) |
-| C | e3 atomic-replacement | 1.40 / 5.80 (+4.40) | 1.40 / 5.80 (+4.40) |
+## Raw scores per arm (final pipeline)
+
+| Task / arm | run-1 | run-2 | run-3 | run-4 | run-5 | mean | stdev |
+|---|---|---|---|---|---|---|---|
+| e1 DeepSeek control | 5 | 3 | 3 | 4 | 4 | 3.80 | 0.84 |
+| e1 DeepSeek treatment | 6 | 3 | 4 | 5 | 6 | 4.80 | 1.30 |
+| e1 DeepSeek placebo | 2 | 2 | 3 | 2 | 2 | 2.20 | 0.45 |
+| e1 Mistral control | 4 | 3 | 2 | 3 | 2 | 2.80 | 0.84 |
+| e1 Mistral treatment | 5 | 5 | 3 | 4 | 6 | 4.60 | 1.14 |
+| e1 Mistral placebo | 2 | 2 | 2 | 2 | 4 | 2.40 | 0.89 |
+| e2 DeepSeek control | 2 | 5 | 5 | 3 | 3 | 3.60 | 1.34 |
+| e2 DeepSeek treatment | 5 | 4 | 5 | 6 | 5 | 5.00 | 0.71 |
+| e2 DeepSeek placebo | 3 | 1 | 2 | 3 | 5 | 2.80 | 1.48 |
+| e2 Mistral control | 4 | 2 | 4 | 4 | 4 | 3.60 | 0.89 |
+| e2 Mistral treatment | 5 | 5 | 5 | 5 | 5 | 5.00 | 0.00 |
+| e2 Mistral placebo | 5 | 5 | 5 | 4 | 5 | 4.80 | 0.45 |
+| e3 DeepSeek control | 6 | 5 | 5 | 6 | 6 | 5.60 | 0.55 |
+| e3 DeepSeek treatment | 6 | 6 | 6 | 6 | 6 | 6.00 | 0.00 |
+| e3 DeepSeek placebo | 5 | 6 | 5 | 5 | 5 | 5.20 | 0.45 |
+| e3 Mistral control | 1 | 2 | 1 | 2 | 1 | 1.40 | 0.55 |
+| e3 Mistral treatment | 5 | 6 | 6 | 6 | 6 | 5.80 | 0.45 |
+| e3 Mistral placebo | 2 | 1 | 1 | 1 | 2 | 1.40 | 0.55 |
+
+## Placebo verdict — does the effect come from the knowledge or from the prompt?
+
+**The placebo matches control, not treatment, on five of the six
+task×provider cells; on one cell (Mistral E2) the placebo sits at the
+treatment level.** Concretely:
+
+- Placebo ≈ control (or below) on: DeepSeek e1 (2.20 vs control 3.80,
+  treatment 4.80), DeepSeek e2 (2.80 vs 3.60, 5.00), DeepSeek e3 (5.20 vs
+  5.60, 6.00), Mistral e1 (2.40 vs 2.80, 4.60), Mistral e3 (1.40 = 1.40,
+  5.80). On those cells a longer, structured prompt alone did **not**
+  reproduce the treatment effect — the knowledge is doing the work, and on
+  two cells (DeepSeek e1, e2) placebo scored *below* control.
+- Placebo ≈ treatment on: **Mistral e2** (placebo 4.80, treatment 5.00,
+  control 3.60). Criterion-level, both the placebo and the treatment push
+  Mistral's e2 code toward the list-argv style that its control runs miss;
+  the treatment additionally satisfies `validation_or_whitelist` in most
+  runs (5/5) while the placebo does not. A structural component cannot be
+  ruled out for that one cell.
+
+So the thesis — the knowledge nodes, not prompt length, produce the effect —
+holds in five of six cells and is **not clean** on Mistral E2; that cell is
+reported exactly as it came out and must not be generalised away.
 
 ## E2, stated plainly
 
-Comment stripping changes the E2 picture materially: the treatment delta on
-E2 is **+1.00 (Set A), +1.40 (Set B), +1.40 (Set C)** — the earlier small
-deltas (+0.00 to +0.40) were depressed by the models writing comments like
-`# no shell=True to prevent injection` in otherwise safe artifacts, which
-the absent-patterns counted as violations. After stripping comments, the E2
-treatment effect is comparable to E1's.
-
-## Report-boundary robustness
-
-The boundary now cuts at the first of: the `---APPLICATION_REPORT---`
-delimiter, or the report's mandatory YAML keys `application_report:`,
-`knowledge_revision:`, `context_pack_hash:`. This recovers the one previously
-missed report (Mistral e2/2, which started directly at `knowledge_revision:`
-without the container key). Residual limit, documented because it cannot be
-removed by detection: a model that emits a report containing none of these
-markers cannot have its report separated — chat completions return a single
-free-form string, so no protocol can force the delimiter; `verify-report`
-remains the final check.
+After comment stripping, E2 shows a treatment delta of +1.40 (DeepSeek
+corrected), +1.40 (Mistral) and +1.00 (Set A), comparable to E1 — the small
+deltas reported earlier were suppressed by the models' own comments. The
+placebo arm complicates the interpretation on Mistral (placebo 4.80 ≈
+treatment 5.00 > control 3.60): part of Mistral's E2 improvement is
+structural. On DeepSeek the placebo is below control (2.80), so there the
+E2 effect is knowledge-driven.
 
 ## Limitation
 
-Two providers, n=5 per arm, three tasks, one rubric per task. These results
-are a **signal, not proof**: the samples are small, the rubric is a fixed
-string checklist, and the scoring pipeline changed twice during this cycle
-(extraction, then comment stripping), with both versions recorded here.
+Two providers, n=5 per arm, three tasks, one rubric per task, five run
+sets. These results are a **signal, not proof**: the samples are small, the
+rubric is a fixed string checklist, and one cell (Mistral E2) shows a
+placebo effect that must not be smoothed over.
 
 ## Run records
 
-- Set A: DeepSeek Flash via the DeepSeek API, `deepseek-v4-flash`, thinking
-  disabled; 2026-08-01; `experiments/fixtures/manifest.jsonl`.
-- Set B: same provider and configuration; treatment prompts gained the
-  `---APPLICATION_REPORT---` delimiter; 2026-08-01;
+- Set A: DeepSeek, `deepseek-v4-flash`, thinking disabled, original harness
+  (confounded); `experiments/fixtures/manifest.jsonl`.
+- Set B: DeepSeek, corrected harness (delimiter + extraction);
   `experiments/fixtures-corrected/manifest.jsonl`.
-- Set C: Mistral via the Mistral API, `mistral-small-latest`; 2026-08-01;
+- Set C: Mistral, `mistral-small-latest`, corrected harness;
   `experiments/fixtures-mistral/manifest.jsonl`.
+- Set P-DS: DeepSeek placebo (15 runs);
+  `experiments/fixtures-placebo/manifest.jsonl`.
+- Set P-MR: Mistral placebo (15 runs);
+  `experiments/fixtures-placebo-mistral/manifest.jsonl`.
+- All runs 2026-08-01; adapter `experiments/provider_chat_completions.py`
+  (generic, vendor-free) via `ENCYCLOPEDIA_RUNNER`.
+- Placebo packs: `experiments/make_placebo_packs.py` →
+  `experiments/packs-placebo/<task>.yaml`; prompts
+  `experiments/tasks/<task>-placebo.txt` (same slot count, question count
+  and formatting as treatment; content from `observability.error-context`).
 
 Rubrics: `experiments/rubrics/`, fixed before the runs. `runner.py score`
 applies extraction + comment stripping; `runner.py summarize <fixtures-dir>`
-regenerates the per-set table from a manifest.
+regenerates a per-set three-arm table from a manifest.

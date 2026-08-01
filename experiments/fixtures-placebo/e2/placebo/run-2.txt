@@ -1,0 +1,58 @@
+```python
+import subprocess
+import shlex
+
+def run_git_command(branch_name: str) -> subprocess.CompletedProcess:
+    """
+    Run a git checkout command with the user-supplied branch name.
+    """
+    # Validate the branch name to prevent command injection
+    if not branch_name or any(c in branch_name for c in [';', '&', '|', '`', '$', '(', ')', '<', '>', '\n']):
+        raise ValueError(f"Invalid branch name: {branch_name}")
+
+    # Use shlex.quote to safely embed the branch name in the command
+    cmd = f"git checkout {shlex.quote(branch_name)}"
+    
+    # Run the command
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True,
+        check=False
+    )
+    
+    if result.returncode != 0:
+        # Provide context about what failed
+        raise RuntimeError(
+            f"git checkout failed for branch '{branch_name}'. "
+            f"Exit code: {result.returncode}. "
+            f"stderr: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    
+    return result
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: c4a4796d0072
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes - I name 'git checkout failed' and show the exit code, which identifies the failing step."
+          location: "run_git_command function, error raise block (lines 25-29)"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes - the branch name is included in the error, so the operator can trace which branch was being checked out."
+          location: "run_git_command function, error raise block (line 27)"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes - only the branch name, exit code and stderr are included; no credentials or secrets are exposed."
+          location: "run_git_command function, error raise block (lines 26-29)"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the raise site before anything could wrap it, preserving the original failure detail."
+          location: "run_git_command function, error raise block (line 25)"
+      unanswered: []
+  not_applied: []

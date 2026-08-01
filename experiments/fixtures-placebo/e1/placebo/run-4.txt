@@ -1,0 +1,208 @@
+```python
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+# --- Configuration & Dependencies (stubs for real systems) ---
+
+logger = logging.getLogger("payment_worker")
+
+
+class QueueConsumer:
+    """Minimal stub for a queue consumer (e.g., RabbitMQ, SQS, Redis)."""
+    def __init__(self, queue_name: str):
+        self.queue_name = queue_name
+
+    def get_job(self) -> Optional[dict]:
+        """Poll for a job. Returns None if no job available."""
+        # In production: block/read from the queue
+        return None
+
+    def ack(self, job_id: str) -> None:
+        """Acknowledge the job as processed."""
+
+    def nack(self, job_id: str, requeue: bool = False) -> None:
+        """Negative-acknowledge the job (optionally requeue)."""
+
+
+class BillingService:
+    """Stub for a billing/payment service."""
+    def charge(self, customer_id: str, amount_cents: int) -> dict:
+        """Charge a customer. Raises on failure."""
+        # In production: call the payment gateway
+        return {"charge_id": "ch_123", "status": "succeeded"}
+
+
+@dataclass
+class Job:
+    """Job wrapper with parsing and validation."""
+    job_id: str
+    customer_id: str
+    amount_cents: int
+    raw: dict
+
+    @classmethod
+    def from_message(cls, message: dict) -> "Job":
+        """Parse and validate a raw message into a Job."""
+        required = ["job_id", "customer_id", "amount_cents"]
+        if not all(key in message for key in required):
+            raise ValueError(f"Missing required fields: {required}")
+
+        job_id = str(message["job_id"])
+        customer_id = str(message["customer_id"])
+        amount_cents = int(message["amount_cents"])
+
+        if amount_cents <= 0:
+            raise ValueError(f"amount_cents must be positive, got {amount_cents}")
+
+        return cls(job_id=job_id, customer_id=customer_id, amount_cents=amount_cents, raw=message)
+
+
+# --- Worker implementation ---
+
+class PaymentWorker:
+    """Consumes jobs from a queue and charges customers."""
+
+    def __init__(
+        self,
+        queue: QueueConsumer,
+        billing: BillingService,
+        max_retries: int = 3,
+        sleep_seconds: float = 1.0,
+    ):
+        self.queue = queue
+        self.billing = billing
+        self.max_retries = max_retries
+        self.sleep_seconds = sleep_seconds
+        self.running = False
+
+    def run(self) -> None:
+        """Main loop: consume jobs indefinitely until stopped."""
+        logger.info("Payment worker starting")
+        self.running = True
+        while self.running:
+            try:
+                message = self.queue.get_job()
+                if message is None:
+                    time.sleep(self.sleep_seconds)
+                    continue
+
+                self._process_message(message)
+            except KeyboardInterrupt:
+                logger.info("Worker stopped by signal")
+                self.running = False
+            except Exception:
+                # Top-level safety net: never crash the loop
+                logger.exception("Worker loop crashed, continuing")
+                time.sleep(self.sleep_seconds)
+
+    def stop(self) -> None:
+        """Stop the worker gracefully."""
+        self.running = False
+
+    def _process_message(self, message: dict) -> None:
+        """Process a single queue message."""
+        job_id_placeholder = message.get("job_id", "<unknown>")
+        try:
+            job = Job.from_message(message)
+        except (ValueError, TypeError) as e:
+            # Permanently unprocessable: log and dead-letter (no retry)
+            logger.error(
+                "queue consume failed:parse job_id=%s step=validate error=%s",
+                job_id_placeholder,
+                str(e),
+            )
+            # In production: send to DLQ and ACK the message
+            self.queue.ack(job_id_placeholder)
+            return
+
+        # Attempt the charge with retries
+        try:
+            self._charge_with_retries(job)
+            self.queue.ack(job.job_id)
+            logger.info(
+                "queue consume succeeded job_id=%s customer_id=%s amount_cents=%d step=charge",
+                job.job_id,
+                job.customer_id,
+                job.amount_cents,
+            )
+        except Exception as e:
+            # Requeue for retry, or dead-letter after max attempts
+            logger.error(
+                "queue consume failed job_id=%s customer_id=%s step=charge error=%s",
+                job.job_id,
+                job.customer_id,
+                str(e),
+            )
+            self.queue.nack(job.job_id, requeue=True)
+
+    def _charge_with_retries(self, job: Job) -> dict:
+        """Charge the customer with exponential backoff retries."""
+        last_exception: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                return self.billing.charge(job.customer_id, job.amount_cents)
+            except Exception as e:
+                last_exception = e
+                if attempt < self.max_retries:
+                    wait = self.sleep_seconds * (2 ** (attempt - 1))
+                    logger.warning(
+                        "charge retry job_id=%s customer_id=%s attempt=%d wait=%.1fs error=%s",
+                        job.job_id,
+                        job.customer_id,
+                        attempt,
+                        wait,
+                        str(e),
+                    )
+                    time.sleep(wait)
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Charge failed without exception")
+
+
+# --- Bootstrap ---
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    queue = QueueConsumer(os.getenv("QUEUE_NAME", "billing_jobs"))
+    billing = BillingService()
+
+    worker = PaymentWorker(queue=queue, billing=billing)
+    worker.run()
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 933c8e81afc5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes: 'queue consume failed:parse' and 'queue consume failed job_id=... step=charge' identify operation and step."
+          location: "payment_worker.py:84,94"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes: job_id, customer_id, and amount_cents are included in all error and success log messages."
+          location: "payment_worker.py:84-97"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes: only identifiers and amounts are logged; no payment tokens, card numbers, or raw full payloads are emitted."
+          location: "payment_worker.py:84-97"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the catch site before logging; the original exception is preserved with str(e) in the message."
+          location: "payment_worker.py:84-97"
+      unanswered: []
+  not_applied: []

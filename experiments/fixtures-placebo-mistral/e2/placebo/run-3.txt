@@ -1,0 +1,64 @@
+```python
+import subprocess
+
+def run_git_command(branch_name):
+    """
+    Run a git command with a user-supplied branch name.
+
+    Args:
+        branch_name (str): The name of the branch to use in the git command.
+
+    Returns:
+        str: The output of the git command.
+
+    Raises:
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    if not branch_name:
+        raise ValueError("Branch name cannot be empty")
+
+    try:
+        # Example git command: git checkout <branch_name>
+        result = subprocess.run(
+            ["git", "checkout", branch_name],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Git command failed for branch '{branch_name}': {e.stderr}"
+        raise subprocess.CalledProcessError(e.returncode, e.cmd, output=e.stdout, stderr=error_msg) from e
+```
+
+---
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: c4a4796d0072
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "The error message includes the git command and branch name, identifying the operation and failing step."
+          location: "run_git_command:25"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "The branch name is included in the error message, allowing the operator to identify the request."
+          location: "run_git_command:25"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Only the branch name is included; no sensitive data is exposed in the error message."
+          location: "run_git_command:25"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached when the exception is raised, providing clear error details."
+          location: "run_git_command:25"
+  not_applied:
+    - node: observability.error-context
+      reason: "Duplicate node in the pack; already applied."
+    - node: observability.error-context
+      reason: "Duplicate node in the pack; already applied."
+    - node: observability.error-context
+      reason: "Duplicate node in the pack; already applied."
+    - node: observability.error-context
+      reason: "Duplicate node in the pack; already applied."
