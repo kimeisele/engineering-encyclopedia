@@ -20,13 +20,13 @@ structurally identical pack with irrelevant content).
 | e1 idempotency | Mistral | 2.80 | 4.80 | 2.40 | +2.00 | −0.40 |
 | e2 subprocess-safety | DeepSeek | 4.40 | 5.60 | 3.80 | +1.20 | −0.60 |
 | e2 subprocess-safety | Mistral | 4.40 | 6.00 | 4.80 | +1.60 | +0.40 |
-| e3 atomic-replacement | DeepSeek | 4.80 | 6.00 | 4.80 | +1.20 | 0.00 |
-| e3 atomic-replacement | Mistral | 0.40 | 6.00 | 0.80 | +5.60 | +0.40 |
+| e3 atomic-replacement | DeepSeek | 4.60 | 6.00 | 4.40 | +1.40 | −0.20 |
+| e3 atomic-replacement | Mistral | 0.40 | 6.00 | 0.60 | +5.60 | +0.20 |
 
 Treatment exceeds control on all six cells. The placebo sits at or below
 control on DeepSeek (all three) and slightly above control on Mistral e2
-and e3 (+0.40 each) — far below the treatment. The in-sample anomaly is
-attenuated from +1.20 to +0.40 with the repaired instrument.
+(+0.40) and e3 (+0.20) — far below the treatment. The in-sample anomaly is
+attenuated with the repaired instrument.
 
 ## Out-of-sample (e4, e5) — reported separately
 
@@ -70,7 +70,9 @@ every criterion):
 - **e3 `atomic_rename`:** tightened — a bare `.replace(` no longer credits
   `str.replace()`.
 - **e3 `no_direct_truncate`:** widened to variable paths, then refined so
-  temp-file writes (`os.fdopen`, tmp/temp names) are not false-flagged.
+  temp-file writes (`os.fdopen`, tmp/temp names) are not false-flagged;
+  the rubric self-test then caught a residual bug (a bare `path` identifier
+  was not flagged) and it was fixed.
 - **e3 `same_directory` / `failure_cleanup`:** widened (`with_name`,
   context-manager cleanup).
 - **e4 `breaker_state` / `fail_fast_when_open`:** tightened — a bare word
@@ -92,10 +94,10 @@ final-pipeline numbers, after = repaired rubrics, same completions):
 | A | e3 | 5.00 / 6.00 / – | 3.60 / 6.00 / – |
 | B | e1 | 3.80 / 4.80 / 2.20 | 4.00 / 4.80 / 2.20 |
 | B | e2 | 3.60 / 5.00 / 2.80 | 4.40 / 5.60 / 3.80 |
-| B | e3 | 5.60 / 6.00 / 5.20 | 4.80 / 6.00 / 4.80 |
+| B | e3 | 5.60 / 6.00 / 5.20 | 4.60 / 6.00 / 4.40 |
 | C | e1 | 2.80 / 4.60 / 2.40 | 2.80 / 4.80 / 2.40 |
 | C | e2 | 3.60 / 5.00 / 4.80 | 4.40 / 6.00 / 4.80 |
-| C | e3 | 1.40 / 5.80 / 1.40 | 0.40 / 6.00 / 0.80 |
+| C | e3 | 1.40 / 5.80 / 1.40 | 0.40 / 6.00 / 0.60 |
 | OOS-DS | e4 | 5.40 / 5.20 / 4.80 | 5.60 / 5.60 / 4.80 |
 | OOS-DS | e5 | 4.80 / 4.80 / 4.40 | 5.00 / 5.40 / 5.00 |
 | OOS-MR | e4 | 2.80 / 6.00 / 2.60 | 2.80 / 6.00 / 2.60 |
@@ -128,8 +130,8 @@ means the delta is larger than that spread. No significance testing.
   earlier +1.20 anomaly) — e2 is mostly knowledge, with a residual small
   structural component on Mistral.
 - **e3:** treatment far exceeds the spread on Mistral (+5.60) and exceeds
-  it on DeepSeek (+1.20), with placebo at control on both — e3 is the
-  cleanest knowledge effect.
+  it on DeepSeek (+1.40), with placebo at or below control on both — e3 is
+  the cleanest knowledge effect.
 
 Out-of-sample, per cell: e4-Mistral +3.20 exceeds its spread; e4-DeepSeek
 0.00 is a ceiling pair (control 5.60/6.00); e5-DeepSeek +0.40 and
