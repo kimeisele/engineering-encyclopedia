@@ -44,6 +44,11 @@ python3 experiments/runner.py score e2 out/e2-treatment-1.py
 python3 experiments/runner.py summarize experiments/fixtures --out experiments/RESULTS.md
 ```
 
+`experiments/provider_chat_completions.py` is a generic (vendor-free) adapter
+for OpenAI-compatible chat/completions endpoints — configure model, base URL
+and key source via flags or environment variables and point
+`ENCYCLOPEDIA_RUNNER` at it.
+
 `run` writes the completion to the given file and appends one line to
 `experiments/fixtures/manifest.jsonl` with the task, arm, output path, date,
 the `ENCYCLOPEDIA_RUNNER` value and (for treatment) the pack hash — the

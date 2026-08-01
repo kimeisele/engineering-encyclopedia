@@ -1,0 +1,71 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict
+
+
+def update_json_config(filepath: str, updates: Dict[str, Any]) -> None:
+    """
+    Atomically update a JSON config file on disk.
+
+    Validates updates against the current config shape, resets to defaults on
+    invalid content, and writes via same-directory temp file + fsync + rename.
+    """
+    # --- Input validation: reject updates that are not dicts ----------------
+    if not isinstance(updates, dict):
+        raise TypeError("updates must be a JSON object (dict)")
+
+    # --- Read current config with validation ---------------------------------
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
+        try:
+            config = json.loads(content)
+            if not isinstance(config, dict):
+                # Reset invalid config to {}, do not propagate bad data
+                config = {}
+        except json.JSONDecodeError:
+            # Invalid JSON on disk: reset to empty config
+            config = {}
+    else:
+        config = {}
+
+    # --- Merge validated updates (whitelist: only JSON-serializable values) ---
+    for key, value in updates.items():
+        # Basic shape validation at the trust boundary
+        if not isinstance(key, str):
+            raise TypeError("config keys must be strings")
+        try:
+            json.dumps(value)  # Ensure value is JSON-serializable
+        except (TypeError, ValueError):
+            raise ValueError(f"value for '{key}' is not JSON-serializable")
+        config[key] = value
+
+    # --- Atomic write: temp file in same dir, fsync, rename ------------------
+    directory = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())  # Flush data to disk before rename
+        os.rename(tmp_path, filepath)  # Atomic on POSIX
+    except Exception:
+        # Cleanup temp file on failure, never leave partial write
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    finally:
+        # Ensure directory metadata is also flushed (best-effort)
+        try:
+            dir_fd = os.open(directory, os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass  # Directory fsync not possible on all systems; ignore
+```

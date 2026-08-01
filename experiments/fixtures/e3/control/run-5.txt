@@ -1,0 +1,237 @@
+Here's a comprehensive function to update a JSON config file on disk:
+
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict, Optional
+from pathlib import Path
+
+def update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    create_if_missing: bool = False,
+    default_config: Optional[Dict] = None,
+    atomic_write: bool = True,
+    sort_keys: bool = False,
+    indent: int = 2
+) -> bool:
+    """
+    Update a JSON config file on disk with the provided updates.
+    
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary containing the updates to apply
+        create_if_missing: If True, create the file if it doesn't exist
+        default_config: Default configuration to use if file doesn't exist
+        atomic_write: If True, write to temp file and then rename (safer)
+        sort_keys: Sort JSON keys alphabetically
+        indent: Number of spaces for JSON indentation
+    
+    Returns:
+        True if successful, False otherwise
+    
+    Raises:
+        ValueError: If file doesn't exist and create_if_missing is False
+        TypeError: If existing file is not valid JSON
+    """
+    
+    file_path = Path(file_path)
+    
+    # Handle non-existent files
+    if not file_path.exists():
+        if not create_if_missing:
+            raise ValueError(f"File {file_path} does not exist")
+        
+        # Use default config or empty dict
+        config = default_config or {}
+    else:
+        # Read existing config
+        try:
+            with open(file_path, 'r') as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            raise TypeError(f"Existing file is not valid JSON: {e}")
+    
+    # Apply updates recursively
+    def recursive_update(base: dict, updates: dict):
+        for key, value in updates.items():
+            if (
+                isinstance(value, dict) and 
+                key in base and 
+                isinstance(base[key], dict)
+            ):
+                # Recursively update nested dictionaries
+                recursive_update(base[key], value)
+            else:
+                # Replace or add the value
+                base[key] = value
+        return base
+    
+    # Apply the updates
+    updated_config = recursive_update(config, updates)
+    
+    # Write the file
+    if atomic_write:
+        # Write to temporary file first
+        temp_file = file_path.with_suffix('.tmp' + file_path.suffix)
+        try:
+            with open(temp_file, 'w') as f:
+                json.dump(updated_config, f, indent=indent, sort_keys=sort_keys)
+            # Replace original with temp file
+            temp_file.replace(file_path)
+        except Exception:
+            # Cleanup temp file on error
+            if temp_file.exists():
+                temp_file.unlink()
+            raise
+    else:
+        # Direct write
+        with open(file_path, 'w') as f:
+            json.dump(updated_config, f, indent=indent, sort_keys=sort_keys)
+    
+    return True
+
+
+# Example usage
+if __name__ == "__main__":
+    # Example 1: Create a new config file
+    config_path = "app_config.json"
+    
+    # Create initial config
+    update_json_config(
+        config_path,
+        {
+            "database": {
+                "host": "localhost",
+                "port": 5432,
+                "user": "admin"
+            },
+            "features": {
+                "analytics": True,
+                "notifications": False
+            },
+            "logging": {
+                "level": "info"
+            }
+        },
+        create_if_missing=True,
+        default_config={"database": {}, "features": {}, "logging": {}}
+    )
+    
+    print(f"Created config file at {config_path}")
+    
+    # Example 2: Update existing config (nested updates)
+    update_json_config(
+        config_path,
+        {
+            "database": {
+                "port": 5433,  # Update existing nested value
+                "password": "secret"  # Add new key
+            },
+            "features": {
+                "analytics": False  # Change value
+            },
+            "new_section": {  # Add new top-level section
+                "enabled": True
+            }
+        }
+    )
+    
+    # Read and display the config
+    with open(config_path, 'r') as f:
+        print("\nUpdated config:")
+        print(json.dumps(json.load(f), indent=2))
+    
+    # Example 3: Error handling for missing file
+    try:
+        update_json_config("non_existent.json", {"key": "value"})
+    except ValueError as e:
+        print(f"\nError: {e}")
+```
+
+This function provides several important features:
+
+## Key Features:
+
+1. **Nested Updates**: Recursively updates nested dictionaries without overwriting entire sections
+2. **Atomic Writes**: Uses temp file + rename operation to prevent file corruption
+3. **Error Handling**: Properly handles missing files and invalid JSON
+4. **Flexibility**: Options to control JSON formatting and creation behavior
+
+## Advanced Usage:
+
+If you need even more control, here's an extended version with additional features:
+
+```python
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional, List
+
+def advanced_update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    paths: Optional[List[str]] = None,
+    remove_keys: Optional[List[str]] = None,
+    **kwargs
+):
+    """
+    Advanced version with path-based updates and key removal capability.
+    """
+    file_path = Path(file_path)
+    
+    # Initialize config
+    if not file_path.exists():
+        if not kwargs.get('create_if_missing', False):
+            raise FileNotFoundError(f"File {file_path} does not exist")
+        config = {}
+    else:
+        with open(file_path, 'r') as f:
+            config = json.load(f)
+    
+    # Remove specified keys
+    if remove_keys:
+        for key_path in remove_keys:
+            keys = key_path.split('.')
+            current = config
+            for key in keys[:-1]:
+                if key not in current:
+                    break
+                current = current[key]
+            if keys[-1] in current:
+                del current[keys[-1]]
+    
+    # Apply updates
+    for key_path, value in flatten_dict(updates).items():
+        keys = key_path.split('.')
+        current = config
+        for key in keys[:-1]:
+            if key not in current or not isinstance(current[key], dict):
+                current[key] = {}
+            current = current[key]
+        current[keys[-1]] = value
+    
+    # Write file
+    with open(file_path, 'w') as f:
+        json.dump(config, f, indent=kwargs.get('indent', 2))
+    
+    return config
+
+def flatten_dict(d: Dict, parent_key: str = '', sep: str = '.') -> Dict:
+    """Flatten nested dictionary to dot notation."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+```
+
+This advanced version allows for:
+- Path-based updates using dot notation (e.g., "database.port")
+- Key removal
+- More flexible control over the update process
+
+Choose the version that best fits your needs!

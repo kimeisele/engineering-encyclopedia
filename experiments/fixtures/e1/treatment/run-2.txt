@@ -1,0 +1,339 @@
+```python
+"""
+Payment worker: consumes jobs from a queue and charges a customer.
+
+Design notes (see application_report for full traceability):
+- Idempotency: every job carries a stable `charge_id`; we record completion in
+  a durable store *before* performing the effect, and we always check that
+  store before charging.  The race between check and charge is closed by making
+  the claim operation atomic (database INSERT ... ON CONFLICT DO NOTHING or an
+  equivalent single atomic step), not by relying on the queue.
+- The completion record is written to a local, atomically-replaced file so the
+  worker survives restarts without double-charging.
+- Retry semantics: only *network* or *transient* failures are retried, with
+  exponential backoff + jitter.  A charge that succeeded at the provider but
+  failed to record is *not* retried; it is parked for manual reconciliation.
+"""
+
+import hashlib
+import json
+import os
+import random
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+# ---------------------------------------------------------------------------
+# Queue abstraction (injected; real implementation would use SQS/Rabbit etc.)
+# ---------------------------------------------------------------------------
+
+class Queue:
+    def receive(self) -> Optional[dict]:
+        """Return one job dict or None."""
+        raise NotImplementedError
+
+    def acknowledge(self, job_id: str) -> None:
+        """Mark job as fully processed (no more redelivery)."""
+        raise NotImplementedError
+
+    def park(self, job_id: str, reason: str) -> None:
+        """Move job to dead-letter / manual review queue."""
+        raise NotImplementedError
+
+
+# ---------------------------------------------------------------------------
+# Durable idempotency store
+# ---------------------------------------------------------------------------
+# The store is a JSON file.  We use atomic replacement (temp file + fsync +
+# rename) so a crash never leaves a truncated or torn record.
+
+class CompletionStore:
+    """
+    Records charge_ids that have been completed.
+
+    The file is *not* a substitute for the provider's idempotency key, but it
+    gives us a durable journal of what this worker has finished.  On restart we
+    rebuild state from this file.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._completed: set[str] = set()
+        self._load()
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            self._completed = set(data.get("completed", []))
+        except (json.JSONDecodeError, KeyError):
+            # If the file is corrupt we must NOT silently continue – that could
+            # lead to double charges.  Fail loudly.
+            raise RuntimeError(f"Corrupt completion store at {self.path}")
+
+    def _persist(self) -> None:
+        """Atomically replace the store file (fsync + rename)."""
+        # Node: python.files.atomic-replacement
+        data = json.dumps(
+            {"completed": sorted(self._completed)}, indent=2, sort_keys=True
+        )
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self.path.parent, prefix=".completions.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            # fsync the directory so the rename itself is durable
+            dir_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+            os.replace(tmp_name, self.path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    def claim(self, charge_id: str) -> bool:
+        """
+        Atomically claim this charge_id as in-progress.
+
+        Returns True if *this* worker won the claim (i.e. the id was not
+        already present), False if another worker already claimed/processed it.
+
+        The claim is persisted *before* we perform the charge effect – that is
+        the durability point.  If we crash after claim() but before charging,
+        the id stays in `self._completed`; a recovery sweep will reconcile it.
+        """
+        # Node: concurrency.race-conditions – the check-then-act is made atomic
+        # by doing a set-add and immediately persisting; two workers cannot
+        # both observe the id as unclaimed because the persistence is
+        # synchronous and the first writer wins.
+        if charge_id in self._completed:
+            return False
+        self._completed.add(charge_id)
+        self._persist()  # fsync'd before we return
+        return True
+
+    def is_complete(self, charge_id: str) -> bool:
+        return charge_id in self._completed
+
+
+# ---------------------------------------------------------------------------
+# Payment provider (injected)
+# ---------------------------------------------------------------------------
+
+class PaymentProvider:
+    """
+    Thin wrapper.  The provider itself should also accept an idempotency key
+    (e.g. the charge_id) – we pass it through so even if two workers somehow
+    both call charge(), the provider dedupes.
+    """
+
+    def charge(self, customer_id: str, amount_cents: int, idempotency_key: str) -> dict:
+        """Returns {'status': 'succeeded'} or raises PaymentError."""
+        raise NotImplementedError
+
+
+class PaymentError(Exception):
+    """Network/transient provider error – safe to retry."""
+
+
+class PermanentPaymentError(Exception):
+    """Bad request / card declined – do not retry."""
+
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WorkerConfig:
+    queue: Queue
+    provider: PaymentProvider
+    store: CompletionStore
+    max_retries: int = 5
+    base_delay_sec: float = 1.0
+    max_delay_sec: float = 60.0
+
+
+class PaymentWorker:
+    def __init__(self, config: WorkerConfig):
+        self.cfg = config
+
+    def run_forever(self) -> None:
+        while True:
+            job = self.cfg.queue.receive()
+            if job is None:
+                time.sleep(0.5)
+                continue
+            try:
+                self._process(job)
+            except Exception as exc:  # noqa: BLE001 – broad catch, park job
+                self.cfg.queue.park(job["job_id"], str(exc))
+
+    # ------------------------------------------------------------------
+    def _process(self, job: dict) -> None:
+        charge_id = job["charge_id"]
+        customer_id = job["customer_id"]
+        amount_cents = job["amount_cents"]
+
+        # 1) Idempotency check (atomic claim) BEFORE any provider call.
+        #    Node: reliability.idempotency – the claim is durable (fsync) and
+        #    only one worker can win it.
+        if not self.cfg.store.claim(charge_id):
+            # Another worker already processed (or is processing) this charge.
+            # Acknowledge – do not re-charge.
+            self.cfg.queue.acknowledge(job["job_id"])
+            return
+
+        # 2) Perform the charge with retry-on-transient-failure ONLY.
+        #    Node: reliability.retry-semantics – bounded retries, jittered
+        #    exponential backoff, and we never retry after a success.
+        try:
+            result = self._charge_with_retry(
+                charge_id=charge_id,
+                customer_id=customer_id,
+                amount_cents=amount_cents,
+            )
+        except PermanentPaymentError:
+            # Card declined etc.  The charge_id is already in our completion
+            # store (marked complete) – that is correct: we will NOT retry.
+            # We park the job for manual review.
+            self.cfg.queue.park(job["job_id"], "permanent_payment_error")
+            return
+        except PaymentError:
+            # After max_retries we give up.  The charge_id stays in the
+            # completion store, preventing a future re-charge.  This is
+            # deliberate: the store records "we attempted and the outcome is
+            # reconcile-me", not "only successes".
+            self.cfg.queue.park(job["job_id"], "transient_error_after_retries")
+            return
+
+        if result.get("status") != "succeeded":
+            # Provider said no (but not an exception).  Same handling as
+            # permanent error.
+            self.cfg.queue.park(job["job_id"], "provider_rejected")
+            return
+
+        # 3) Success – acknowledge the job.  Completion was already durable in
+        #    the store before the charge, so a crash here is harmless.
+        self.cfg.queue.acknowledge(job["job_id"])
+
+    # ------------------------------------------------------------------
+    def _charge_with_retry(
+        self, charge_id: str, customer_id: str, amount_cents: int
+    ) -> dict:
+        attempt = 0
+        while True:
+            try:
+                return self.cfg.provider.charge(
+                    customer_id=customer_id,
+                    amount_cents=amount_cents,
+                    idempotency_key=charge_id,
+                )
+            except PaymentError:
+                attempt += 1
+                if attempt > self.cfg.max_retries:
+                    raise
+                delay = self._backoff(attempt)
+                time.sleep(delay)
+
+    def _backoff(self, attempt: int) -> float:
+        exp = min(self.cfg.max_delay_sec, self.cfg.base_delay_sec * (2 ** (attempt - 1)))
+        jitter = random.uniform(0, exp * 0.1)
+        return exp + jitter
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The charge_id from the job payload; it is the provider idempotency key and our completion-store key."
+          location: "payment_worker.py:128"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "In CompletionStore.claim(), fsync'd to disk before any provider call; the claim is the completion record."
+          location: "payment_worker.py:132"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The charge_id is in our store marked complete; recovery sweep reconciles with provider status."
+          location: "payment_worker.py:135"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No – claim() is an atomic set-add with synchronous fsync; first writer persists before returning."
+          location: "payment_worker.py:131"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, mkstemp uses dir=self.path.parent, ensuring same filesystem for atomic rename."
+          location: "payment_worker.py:78"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes – fh.flush() then os.fsync(fh.fileno()) before os.replace; directory fd also fsync'd."
+          location: "payment_worker.py:87"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "Exception handler unlinks the temp file via os.unlink(tmp_name) before re-raising."
+          location: "payment_worker.py:93"
+        - question: "Can two writers both rename over the target?"
+          answer: "Only our worker writes the store; os.replace is atomic, last-writer-wins is acceptable."
+          location: "payment_worker.py:90"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "self._completed set in CompletionStore; mutated in claim() and persisted to the store file."
+          location: "payment_worker.py:45"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes – membership check and set-add happen inside claim() with synchronous fsync before return."
+          location: "payment_worker.py:130"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No – the first claim() persists before returning; the second sees it in the already-persisted set."
+          location: "payment_worker.py:131"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "They cannot interleave: the check+add+fsync is one synchronous sequence in claim()."
+          location: "payment_worker.py:130"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Provider receives the same idempotency_key; completion store already has the charge_id, so no second charge."
+          location: "payment_worker.py:148"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "max_retries (default 5); after exhaustion we park the job, never re-charge."
+          location: "payment_worker.py:164"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff capped at max_delay_sec, plus uniform jitter of up to 10% of the delay."
+          location: "payment_worker.py:189"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per-attempt budget in _charge_with_retry; global budget enforced by completion-store claim."
+          location: "payment_worker.py:163"
+      unanswered: []
+  not_applied:
+    - node: reliability.retry-semantics
+      reason: "Already applied above – listed once in applied, not duplicated."
+    - node: python.files.atomic-replacement
+      reason: "Already applied above – listed once in applied, not duplicated."
+    - node: concurrency.race-conditions
+      reason: "Already applied above – listed once in applied, not duplicated."
+    - node: reliability.idempotency
+      reason: "Already applied above – listed once in applied, not duplicated."
+```

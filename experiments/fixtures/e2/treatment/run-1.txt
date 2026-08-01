@@ -1,0 +1,141 @@
+```python
+import subprocess
+from pathlib import Path
+
+
+def run_git_branch_command(branch_name: str, repo_path: str) -> str:
+    """
+    Runs `git branch <branch_name>` in the given repository.
+
+    The branch name is passed as a separate argument to the git executable,
+    never interpolated into a shell string, so no shell injection is possible.
+    """
+
+    # Reject branch names that would be ambiguous or dangerous as a path.
+    # This is defense-in-depth: the argument list already prevents shell
+    # injection, but this blocks confusion attacks like "-u" or names with
+    # control characters.
+    if not branch_name or branch_name.startswith("-"):
+        raise ValueError("Branch name must be non-empty and must not start with '-'")
+
+    if any(ch in branch_name for ch in "\x00\r\n\t /\\"):
+        raise ValueError("Branch name contains invalid characters")
+
+    repo = Path(repo_path).resolve()
+    if not repo.is_dir():
+        raise ValueError(f"Not a directory: {repo_path}")
+
+    # Run git as a list of arguments. No shell=True, no string interpolation.
+    result = subprocess.run(
+        ["git", "branch", branch_name],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"git branch failed: {result.stderr.strip()}")
+
+    return result.stdout.strip()
+```
+
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: "Is the command passed as a list, with input as elements?"
+          answer: "Yes. The command is ['git', 'branch', branch_name]; branch_name is an element, never interpolated into a string."
+          location: "run_git_branch_command:27"
+        - question: "Is shell=True present anywhere, even conditionally?"
+          answer: "No. The subprocess.run call uses the list form with the default shell=False."
+          location: "run_git_branch_command:27"
+        - question: "Can a user-supplied value change which program runs?"
+          answer: "No. The executable is the literal 'git'; only the branch name argument is user-controlled."
+          location: "run_git_branch_command:27"
+        - question: "Is the input validated or is it passed as opaque data?"
+          answer: "Validated: rejects empty names, leading dashes, and control/path characters before execution."
+          location: "run_git_branch_command:13-19"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Trust boundary is the function entry; validation happens immediately before any git call."
+          location: "run_git_branch_command:13"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Accept: non-empty strings without leading dash or path/control characters. Rejects everything else via two ValueError checks."
+          location: "run_git_branch_command:13-19"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Validated form is used. The original branch_name is only referenced within the validation checks."
+          location: "run_git_branch_command:27"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes. Even after validation, the value is passed as an isolated list argument, never re-interpreted."
+          location: "run_git_branch_command:27"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The branch_name parameter identifies the operation. Git itself treats branch creation as idempotent to the name."
+          location: "run_git_branch_command:27"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Git records branch creation in the repository's refs. The function also returns the output for caller-side recording."
+          location: "run_git_branch_command:35"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "If git succeeds but subprocess raises (e.g., timeout), the branch exists but no return value is sent."
+          location: "run_git_branch_command:27"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes. Two concurrent calls with the same branch name could both see it missing; git resolves rename races atomically."
+          location: "run_git_branch_command:27"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Repository's refs directory is shared and mutated by git. The function itself holds no shared mutable state."
+          location: "run_git_branch_command:27"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes. Git's branch creation is a single atomic filesystem operation (rename in refs)."
+          location: "run_git_branch_command:27"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Possibly, during startup. But git's atomic rename means only one wins; the other gets a non-zero exit."
+          location: "run_git_branch_command:27"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "No pre-check is done; the git call itself is atomic, so interleaving yields one winner and one error."
+          location: "run_git_branch_command:27"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "No temp file is written; the function delegates all file mutation to git, which handles atomicity internally."
+        - question: "Is the data flushed before the rename?"
+          reason: "Not applicable; no custom file write occurs in this function."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "No temp file is created by this function."
+        - question: "Can two writers both rename over the target?"
+          reason: "Delegated to git; its rename is atomic so two writers cannot both succeed."
+  not_applied:
+    - node: python.processes.subprocess-safety
+      reason: "Applied above."
+    - node: reliability.idempotency
+      reason: "Applied above."
+    - node: python.files.atomic-replacement
+      reason: "Applied above (with all questions answered in unanswered due to no file writes)."
+    - node: security.input-validation
+      reason: "Applied above."
+    - node: concurrency.race-conditions
+      reason: "Applied above."
+```

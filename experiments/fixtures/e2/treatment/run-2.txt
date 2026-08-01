@@ -1,0 +1,111 @@
+```python
+import subprocess
+import re
+import sys
+
+def run_git_command(branch_name: str) -> str:
+    """
+    Run a git command (git rev-parse) with a user-supplied branch name.
+
+    Args:
+        branch_name: The branch name supplied by the user.
+
+    Returns:
+        The full commit hash of the branch.
+
+    Raises:
+        ValueError: If the branch name is invalid.
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    # Validate the branch name at the trust boundary (security.input-validation)
+    # Git branch names cannot contain: space, ~, ^, :, ?, *, [, \, or start/end with '/'
+    # or contain '..', or end with '.', or contain '@{'
+    GIT_INVALID_CHARS = r'[\s~^:?*\[\\]|(\.\.)|(@\{)|(/$)|(^/)'
+    if branch_name is None or not isinstance(branch_name, str) or len(branch_name) == 0:
+        raise ValueError("Branch name must be a non-empty string")
+    
+    if re.search(GIT_INVALID_CHARS, branch_name) or branch_name.startswith('-'):
+        raise ValueError(f"Invalid git branch name: {branch_name!r}")
+    
+    # Additional checks for reserved patterns
+    if branch_name == '@' or branch_name.startswith('@{'):
+        raise ValueError(f"Invalid git branch name: {branch_name!r}")
+    
+    if branch_name == '.' or branch_name == '..' or '.lock' in branch_name:
+        raise ValueError(f"Invalid git branch name: {branch_name!r}")
+    
+    # Run the git command
+    # python.processes.subprocess-safety: Use list arguments, never shell=True
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"refs/heads/{branch_name}"],
+            capture_output=True,
+            text=True,
+            check=False  # we handle errors manually to add context
+        )
+    except subprocess.SubprocessError as e:
+        # Wrap the error with context
+        raise subprocess.CalledProcessError(
+            returncode=getattr(e, 'returncode', 1),
+            cmd=['git', 'rev-parse', '--verify', f'refs/heads/{branch_name}'],
+            stderr=f"Failed to execute git command: {str(e)}"
+        )
+    
+    if result.returncode != 0:
+        stderr_msg = result.stderr.strip() if result.stderr else "unknown error"
+        raise subprocess.CalledProcessError(
+            returncode=result.returncode,
+            cmd=['git', 'rev-parse', '--verify', f'refs/heads/{branch_name}'],
+            stderr=stderr_msg
+        )
+    
+    return result.stdout.strip()
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: "Is the command passed as a list, with input as elements?"
+          answer: "Yes, the command is passed as a list with the branch name as a separate element, never interpolated into a string."
+          location: "solution.py:28"
+        - question: "Is shell=True present anywhere, even conditionally?"
+          answer: "No, shell=True is never used. The command is always constructed as a list and passed directly to subprocess.run."
+          location: "solution.py:28"
+        - question: "Can a user-supplied value change which program runs?"
+          answer: "No, the first element is always 'git'. The branch name is placed in the refs/heads/ path argument, which cannot alter the program."
+          location: "solution.py:29"
+        - question: "Is the input validated or is it passed as opaque data?"
+          answer: "The input is validated against git branch name rules before being passed, rejecting invalid characters and pattern."
+          location: "solution.py:14-23"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Validation occurs at the function entry point, which is the trust boundary between the caller and the subprocess execution."
+          location: "solution.py:14-23"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Only valid git branch names are acceptable. The regex rejects whitespace, special characters, patterns like '..', '@{' and leading dashes."
+          location: "solution.py:14-23"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The validated branch name (after passing all checks) is used to construct the refs/heads/ path in the subprocess call."
+          location: "solution.py:29"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, validation is thorough and the value is never trusted beyond its use as a leaf argument in the command list."
+          location: "solution.py:29"
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: "This is a single, read-only git query for one branch. It performs no state changes, uses no external side effects, and has no retry or completion semantics, so idempotency concepts do not apply."
+    - node: python.files.atomic-replacement
+      reason: "The function runs a git command and returns output; it reads no files to write, creates no temporary files, and performs no filesystem mutations or config updates."
+    - node: concurrency.race-conditions
+      reason: "The function is stateless: it takes a single input and produces a single output without reading or writing shared state. There is no check-then-act sequence or shared mutable data that could race."
+```

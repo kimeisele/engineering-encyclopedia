@@ -1,0 +1,148 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict
+
+
+def update_json_config(file_path: str, updates: Dict[str, Any]) -> None:
+    """
+    Atomically update a JSON config file on disk.
+
+    The function reads the existing file (if present), applies the updates,
+    validates the result, and writes it back atomically by writing a temp
+    file in the same directory, flushing it, and renaming it over the target.
+
+    Args:
+        file_path: Path to the JSON config file.
+        updates: Dictionary of key/value pairs to merge into the config.
+
+    Raises:
+        ValueError: If the resulting config is not a valid JSON object.
+        IOError: If the file cannot be read or written.
+    """
+    config = {}
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+    config.update(updates)
+
+    # Validate the config is a JSON-serializable dict (security.input-validation)
+    if not isinstance(config, dict):
+        raise ValueError("Config must be a JSON object")
+
+    # Serialize before writing to catch serialization errors early
+    serialized = json.dumps(config, indent=2, ensure_ascii=False) + "\n"
+
+    # Atomic write: temp file in same directory + flush + rename
+    dir_path = os.path.dirname(os.path.abspath(file_path))
+    fd, temp_path = tempfile.mkstemp(dir=dir_path, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(serialized)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(temp_path, file_path)
+    except Exception:
+        # Clean up temp file if the write fails (python.files.atomic-replacement)
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise
+```
+
+---
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, using tempfile.mkstemp(dir=dir_path) ensures same filesystem, so rename is atomic."
+          location: "solution.py:39"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and os.fsync(f.fileno()) are called before os.replace()."
+          location: "solution.py:46-48"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The except block checks if temp_path exists and unlinks it, leaving no orphaned temp file."
+          location: "solution.py:50-53"
+        - question: "Can two writers both rename over the target?"
+          answer: "Concurrent writers are not explicitly guarded; the atomicity prevents corruption but last-writer-wins."
+          location: "solution.py:18"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The config dict is local to each call; the shared state is the file on disk, mutated via atomic rename."
+          location: "solution.py:28-31"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, read-modify-write is not atomic; concurrent writers may lose updates."
+          location: "solution.py:28-49"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No claim semantics exist; this is a config update, not a claim. The risk is lost updates."
+          location: "solution.py:28"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Two writers can both read old state, merge updates, and last rename wins, losing one update."
+          location: "solution.py:28-49"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The function boundary is the trust boundary; updates dict is validated as a JSON-serializable dict."
+          location: "solution.py:35-37"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Any JSON-serializable dict is accepted; json.load and json.dumps reject non-serializable values."
+          location: "solution.py:31,35"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The serialized validated config is written; raw updates only enter via dict.update at line 31."
+          location: "solution.py:45"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "The file system is the only consumer; validation ensures a valid JSON object before write."
+          location: "solution.py:49"
+      unanswered: []
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: "Which behaviours are asserted, not just which lines run?"
+          answer: "No tests are provided with this solution; the function itself asserts config is a dict."
+          location: "solution.py:35"
+        - question: "What important paths are not covered at all?"
+          answer: "Documented in docstring; concurrent writes, fsync failure, and disk-full paths are untested."
+          location: "solution.py:4-10"
+        - question: "Does the suite fail when the behaviour regresses?"
+          answer: "Not applicable; no test suite accompanies this function."
+          location: "solution.py:1"
+        - question: "Is the metric used as evidence of quality?"
+          answer: "No metrics are used; code review and explicit validation are the quality checks."
+          location: "solution.py:1"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The file path and update key-value pairs identify the operation; no external ID exists."
+          location: "solution.py:31"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "No explicit completion record; the rename on disk is the operation's effect and completion."
+          location: "solution.py:49"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "If rename succeeds but a subsequent exception occurs, no partial state exists; atomicity prevents it."
+          location: "solution.py:49"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No deduplication semantics; applying the same update twice yields identical result."
+          location: "solution.py:28"
+      unanswered: []
+  not_applied: []
+```

@@ -1,0 +1,242 @@
+Here's a comprehensive function to update a JSON config file on disk with various features like backup support and error handling:
+
+```python
+import json
+import os
+import tempfile
+import shutil
+from typing import Any, Dict, Optional, Union
+from pathlib import Path
+
+
+def update_json_config(
+    filepath: Union[str, Path],
+    updates: Dict[str, Any],
+    create_missing: bool = True,
+    create_backup: bool = False,
+    backup_suffix: str = '.bak',
+    indent: int = 2,
+    ensure_ascii: bool = False
+) -> bool:
+    """
+    Update a JSON configuration file on disk.
+    
+    Args:
+        filepath: Path to the JSON file
+        updates: Dictionary of updates to apply (nested keys supported with dots)
+        create_missing: If True, create the file if it doesn't exist
+        create_backup: If True, create a backup before updating
+        backup_suffix: Suffix for backup file (e.g., '.bak', '.backup')
+        indent: JSON indentation for output
+        ensure_ascii: If False, allow non-ASCII characters in output
+    
+    Returns:
+        True if update was successful, False otherwise
+    
+    Raises:
+        json.JSONDecodeError: If existing file contains invalid JSON
+        PermissionError: If file cannot be read/written
+    """
+    filepath = Path(filepath)
+    
+    # Check if file exists
+    if not filepath.exists():
+        if create_missing:
+            # Create empty config
+            data = {}
+        else:
+            raise FileNotFoundError(f"Config file {filepath} does not exist")
+    else:
+        # Read existing config
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if content.strip():
+                    data = json.loads(content)
+                else:
+                    data = {}
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                f"Invalid JSON in {filepath}: {str(e)}", 
+                e.doc, 
+                e.pos
+            )
+    
+    # Apply updates (supports nested keys with dots)
+    data = _apply_updates(data, updates)
+    
+    # Create backup if requested
+    if create_backup and filepath.exists():
+        backup_path = filepath.with_suffix(filepath.suffix + backup_suffix)
+        shutil.copy2(filepath, backup_path)
+    
+    # Write updated config atomically
+    return _write_atomic(filepath, data, indent, ensure_ascii)
+
+
+def _apply_updates(data: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively apply updates to the config data."""
+    for key, value in updates.items():
+        # Support nested keys using dot notation: "a.b.c"
+        if '.' in key:
+            parts = key.split('.')
+            data = _set_nested(data, parts, value)
+        elif isinstance(value, dict) and isinstance(data.get(key), dict):
+            # Merge nested dictionaries instead of replacing
+            data[key] = _apply_updates(data.get(key, {}), value)
+        else:
+            data[key] = value
+    return data
+
+
+def _set_nested(data: Dict[str, Any], path: list, value: Any) -> Dict[str, Any]:
+    """Set a value in a nested dictionary structure."""
+    if len(path) == 1:
+        data[path[0]] = value
+    else:
+        key = path[0]
+        if key not in data or not isinstance(data[key], dict):
+            data[key] = {}
+        data[key] = _set_nested(data[key], path[1:], value)
+    return data
+
+
+def _write_atomic(filepath: Path, data: Dict, indent: int, ensure_ascii: bool) -> bool:
+    """Write data to file atomically to prevent corruption."""
+    # Ensure parent directory exists
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Write to temporary file first
+    temp_fd, temp_path = tempfile.mkstemp(dir=str(filepath.parent), 
+                                          prefix='.tmp_config_')
+    try:
+        with os.fdopen(temp_fd, 'w', encoding='utf-8') as temp_file:
+            json.dump(data, temp_file, indent=indent, ensure_ascii=ensure_ascii)
+            temp_file.write('\n')  # Ensure newline at end
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        
+        # Atomic replace
+        os.replace(temp_path, filepath)
+        return True
+    except Exception as e:
+        # Clean up temp file on error
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise e
+
+
+# Additional utility functions
+
+def read_json_config(filepath: Union[str, Path], default: Any = None) -> Any:
+    """Read a JSON config file with a default fallback."""
+    filepath = Path(filepath)
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default if default is not None else {}
+
+
+def delete_json_key(filepath: Union[str, Path], key: str, save: bool = True) -> Any:
+    """Delete a key from JSON config and optionally save."""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        raise FileNotFoundError(f"Config file {filepath} does not exist")
+    
+    with open(filepath, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    
+    value = data.pop(key, None)
+    
+    if save:
+        update_json_config(filepath, {})
+    return value
+
+
+# Example usage with nested configuration
+if __name__ == "__main__":
+    # Example config file structure
+    config_path = Path("example_config.json")
+    
+    # Create initial config
+    initial_config = {
+        "server": {
+            "host": "localhost",
+            "port": 8080
+        },
+        "database": {
+            "host": "db.example.com",
+            "port": 5432,
+            "pool_size": 10
+        },
+        "features": {
+            "logging": True,
+            "metrics": False
+        }
+    }
+    
+    with open(config_path, 'w') as f:
+        json.dump(initial_config, f, indent=2)
+    
+    # Update with various use cases
+    updates = {
+        "server.port": 9090,           # Update nested value with dot notation
+        "database.pool_size": 20,      # Update another nested value
+        "features.metrics": True,      # Toggle feature
+        "new_settings": {              # Add new section
+            "timeout": 30,
+            "retry_count": 3
+        }
+    }
+    
+    # Update with backup
+    success = update_json_config(
+        config_path,
+        updates,
+        create_backup=True,
+        backup_suffix='.backup'
+    )
+    
+    print(f"Update successful: {success}")
+    print("Updated config:")
+    print(json.dumps(read_json_config(config_path), indent=2))
+    
+    # Demonstrate merge behavior (not replacing existing sections)
+    merge_update = {
+        "server": {
+            "max_connections": 100  # This will be merged, keeping host and port
+        }
+    }
+    update_json_config(config_path, merge_update)
+    print("\nAfter merge update:")
+    print(json.dumps(read_json_config(config_path), indent=2))
+```
+
+This function provides:
+
+1. **Nested key support**: Updates using dot notation (e.g., `"server.port": 9090`)
+2. **Atomic writes**: Prevents file corruption by writing to temp and replacing
+3. **Backup functionality**: Optional backup creation before updates
+4. **Merge behavior**: Nested dictionaries are merged, not replaced
+5. **Error handling**: Clear exceptions for invalid JSON, permissions, etc.
+6. **Atomic operations**: Handles concurrent writes safely
+7. **Flexibility**: Configurable indentation and encoding options
+
+**Usage examples:**
+
+```python
+# Basic update
+update_json_config('config.json', {'version': '2.0'})
+
+# Update with backup
+update_json_config('config.json', {'debug': True}, create_backup=True)
+
+# Create missing file
+update_json_config('new_config.json', {'initial': 'value'}, create_missing=True)
+
+# Nested update
+update_json_config('config.json', {'database.host': 'new-host.com'})
+```
+
+The function safely handles concurrent writes and preserves existing configuration while applying updates.

@@ -1,0 +1,158 @@
+Here's a Python function that runs a git command with a user-supplied branch name. I've included safety measures to prevent command injection:
+
+```python
+import subprocess
+import shlex
+import os
+
+def run_git_command(branch_name, command="checkout"):
+    """
+    Run a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name (str): The branch name to use in the git command
+        command (str): The git command to run (default: "checkout")
+    
+    Returns:
+        tuple: (stdout, stderr, return_code) from the command execution
+    
+    Raises:
+        ValueError: If the branch name is invalid or empty
+        subprocess.CalledProcessError: If the git command fails
+    """
+    
+    # Validate branch name
+    if not branch_name or not isinstance(branch_name, str):
+        raise ValueError("Branch name cannot be empty and must be a string")
+    
+    # Sanitize branch name to prevent command injection
+    # Git branch names can contain: letters, numbers, hyphens, underscores, dots, slashes
+    # but we'll be strict to be safe
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\-\./]+$', branch_name):
+        raise ValueError(f"Invalid branch name: {branch_name}")
+    
+    # Construct the git command safely using shlex.quote
+    git_command = f"git {command} {shlex.quote(branch_name)}"
+    
+    try:
+        print(f"Executing: {git_command}")
+        
+        # Run the command and capture output
+        result = subprocess.run(
+            git_command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd(),  # Change this if you need to run from a different directory
+            check=False  # Don't raise on failure, we'll handle it
+        )
+        
+        # Return stdout, stderr, and return code
+        return (result.stdout.strip(), result.stderr.strip(), result.returncode)
+        
+    except subprocess.SubprocessError as e:
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=git_command,
+            stderr=f"Failed to execute git command: {e}"
+        )
+
+# Example usage and additional helper functions
+
+def create_and_checkout_branch(branch_name):
+    """Create and switch to a new branch"""
+    result = run_git_command(branch_name, "checkout -b")
+    if result[2] == 0:
+        print(f"Successfully created and switched to branch: {branch_name}")
+    else:
+        print(f"Error: {result[1]}")
+    return result
+
+def list_branch_commits(branch_name):
+    """Show recent commits on a branch"""
+    result = run_git_command(f"--oneline -5 {branch_name}", "log")
+    if result[2] == 0:
+        print(f"Recent commits on {branch_name}:")
+        print(result[0])
+    else:
+        print(f"Error: {result[1]}")
+    return result
+
+# Example usage with error handling
+if __name__ == "__main__":
+    # Example 1: Checkout an existing branch
+    try:
+        result = run_git_command("main")
+        print(f"Checkout result: success={result[2] == 0}")
+        if result[0]:
+            print("Output:", result[0])
+        if result[1]:
+            print("Stderr:", result[1])
+    except ValueError as e:
+        print(f"Validation error: {e}")
+    except subprocess.CalledProcessError as e:
+        print(f"Git command failed: {e}")
+    
+    # Example 2: Create a new branch
+    try:
+        create_and_checkout_branch("feature/new-feature")
+    except (ValueError, subprocess.CalledProcessError) as e:
+        print(f"Error: {e}")
+    
+    # Example 3: With an invalid branch name (should fail validation)
+    try:
+        run_git_command("bad; rm -rf /")  # This will be caught by validation
+    except ValueError as e:
+        print(f"Security validation caught it: {e}")
+```
+
+**Key safety features in this implementation:**
+
+1. **Input Validation**: The branch name is checked against a whitelist of safe characters (letters, numbers, hyphens, underscores, dots, and slashes).
+
+2. **Command Injection Prevention**: 
+   - Uses `shlex.quote()` to properly escape the branch name
+   - Validates the branch name before constructing the command
+   - Rejects any input that could contain shell metacharacters
+
+3. **Error Handling**: 
+   - Returns stdout, stderr, and return code together
+   - Raises specific exceptions for validation vs execution errors
+   - Uses `check=False` to handle errors gracefully
+
+4. **Flexibility**: 
+   - You can specify different git commands (checkout, delete, log, etc.)
+   - Returns all output for further processing
+
+**Security note**: While this function validates and sanitizes input, you should still consider using `git` with `--` separator if you're dealing with branch names that could be ambiguous (e.g., starting with `-`). For the most secure approach, you could also consider using `subprocess.run()` without `shell=True` and pass arguments as a list:
+
+```python
+def run_git_command_safe(branch_name, command="checkout"):
+    """Alternative implementation without shell=True for maximum security"""
+    import subprocess
+    
+    # Validate as before
+    if not branch_name or not isinstance(branch_name, str):
+        raise ValueError("Branch name cannot be empty and must be a string")
+    
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\-\./]+$', branch_name):
+        raise ValueError(f"Invalid branch name: {branch_name}")
+    
+    # Build the command as a list (no shell needed)
+    cmd = ["git", command, branch_name]
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        return (result.stdout.strip(), result.stderr.strip(), result.returncode)
+    except subprocess.SubprocessError as e:
+        raise
+```
+
+The second implementation using `shell=False` is even more secure as it avoids shell interpretation entirely.

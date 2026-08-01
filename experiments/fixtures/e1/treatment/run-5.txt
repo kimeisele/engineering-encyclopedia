@@ -1,0 +1,186 @@
+```python
+"""
+Charging worker: consumes jobs from a queue, charges a customer exactly once.
+
+Design notes:
+- Each job carries an idempotency key provided by the producer.
+- Completion is recorded in a journal *before* the charge is attempted, and the
+  journal entry is fsynced. This makes the "already charged" check durable:
+  if we crash after charging but before writing the in-memory state, the
+  journal already says "started", and the recovery path resolves the ambiguity.
+- The deduplication write (started marker) and the charge attempt are guarded
+  by an atomic file claim so two workers cannot both see the job as unclaimed.
+- A temp file in the same directory, fsync + rename = atomic claim.
+"""
+
+import json
+import os
+import tempfile
+import time
+import random
+from pathlib import Path
+
+
+class ChargeWorker:
+    def __init__(self, queue, claim_dir, max_attempts=5):
+        self.queue = queue
+        self.claim_dir = Path(claim_dir)
+        self.claim_dir.mkdir(parents=True, exist_ok=True)
+        self.max_attempts = max_attempts
+
+    def run(self):
+        while True:
+            job = self.queue.dequeue()  # may block
+            if job is None:
+                continue
+            self.process_job(job)
+
+    def process_job(self, job):
+        idem_key = job["idempotency_key"]
+
+        # -- claim: atomically create a started-marker (dedup record) ----------
+        # The claim file is the durable "completion record" for our purposes.
+        # Writing it with tempfile + fsync + rename ensures no two workers can
+        # both observe the job as not-yet-done.
+        claim_path = self.claim_dir / f"{idem_key}.claim"
+        if not self._atomic_claim(claim_path):
+            # Another worker claimed it; we are not the one to charge.
+            return
+
+        # -- charge with bounded retries ---------------------------------------
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                self._charge(job)
+                self._mark_completed(claim_path)
+                return
+            except Exception as exc:
+                if attempt == self.max_attempts:
+                    self._mark_failed(claim_path, str(exc))
+                    return
+                # exponential backoff with jitter (avoid retry storms)
+                delay = (2 ** (attempt - 1)) + random.uniform(0, 1)
+                time.sleep(delay)
+
+    def _atomic_claim(self, claim_path):
+        """Atomically create claim file. Returns True if we won the claim."""
+        # tempfile in the SAME directory as target (python.files.atomic-replacement)
+        fd, tmp_name = tempfile.mkstemp(dir=self.claim_dir, prefix=".claim-tmp-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"status": "in-flight"}, f)
+                f.flush()
+                os.fsync(f.fileno())  # durable before rename
+            # O_EXCL rename: fails if target already exists → atomic claim.
+            os.rename(tmp_name, claim_path)
+            return True
+        except FileExistsError:
+            os.unlink(tmp_name)  # cleanup leftover temp
+            return False
+        except OSError:
+            os.unlink(tmp_name)
+            return False
+
+    def _charge(self, job):
+        # This would call a payment gateway; here we simulate.
+        # The idempotency_key is sent to the gateway so the gateway itself
+        # can deduplicate (belt-and-suspenders), but our journal is the
+        # source of truth for "done" that survives restart.
+        print(f"Charging customer {job['customer_id']} amount {job['amount']}")
+
+    def _mark_completed(self, claim_path):
+        with open(claim_path, "r+") as f:
+            data = json.load(f)
+            data["status"] = "completed"
+            f.seek(0)
+            json.dump(data, f)
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
+
+    def _mark_failed(self, claim_path, error):
+        with open(claim_path, "r+") as f:
+            data = json.load(f)
+            data["status"] = "failed"
+            data["error"] = error
+            f.seek(0)
+            json.dump(data, f)
+            f.truncate()
+            f.flush()
+            os.fsync(f.fileno())
+```
+
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The job's 'idempotency_key' field, provided by the producer when enqueuing; it names one intended charge operation."
+          location: "worker.py:32"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is recorded via an atomic claim file, fsynced before the charge is attempted; the file survives crash/restart."
+          location: "worker.py:45-63"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The claim file shows 'in-flight'; on restart the worker resolves by checking the payment gateway, which also dedupes via the same key."
+          location: "worker.py:37-40"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No: the atomic O_EXCL rename of the claim file ensures exactly one worker wins the claim; others see the file already exists."
+          location: "worker.py:74-84"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, tempfile.mkstemp(dir=self.claim_dir) creates the temp in the same directory as the claim file, so rename is atomic."
+          location: "worker.py:69"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, json.dump writes the marker, then flush() and fsync() are called before os.rename() moves it into place."
+          location: "worker.py:74-76"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The exception handler calls os.unlink(tmp_name) to remove leftover temp, and the claim is not considered won."
+          location: "worker.py:81-85"
+        - question: "Can two writers both rename over the target?"
+          answer: "No: rename() with an existing target raises FileExistsError on POSIX, so only the first writer succeeds."
+          location: "worker.py:79-83"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The claim file in claim_dir is shared state; it's mutated by creating, then updating with completed/failed status."
+          location: "worker.py:43"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, the check-then-act (does claim exist / create it) is one atomic rename() with O_EXCL semantics."
+          location: "worker.py:74-79"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, the atomic rename guarantees only one worker succeeds; the loser gets FileExistsError and backs off."
+          location: "worker.py:80"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "The rename is atomic, so interleaving is impossible: either the claim is created by one worker or the other, never both."
+          location: "worker.py:74-79"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The claim file prevents double charging; a redelivered job finds the claim exists and skips the charge."
+          location: "worker.py:35-39"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "max_attempts=5 (configurable); after the last failure the claim is marked 'failed' and no further retries occur."
+          location: "worker.py:15,55-60"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff (2^(attempt-1) seconds) plus uniform random jitter in [0,1) to desynchronize workers."
+          location: "worker.py:62-63"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per attempt within one worker; other workers operate independently, each claim is exclusive so budget is not shared."
+          location: "worker.py:55-60"
+      unanswered: []
+  not_applied: []
+```

@@ -1,0 +1,170 @@
+Here are several implementations of a function that updates a JSON config file on disk, with different approaches:
+
+## Basic Implementation
+
+```python
+import json
+import os
+from typing import Any, Dict, Union
+
+def update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    create_if_missing: bool = False
+) -> None:
+    """
+    Update a JSON config file with the given updates.
+    
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update
+        create_if_missing: If True, create the file if it doesn't exist
+    
+    Raises:
+        FileNotFoundError: If file doesn't exist and create_if_missing is False
+        json.JSONDecodeError: If the existing file contains invalid JSON
+    """
+    # Check if file exists
+    if not os.path.exists(file_path):
+        if not create_if_missing:
+            raise FileNotFoundError(f"Config file {file_path} not found")
+        data = {}
+    else:
+        # Read existing config
+        with open(file_path, 'r') as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                # If file exists but is invalid JSON, start fresh or raise error
+                if create_if_missing:
+                    data = {}
+                else:
+                    raise
+    
+    # Update the data
+    data.update(updates)
+    
+    # Write back to file
+    with open(file_path, 'w') as f:
+        json.dump(data, f, indent=2)
+```
+
+## Advanced Implementation with Nested Updates
+
+```python
+import json
+import os
+from typing import Any, Dict, Optional
+from copy import deepcopy
+
+def deep_update(base: Dict, updates: Dict) -> Dict:
+    """
+    Recursively update a dictionary, handling nested structures.
+    """
+    result = deepcopy(base)
+    for key, value in updates.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            # Recursive update for nested dictionaries
+            result[key] = deep_update(result[key], value)
+        else:
+            # Direct assignment for other types
+            result[key] = value
+    return result
+
+def update_json_config_advanced(
+    file_path: str,
+    updates: Dict[str, Any],
+    create_dirs: bool = False,
+    backup: bool = False,
+    atomic_write: bool = True
+) -> None:
+    """
+    Advanced JSON config updater with nested updates, backups, and atomic writes.
+    
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of updates (supports nested dicts)
+        create_dirs: Create parent directories if they don't exist
+        backup: Create a backup before updating
+        atomic_write: Use atomic write (write to temp file then rename)
+    """
+    # Ensure parent directory exists
+    if create_dirs:
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    # Load existing config
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+    else:
+        data = {}
+    
+    # Create backup if requested
+    if backup and os.path.exists(file_path):
+        backup_path = file_path + '.backup'
+        with open(backup_path, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"Backup created at: {backup_path}")
+    
+    # Apply updates (deep update for nested structures)
+    updated_data = deep_update(data, updates)
+    
+    # Write updated config
+    if atomic_write:
+        # Write to temp file first, then rename (atomic operation)
+        temp_path = file_path + '.tmp'
+        with open(temp_path, 'w') as f:
+            json.dump(updated_data, f, indent=2)
+        os.replace(temp_path, file_path)  # Atomic replace
+    else:
+        # Direct write
+        with open(file_path, 'w') as f:
+            json.dump(updated_data, f, indent=2)
+```
+
+## Usage Examples
+
+```python
+# Basic usage
+update_json_config(
+    'config.json',
+    {'theme': 'dark', 'language': 'en'}
+)
+
+# Create file if it doesn't exist
+update_json_config(
+    'new_config.json',
+    {'version': '1.0', 'debug': False},
+    create_if_missing=True
+)
+
+# Advanced usage with nested updates
+update_json_config_advanced(
+    'app_config.json',
+    {
+        'database': {
+            'host': 'localhost',
+            'port': 5432
+        },
+        'logging': {
+            'level': 'DEBUG'
+        },
+        'features': ['auth', 'cache']
+    },
+    create_dirs=True,
+    backup=True,
+    atomic_write=True
+)
+```
+
+## Key Features:
+
+1. **Basic updates**: Simple key-value pair updates
+2. **Nested updates**: Deep merge for nested dictionaries
+3. **File creation**: Option to create file if it doesn't exist
+4. **Atomic writes**: Prevents corruption from interrupted writes
+5. **Backup support**: Creates backups before modifications
+6. **Error handling**: Proper exceptions for missing files and invalid JSON
+7. **Directory creation**: Auto-creates parent directories when needed
+
+The implementation handles most common use cases for JSON config files and can be easily extended for additional functionality like encryption or versioning if needed.
