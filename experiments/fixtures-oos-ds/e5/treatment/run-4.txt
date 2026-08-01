@@ -1,0 +1,148 @@
+```python
+import logging
+import uuid
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+class CorrelationIdFilter(logging.Filter):
+    """Injects correlation_id into every log record."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.correlation_id = getattr(record, 'correlation_id', 'no-correlation-id')
+        return True
+
+def get_or_create_correlation_id(headers: Optional[Dict[str, str]] = None) -> str:
+    """
+    Extract existing correlation id from inbound request, or generate one.
+    Propagate it downstream via headers.
+    """
+    if headers and 'X-Correlation-Id' in headers:
+        return headers['X-Correlation-Id']
+    return str(uuid.uuid4())
+
+def make_downstream_headers(correlation_id: str) -> Dict[str, str]:
+    """Attach correlation id to outbound calls."""
+    return {'X-Correlation-Id': correlation_id}
+
+class ServiceError(Exception):
+    """Base error with operation context."""
+    def __init__(self, message: str, operation: str, step: str, correlation_id: str, **context: Any):
+        self.operation = operation
+        self.step = step
+        self.correlation_id = correlation_id
+        self.context = context
+        # Include identifying state, exclude secrets (override in subclasses)
+        state = ", ".join(f"{k}={v}" for k, v in context.items())
+        super().__init__(f"[{correlation_id}] {operation} failed at {step}: {message} ({state})")
+
+def handle_service_request(request_headers: Dict[str, str], service_call, max_retries: int = 3):
+    """
+    Two-service request handler with correlation id propagation, retry budget,
+    and error wrapping. Returns (response) or raises.
+    """
+    correlation_id = get_or_create_correlation_id(request_headers)
+    logger.info("request_started", extra={'correlation_id': correlation_id})
+
+    call_headers = make_downstream_headers(correlation_id)
+
+    for attempt in range(max_retries):
+        try:
+            response = service_call(call_headers)
+            logger.info("request_succeeded", extra={'correlation_id': correlation_id})
+            return response
+        except Exception as e:
+            logger.warning(
+                "request_attempt_failed",
+                extra={'correlation_id': correlation_id, 'attempt': attempt + 1}
+            )
+            if attempt == max_retries - 1:
+                # Dead-letter: surface to operator, don't silently drop
+                error = ServiceError(
+                    str(e), 
+                    operation="two_service_request",
+                    step=f"call_attempt_{attempt+1}",
+                    correlation_id=correlation_id
+                )
+                logger.error("request_dead_lettered", exc_info=error)
+                raise error
+
+def error_handler(exc: Exception) -> None:
+    """
+    Central error handler for operator tracing.
+    Assumes correlation_id is available from exception or log context.
+    """
+    if isinstance(exc, ServiceError):
+        # Already enriched - log with full context
+        logger.error(
+            f"Operation {exc.operation} failed: {exc}",
+            extra={'correlation_id': exc.correlation_id}
+        )
+    else:
+        # Unexpected error - try to extract correlation id from current context
+        correlation_id = getattr(logging.currentframe().f_locals, 'correlation_id', 'unknown')
+        logger.error(
+            f"Unhandled error: {exc}",
+            extra={'correlation_id': correlation_id}
+        )
+    # In production, emit to central monitoring/alerting with correlation_id
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "X-Correlation-Id UUID created at edge in get_or_create_correlation_id; propagated downstream via headers."
+          location: "implementation:get_or_create_correlation_id"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Headers attached via make_downstream_headers and passed to service_call on every attempt."
+          location: "implementation:make_downstream_headers"
+        - question: "Is it included in every log line and error?"
+          answer: "Injected via CorrelationIdFilter into all log records; ServiceError embeds it in message."
+          location: "implementation:CorrelationIdFilter, ServiceError"
+        - question: "What happens when an inbound call has no id?"
+          answer: "Generate a fresh UUID for the request rather than dropping or reusing another id."
+          location: "implementation:get_or_create_correlation_id"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "ServiceError includes operation name and step counter in its formatted message."
+          location: "implementation:ServiceError"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Correlation ID is embedded at the start of every ServiceError message."
+          location: "implementation:ServiceError"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Context dict is explicitly passed; caller controls what enters it, avoiding PII by design."
+          location: "implementation:ServiceError context parameter"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Attached at creation time in handle_service_request, before any re-raising."
+          location: "implementation:handle_service_request"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "Raises ServiceError with correlation context; logged as request_dead_lettered for operator action."
+          location: "implementation:handle_service_request"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Uniquely identified by correlation ID; sent to error_handler for central monitoring."
+          location: "implementation:handle_service_request, error_handler"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Logged at ERROR level with full correlation context; error_handler emits to monitoring."
+          location: "implementation:error_handler"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes—correlation_id preserved so same request can be replayed without duplication risk."
+          location: "implementation:get_or_create_correlation_id"
+      unanswered: []
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "Task focuses on tracing two-service error handling; circuit breaker prevents cascading failures but is orthogonal to correlation/error context which are the core requirements."

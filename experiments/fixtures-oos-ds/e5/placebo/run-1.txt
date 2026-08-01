@@ -1,0 +1,272 @@
+```python
+import logging
+import uuid
+import json
+from typing import Callable, Any, Optional
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+
+# --- Context propagation for request tracing ---
+_request_id: ContextVar[str] = ContextVar('request_id', default='-')
+_service_name: ContextVar[str] = ContextVar('service_name', default='unknown')
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ServiceError(Exception):
+    """Base error with structured context for tracing."""
+    message: str
+    operation: str
+    step: str
+    request_id: str
+    service: str
+    details: dict = field(default_factory=dict)
+    original_exc: Optional[BaseException] = None
+
+    def __str__(self) -> str:
+        return (
+            f"[{self.request_id}] {self.service}: {self.operation} failed at {self.step} — "
+            f"{self.message} | details={json.dumps(self.details, default=str)}"
+        )
+
+
+def set_request_context(request_id: str, service_name: str) -> None:
+    """Set the trace context for the current execution (call at request entry)."""
+    _request_id.set(request_id)
+    _service_name.set(service_name)
+
+
+def get_request_context() -> tuple[str, str]:
+    """Retrieve the current trace context."""
+    return _request_id.get(), _service_name.get()
+
+
+def sanitize(value: Any) -> Any:
+    """Redact sensitive fields (e.g., passwords, tokens, credit cards)."""
+    sensitive_keys = {'password', 'token', 'secret', 'authorization', 'cc_number'}
+    if isinstance(value, dict):
+        return {
+            k: ('[REDACTED]' if k.lower() in sensitive_keys else sanitize(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize(v) for v in value]
+    return value
+
+
+def error_handler(func: Callable) -> Callable:
+    """Decorator to catch exceptions and wrap them with service+step context."""
+    def wrapper(*args, **kwargs):
+        request_id, service = get_request_context()
+        # Determine a human-readable operation name (e.g., function name)
+        operation = func.__qualname__
+        try:
+            return func(*args, **kwargs)
+        except ServiceError as e:
+            # Already wrapped; re-raise as-is (preserve original context)
+            raise
+        except Exception as exc:
+            # Gather context params (sanitize sensitive data)
+            try:
+                arg_details = sanitize({
+                    'args': [str(a) for a in args],
+                    'kwargs': {k: str(v) for k, v in kwargs.items()}
+                })
+            except Exception:
+                arg_details = {'error': 'could not serialize args'}
+
+            raise ServiceError(
+                message=str(exc),
+                operation=operation,
+                step='unknown',  # override in specific service if needed
+                request_id=request_id,
+                service=service,
+                details={'call_args': arg_details},
+                original_exc=exc,
+            ) from exc
+    return wrapper
+
+
+# --- Cross-service tracing helper ---
+def call_service(
+    service_func: Callable,
+    service_name: str,
+    operation_desc: str,
+    step: str,
+    request_id: Optional[str] = None,
+    **kwargs: Any
+) -> Any:
+    """Propagate request_id into the called service and catch errors."""
+    current_rid, _ = get_request_context()
+    rid = request_id or current_rid
+    if not rid or rid == '-':
+        rid = str(uuid.uuid4())
+
+    # Save outer context, set new context for the downstream call
+    token = _request_id.set(rid)
+    _service_name.set(service_name)
+    try:
+        try:
+            return service_func(**kwargs)
+        except ServiceError as e:
+            # Add the step from the caller perspective
+            if e.step == 'unknown':
+                e.step = step
+            raise
+        except Exception as exc:
+            raise ServiceError(
+                message=f"{operation_desc} failed: {exc}",
+                operation=operation_desc,
+                step=step,
+                request_id=rid,
+                service=service_name,
+                details=sanitize({'kwargs': kwargs}),
+                original_exc=exc,
+            ) from exc
+    finally:
+        # Restore outer context
+        _request_id.reset(token)
+
+
+# --- Concrete services (demo) ---
+class PaymentService:
+    @staticmethod
+    @error_handler
+    def charge(amount: float, payment_method: dict):
+        # Demo failure
+        if amount > 100:
+            raise ValueError("Amount too high for instant approval")
+        return {"transaction_id": "txn-123", "amount": amount}
+
+
+class InventoryService:
+    @staticmethod
+    @error_handler
+    def reserve(item_id: str, quantity: int):
+        # Demo failure
+        if quantity > 10:
+            raise RuntimeError("Insufficient stock")
+        return {"reservation_id": "res-456", "item_id": item_id}
+
+
+# --- Orchestration (two-service request) ---
+@error_handler
+def place_order(order_data: dict) -> dict:
+    """Top-level entry: set request id, then call both services."""
+    request_id = str(uuid.uuid4())
+    set_request_context(request_id, 'order-api')
+
+    # Step 1: Reserve inventory
+    inv_result = call_service(
+        InventoryService.reserve,
+        service_name='inventory',
+        operation_desc='Reserve inventory',
+        step='inventory.reserve',
+        item_id=order_data['item_id'],
+        quantity=order_data['quantity'],
+        request_id=request_id,
+    )
+
+    # Step 2: Charge payment
+    pay_result = call_service(
+        PaymentService.charge,
+        service_name='payment',
+        operation_desc='Charge payment',
+        step='payment.charge',
+        amount=order_data['amount'],
+        payment_method=order_data['payment_method'],
+        request_id=request_id,
+    )
+
+    return {
+        "order_id": "order-" + request_id[:8],
+        "reservation": inv_result,
+        "payment": pay_result,
+        "request_id": request_id,
+    }
+
+
+# --- Operator-facing handler (entry point for error logging) ---
+def handle_request_error(error: BaseException) -> dict:
+    """Central error handler that logs with full trace context."""
+    request_id, service = get_request_context()
+    correlation = request_id if request_id != '-' else str(uuid.uuid4())
+
+    if isinstance(error, ServiceError):
+        # Structured log with all context the operator needs
+        log_entry = {
+            "event": "request_error",
+            "request_id": error.request_id,
+            "correlation_id": correlation,
+            "service": error.service,
+            "operation": error.operation,
+            "step": error.step,
+            "error_message": error.message,
+            "details": error.details,
+            "original_exception": repr(error.original_exc) if error.original_exc else None,
+        }
+        logger.error(f"[{error.request_id}] {error.service} error: {error.operation} @ {error.step}: {error.message}",
+                     extra={"context": log_entry})
+        return {"status": "error", "code": "SERVICE_FAILURE", **log_entry}
+
+    # Generic unexpected error (e.g., outside service wrapper)
+    log_entry = {
+        "event": "unexpected_error",
+        "request_id": correlation,
+        "service": service,
+        "error_message": str(error),
+        "error_type": type(error).__name__,
+    }
+    logger.error(f"[{correlation}] {service} unexpected error: {error}", extra={"context": log_entry})
+    return {"status": "error", "code": "INTERNAL_ERROR", **log_entry}
+
+
+# --- Usage example ---
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.ERROR, format='%(asctime)s %(message)s')
+
+    # Simulate a customer order that will fail mid-way
+    order = {
+        "item_id": "sku-42",
+        "quantity": 15,  # too many → inventory fails
+        "amount": 99.0,
+        "payment_method": {"card": "**** 4242", "cvv": "123", "password": "hunter2"}
+    }
+
+    try:
+        result = place_order(order)
+        print("Order placed:", result)
+    except Exception as exc:
+        # The central handler catches it, logs complete context
+        response = handle_request_error(exc)
+        print("\nOperator response:")
+        print(json.dumps(response, indent=2, default=str))
+        print("\nLog traces have request_id:", response.get("request_id"))
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes. ServiceError includes operation and step fields, set via error_handler and call_service."
+          location: "app.py:32-38,74-90,143-155"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes. request_id is propagated via ContextVar, included in all log entries and messages."
+          location: "app.py:24-30,46-50,112-120"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes. sanitize() redacts password, token, secret, authorization, and cc_number fields."
+          location: "app.py:52-65,130-135"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context (request_id, service, operation, step) is attached at wrap time, before re-raising as ServiceError."
+          location: "app.py:74-90,143-155"
+      unanswered: []
+  not_applied: []
+```

@@ -1,0 +1,225 @@
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+import json
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class RequestContext:
+    """Container for request-scoped context that survives across service boundaries."""
+
+    def __init__(self, request_id: str = None):
+        self.request_id = request_id or str(uuid.uuid4())
+        self.service_a_context: Dict[str, Any] = {}
+        self.service_b_context: Dict[str, Any] = {}
+        self.operation: Optional[str] = None
+        self.failing_step: Optional[str] = None
+
+    def add_service_a_context(self, **kwargs):
+        """Add context from Service A."""
+        self.service_a_context.update(kwargs)
+
+    def add_service_b_context(self, **kwargs):
+        """Add context from Service B."""
+        self.service_b_context.update(kwargs)
+
+    def set_operation(self, operation: str):
+        """Set the operation being performed."""
+        self.operation = operation
+
+    def set_failing_step(self, step: str):
+        """Set the specific step that failed."""
+        self.failing_step = step
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize context for transmission between services."""
+        return {
+            "request_id": self.request_id,
+            "operation": self.operation,
+            "failing_step": self.failing_step,
+            "service_a": self.service_a_context,
+            "service_b": self.service_b_context
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'RequestContext':
+        """Deserialize context received from another service."""
+        ctx = cls(data.get("request_id"))
+        ctx.operation = data.get("operation")
+        ctx.failing_step = data.get("failing_step")
+        ctx.service_a_context = data.get("service_a", {})
+        ctx.service_b_context = data.get("service_b", {})
+        return ctx
+
+class CrossServiceErrorHandler:
+    """Handler for errors that span two services, preserving traceability."""
+
+    def __init__(self):
+        self.current_context = None
+
+    def set_request_context(self, context: RequestContext):
+        """Set the current request context."""
+        self.current_context = context
+
+    def handle_error(self, error: Exception, service_name: str, step: str):
+        """
+        Handle an error with full context about the request and failing step.
+
+        Args:
+            error: The exception that occurred
+            service_name: Which service ('A' or 'B') encountered the error
+            step: The specific step where the error occurred
+        """
+        if not self.current_context:
+            logger.error("Error occurred but no request context is set")
+            raise error
+
+        # Update the failing step if not already set
+        if not self.current_context.failing_step:
+            self.current_context.set_failing_step(step)
+
+        # Add service-specific context
+        if service_name == 'A':
+            self.current_context.add_service_a_context(error=str(error), step=step)
+        elif service_name == 'B':
+            self.current_context.add_service_b_context(error=str(error), step=step)
+        else:
+            raise ValueError(f"Unknown service: {service_name}")
+
+        # Log the error with full context
+        error_msg = self._format_error_message()
+        logger.error(error_msg, extra={
+            "request_id": self.current_context.request_id,
+            "operation": self.current_context.operation,
+            "failing_step": self.current_context.failing_step,
+            "service": service_name,
+            "error_details": str(error)
+        })
+
+        # Re-raise the original error with context attached
+        raise error
+
+    def _format_error_message(self) -> str:
+        """Format a human-readable error message with all available context."""
+        if not self.current_context:
+            return "Error occurred without request context"
+
+        parts = []
+        if self.current_context.operation:
+            parts.append(f"Operation: {self.current_context.operation}")
+        if self.current_context.failing_step:
+            parts.append(f"Failed at: {self.current_context.failing_step}")
+        parts.append(f"Request ID: {self.current_context.request_id}")
+
+        if self.current_context.service_a_context.get("error"):
+            parts.append(f"Service A error: {self.current_context.service_a_context['error']}")
+        if self.current_context.service_b_context.get("error"):
+            parts.append(f"Service B error: {self.current_context.service_b_context['error']}")
+
+        return " | ".join(parts)
+
+# Example usage
+if __name__ == "__main__":
+    handler = CrossServiceErrorHandler()
+
+    # Start a new request
+    request_ctx = RequestContext()
+    request_ctx.set_operation("process_payment")
+    handler.set_request_context(request_ctx)
+
+    try:
+        # Simulate Service A processing
+        request_ctx.add_service_a_context(amount=100.0, user_id="user123")
+
+        # Simulate an error in Service A
+        try:
+            raise ValueError("Invalid payment amount")
+        except ValueError as e:
+            handler.handle_error(e, "A", "validate_payment")
+
+    except Exception as e:
+        # In Service B, we would deserialize the context from the request
+        # For this example, we'll just show the error handling
+        print(f"Caught error: {e}")
+        print(f"Full context available in logs with request_id: {request_ctx.request_id}")
+```
+
+---
+APPLICATION_REPORT
+knowledge_revision: a821c9b7b147
+context_pack_hash: a924482d60b5
+applied:
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error handler includes operation name and failing step in both message and logs.
+        location: "error_handler.py:100"
+      - question: Can the operator find the request or job from the message?
+        answer: Each request gets a unique ID included in all error messages and logs.
+        location: "error_handler.py:10, 14"
+      - question: Is sensitive data excluded from the message?
+        answer: Context is explicitly added by services, allowing control over sensitive data.
+        location: "error_handler.py:70-80"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of error handling, before re-raising.
+        location: "error_handler.py:70-85"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error handler includes operation name and failing step in both message and logs.
+        location: "error_handler.py:100"
+      - question: Can the operator find the request or job from the message?
+        answer: Each request gets a unique ID included in all error messages and logs.
+        location: "error_handler.py:10, 14"
+      - question: Is sensitive data excluded from the message?
+        answer: Context is explicitly added by services, allowing control over sensitive data.
+        location: "error_handler.py:70-80"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of error handling, before re-raising.
+        location: "error_handler.py:70-85"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error handler includes operation name and failing step in both message and logs.
+        location: "error_handler.py:100"
+      - question: Can the operator find the request or job from the message?
+        answer: Each request gets a unique ID included in all error messages and logs.
+        location: "error_handler.py:10, 14"
+      - question: Is sensitive data excluded from the message?
+        answer: Context is explicitly added by services, allowing control over sensitive data.
+        location: "error_handler.py:70-80"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of error handling, before re-raising.
+        location: "error_handler.py:70-85"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error handler includes operation name and failing step in both message and logs.
+        location: "error_handler.py:100"
+      - question: Can the operator find the request or job from the message?
+        answer: Each request gets a unique ID included in all error messages and logs.
+        location: "error_handler.py:10, 14"
+      - question: Is sensitive data excluded from the message?
+        answer: Context is explicitly added by services, allowing control over sensitive data.
+        location: "error_handler.py:70-80"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of error handling, before re-raising.
+        location: "error_handler.py:70-85"
+not_applied:
+  - node: observability.error-context
+    reason: All nodes in the pack were applied in the implementation as they all address the same core requirements about error context handling.
+  - node: observability.error-context
+    reason: All nodes in the pack were applied in the implementation as they all address the same core requirements about error context handling.
+  - node: observability.error-context
+    reason: All nodes in the pack were applied in the implementation as they all address the same core requirements about error context handling.

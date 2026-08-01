@@ -1,0 +1,279 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request across two services. This implementation includes:
+
+1. Correlation IDs for request tracing
+2. Structured error logging
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection
+
+## Implementation (Python Example)
+
+```python
+import logging
+import uuid
+import time
+from functools import wraps
+from typing import Dict, Any, Optional
+import requests
+from dataclasses import dataclass
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ServiceError:
+    """Container for service-specific error information"""
+    service_name: str
+    error_type: str
+    error_message: str
+    status_code: Optional[int] = None
+    trace_id: str = ""
+    timestamp: float = time.time()
+    additional_context: Dict[str, Any] = None
+
+class CrossServiceErrorHandler:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.metrics = {
+            'total_requests': 0,
+            'failed_requests': 0,
+            'avg_response_time': 0
+        }
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for request tracing"""
+        return str(uuid.uuid4())
+
+    def log_error(self, error: ServiceError) -> None:
+        """Log error with structured format for easy querying"""
+        log_entry = {
+            'timestamp': error.timestamp,
+            'service': self.service_name,
+            'trace_id': error.trace_id,
+            'error_type': error.error_type,
+            'error_message': error.error_message,
+            'status_code': error.status_code,
+            'context': error.additional_context or {}
+        }
+
+        if error.status_code and error.status_code >= 500:
+            logger.error("Service Error", extra=log_entry)
+        else:
+            logger.warning("Service Warning", extra=log_entry)
+
+        # Update metrics
+        self.metrics['failed_requests'] += 1
+
+    def log_success(self, trace_id: str, response_time: float) -> None:
+        """Log successful request metrics"""
+        self.metrics['total_requests'] += 1
+        self.metrics['avg_response_time'] = (
+            (self.metrics['avg_response_time'] * (self.metrics['total_requests'] - 1) + response_time)
+            / self.metrics['total_requests']
+        )
+        logger.info(
+            "Request completed successfully",
+            extra={
+                'trace_id': trace_id,
+                'response_time': response_time,
+                'metrics': self.metrics
+            }
+        )
+
+    def handle_service_error(self, exc: Exception, trace_id: str) -> ServiceError:
+        """Convert various exceptions to standardized ServiceError"""
+        if isinstance(exc, requests.exceptions.HTTPError):
+            return ServiceError(
+                service_name=self.service_name,
+                error_type="HTTP_ERROR",
+                error_message=str(exc),
+                status_code=exc.response.status_code if exc.response else None,
+                trace_id=trace_id,
+                additional_context={
+                    'request_url': getattr(exc.request, 'url', None),
+                    'response': getattr(exc.response, 'text', None)
+                }
+            )
+        elif isinstance(exc, requests.exceptions.ConnectionError):
+            return ServiceError(
+                service_name=self.service_name,
+                error_type="CONNECTION_ERROR",
+                error_message=str(exc),
+                trace_id=trace_id
+            )
+        elif isinstance(exc, requests.exceptions.Timeout):
+            return ServiceError(
+                service_name=self.service_name,
+                error_type="TIMEOUT_ERROR",
+                error_message=str(exc),
+                trace_id=trace_id
+            )
+        else:
+            return ServiceError(
+                service_name=self.service_name,
+                error_type="UNKNOWN_ERROR",
+                error_message=str(exc),
+                trace_id=trace_id
+            )
+
+    def propagate_error(self, error: ServiceError, next_service_url: str) -> None:
+        """Propagate error information to the next service in the chain"""
+        try:
+            response = requests.post(
+                f"{next_service_url}/error",
+                json={
+                    'original_service': error.service_name,
+                    'trace_id': error.trace_id,
+                    'error_type': error.error_type,
+                    'error_message': error.error_message,
+                    'timestamp': error.timestamp
+                },
+                timeout=5
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger.error(
+                "Failed to propagate error to next service",
+                extra={
+                    'trace_id': error.trace_id,
+                    'propagation_error': str(e),
+                    'next_service': next_service_url
+                }
+            )
+
+def trace_request(handler: CrossServiceErrorHandler):
+    """Decorator to add tracing to service methods"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract trace_id from headers if present, otherwise generate new one
+            trace_id = kwargs.get('headers', {}).get('X-Trace-ID') or handler.generate_correlation_id()
+
+            # Add trace_id to all downstream requests
+            if 'headers' not in kwargs:
+                kwargs['headers'] = {}
+            kwargs['headers']['X-Trace-ID'] = trace_id
+
+            start_time = time.time()
+
+            try:
+                result = func(*args, **kwargs)
+                handler.log_success(trace_id, time.time() - start_time)
+                return result
+            except Exception as e:
+                error = handler.handle_service_error(e, trace_id)
+                handler.log_error(error)
+
+                # Propagate error to next service if this isn't the last service
+                if 'next_service_url' in kwargs:
+                    handler.propagate_error(error, kwargs['next_service_url'])
+
+                # Re-raise the error to maintain normal error handling flow
+                raise
+        return wrapper
+    return decorator
+```
+
+## Usage Example
+
+```python
+# Service A
+error_handler_a = CrossServiceErrorHandler("ServiceA")
+
+@trace_request(error_handler_a)
+def call_service_b(params, headers=None):
+    try:
+        response = requests.post(
+            "http://service-b/api/process",
+            json=params,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        # The decorator will handle the error propagation
+        raise
+
+# Service B
+error_handler_b = CrossServiceErrorHandler("ServiceB")
+
+@trace_request(error_handler_b)
+def process_data(params, headers=None):
+    try:
+        # Process data...
+        return {"status": "success"}
+    except Exception as e:
+        # The decorator will handle the error propagation
+        raise
+
+# Error endpoint in Service B to receive propagated errors
+@app.route('/error', methods=['POST'])
+def receive_error():
+    error_data = request.json
+    logger.error(
+        "Received propagated error",
+        extra={
+            'trace_id': error_data['trace_id'],
+            'original_service': error_data['original_service'],
+            'error_type': error_data['error_type'],
+            'error_message': error_data['error_message']
+        }
+    )
+    return {"status": "error received"}, 200
+```
+
+## Key Features
+
+1. **Correlation IDs**:
+   - Each request gets a unique trace ID that propagates through both services
+   - All logs include this ID for easy correlation
+
+2. **Structured Logging**:
+   - Errors are logged in a consistent format with all relevant context
+   - Includes timestamps, service names, error types, and additional context
+
+3. **Error Propagation**:
+   - When Service A fails, it can propagate error details to Service B
+   - Service B can then include this in its own error handling
+
+4. **Metrics Collection**:
+   - Tracks request counts, failure rates, and response times
+   - Helps identify problematic services
+
+5. **Decorator Pattern**:
+   - Clean way to add tracing to existing service methods
+   - Centralizes error handling logic
+
+## Operator Query Examples
+
+Operators can now query logs to trace requests:
+
+```sql
+-- Find all logs for a specific request
+SELECT * FROM logs
+WHERE trace_id = '123e4567-e89b-12d3-a456-426614174000'
+ORDER BY timestamp;
+
+-- Find all errors from Service A
+SELECT * FROM logs
+WHERE service = 'ServiceA' AND level = 'ERROR'
+ORDER BY timestamp DESC
+LIMIT 100;
+
+-- Find requests that failed in Service B after succeeding in Service A
+SELECT a.timestamp as service_a_time, b.timestamp as service_b_time,
+       a.error_message as service_a_error, b.error_message as service_b_error
+FROM logs a
+JOIN logs b ON a.trace_id = b.trace_id
+WHERE a.service = 'ServiceA' AND b.service = 'ServiceB'
+  AND a.level = 'INFO' AND b.level = 'ERROR';
+```
+
+This implementation provides comprehensive tracing capabilities while maintaining clean separation of concerns between services.

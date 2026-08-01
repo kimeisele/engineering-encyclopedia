@@ -1,0 +1,118 @@
+```python
+import logging
+import uuid
+from contextvars import ContextVar
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+request_id_var: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
+service_name_var: ContextVar[Optional[str]] = ContextVar("service_name", default=None)
+
+
+class RequestError(Exception):
+    def __init__(self, message: str, operation: str, step: str, request_id: str, service: str):
+        super().__init__(message)
+        self.operation = operation
+        self.step = step
+        self.request_id = request_id
+        self.service = service
+
+
+def set_request_context(request_id: str, service_name: str) -> None:
+    """Set the request ID and service name in the context for tracing."""
+    request_id_var.set(request_id)
+    service_name_var.set(service_name)
+
+
+def error_handler(func):
+    """
+    Decorator that catches exceptions in a service call, adds
+    request_id and service context, and raises a RequestError that
+    can be traced across services.
+    """
+    def wrapper(*args, **kwargs):
+        request_id = request_id_var.get() or str(uuid.uuid4())
+        service = service_name_var.get() or "unknown_service"
+        try:
+            return func(*args, **kwargs)
+        except RequestError as e:
+            # Already has context, just re-raise
+            raise
+        except Exception as e:
+            operation = func.__name__
+            step = "service_call"
+            logger.error(
+                f"Error in {service}: operation={operation}, step={step}, "
+                f"request_id={request_id}, message={e}",
+                exc_info=True
+            )
+            raise RequestError(
+                str(e), operation, step, request_id, service
+            ) from e
+    return wrapper
+
+
+# Traceable call function for a two-service request flow
+def handle_two_service_request(
+    service_a_call, service_b_call, original_request_id: Optional[str] = None
+):
+    """
+    Execute a request that spans two services, carrying the same
+    request_id across both for tracing.
+    """
+    request_id = original_request_id or str(uuid.uuid4())
+
+    # Service A
+    set_request_context(request_id, "service_a")
+    try:
+        result_a = error_handler(service_a_call)()
+    except RequestError as e:
+        logger.error(f"Service A failed: request_id={request_id}, op={e.operation}, step={e.step}")
+        raise
+
+    # Service B
+    set_request_context(request_id, "service_b")
+    try:
+        result_b = error_handler(service_b_call)(result_a)
+    except RequestError as e:
+        logger.error(f"Service B failed: request_id={request_id}, op={e.operation}, step={e.step}")
+        raise
+
+    return result_b
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — RequestError includes operation (function name) and step ('service_call'), logged with request_id."
+          location: "artifact:20,29"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — request_id is explicitly carried in RequestError and log messages across both services."
+          location: "artifact:33,45"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — only exception string (message) is logged; no secrets, payloads, or sensitive fields are included."
+          location: "artifact:33"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Before wrapping — request_id/service are set at call start, then error handler adds context on exception."
+          location: "artifact:27-36"
+      unanswered:
+        - question: "Does the message identify the operation and the failing step?"
+          reason: "This question was answered in the first entry above."
+        - question: "Can the operator find the request or job from the message?"
+          reason: "This question was answered in the second entry above."
+        - question: "Is sensitive data excluded from the message?"
+          reason: "This question was answered in the third entry above."
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "This question was answered in the fourth entry above."
+  not_applied:
+    - node: observability.error-context
+      reason: "This node appears multiple times in the pack but is the same content; it was applied once above."
+```

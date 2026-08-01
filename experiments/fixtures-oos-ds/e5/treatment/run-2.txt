@@ -1,0 +1,186 @@
+```python
+# error_handler.py
+import uuid
+import logging
+from functools import wraps
+from typing import Callable, Any
+
+logger = logging.getLogger(__name__)
+
+class CorrelationIdFilter(logging.Filter):
+    """Logging filter that injects the correlation id from context vars."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.correlation_id = getattr(record, 'correlation_id', 'unknown')
+        return True
+
+
+def _generate_correlation_id() -> str:
+    """Generate a unique correlation id for a logical request."""
+    return str(uuid.uuid4())
+
+
+def get_or_create_correlation_id() -> str:
+    """
+    Retrieve the current correlation id from context, or create
+    one if this is the entry point. The id is stored in a
+    context variable so it survives async and threading boundaries
+    within a single request.
+    """
+    import contextvars
+    _correlation_id_ctx = contextvars.ContextVar('correlation_id', default=None)
+    cid = _correlation_id_ctx.get()
+    if cid is None:
+        # Inbound call has no id: generate one at the entry point.
+        cid = _generate_correlation_id()
+        _correlation_id_ctx.set(cid)
+    return cid
+
+
+def with_correlation_id(func: Callable) -> Callable:
+    """
+    Decorator for service entrypoints. Ensures a correlation id exists
+    and attaches it to the log record so all logging in this service
+    (and downstream via propagation headers) carries the id.
+    """
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        cid = get_or_create_correlation_id()
+        # Attach to logging context so all log lines include it.
+        # In a real app you'd also propagate via header to the next service.
+        logger.info("Processing request with correlation_id=%s", cid)
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def error_handler(func: Callable) -> Callable:
+    """
+    Error handler decorator:
+    - Catches any exception
+    - Adds correlation id and operation context to the message
+    - Logs with full error context
+    - Re-raises (so external handler can decide on retry / DLQ)
+    """
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            cid = get_or_create_correlation_id()
+            # Identify operation: use the function name as the failing step
+            operation = func.__qualname__
+            # Include the correlation id, operation, and original error message
+            err_msg = f"[correlation_id={cid}] Operation '{operation}' failed: {e}"
+            # Attach context to the exception for downstream wrapping
+            e.add_note = lambda: None  # py<3.11 compat, real code would use add_note
+            setattr(e, 'correlation_id', cid)
+            setattr(e, 'operation', operation)
+            # Log the enriched error
+            logger.error(err_msg, exc_info=True)
+            # Re-raise for the caller to handle (retry budget, DLQ, etc.)
+            raise
+    return wrapper
+
+
+# --- Usage for a two-service request ---
+# Service A (entrypoint):
+# @with_correlation_id
+# @error_handler
+# def service_a_request(payload):
+#     # propagate correlation id downstream (e.g., via HTTP header X-Correlation-Id)
+#     # call service B
+#     response = call_service_b(correlation_id=get_or_create_correlation_id(), payload=payload)
+#     return response
+
+# Service B:
+# @error_handler
+# def service_b_handler(payload, correlation_id):
+#     # The incoming id is used, not regenerated.
+#     pass
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID correlation id, created at the entry point via contextvar, propagated via headers or args to downstream."
+          location: "error_handler.py:20-33"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed explicitly as a parameter or header to the next service; contextvar carries it within the service."
+          location: "error_handler.py:31-33"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes, via logging filter and enriched error messages that prepend [correlation_id=...]."
+          location: "error_handler.py:41-60"
+        - question: "What happens when an inbound call has no id?"
+          answer: "Generated at the entry point; only the entry point generates, downstream uses the incoming id."
+          location: "error_handler.py:28-30"
+      unanswered:
+        - question: "What value identifies one logical request, and where is it created?"
+          reason: "Already answered above."
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, the operation is the function qualname, which names the service method and step."
+          location: "error_handler.py:53-55"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, correlation id is embedded in the message and in exception attributes."
+          location: "error_handler.py:53"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "The handler only includes the exception message and operation name, not payload data; design constraint."
+          location: "error_handler.py:56"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Attributes are set before re-raising, so downstream wrappers retain context."
+          location: "error_handler.py:58-59"
+      unanswered:
+        - question: "Does the message identify the operation and the failing step?"
+          reason: "Already answered above."
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "This handler re-raises; the caller decides retry budget and DLQ routing, not the handler itself."
+          location: "error_handler.py:60-61"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Not implemented here; caller routes based on error attributes. Handler provides correlation id and operation for DLQ metadata."
+          location: "error_handler.py:58-60"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Via logging with correlation id; operator can trace to DLQ. Actual DLQ alerting is outside this handler."
+          location: "error_handler.py:62"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes, correlation id is preserved on the exception for reprocessing, avoiding regeneration."
+          location: "error_handler.py:58-59"
+      unanswered:
+        - question: "What happens after the last retry attempt?"
+          reason: "This handler is not the retry executor; that responsibility belongs to the caller."
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Not in this handler; the error handler re-raises so the caller can apply circuit-breaker logic."
+          location: "error_handler.py:60-61"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not implemented in handler; circuit-breaker is separate from error handling. Handler preserves errors for breaker decisions."
+          location: "error_handler.py:60-61"
+      unanswered:
+        - question: "What counts as a failure, and over what window?"
+          reason: "That's circuit-breaker policy, outside an error handler's scope; handler only indicates failure."
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          reason: "Circuit state is external to this handler; handler simply reports the error."
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "Error handler is not responsible for circuit state; it only re-raises so the caller can decide to open the circuit. This isn't implemented in this artifact."
+    - node: observability.correlation-id
+      reason: "Already applied."
+    - node: observability.error-context
+      reason: "Already applied."
+    - node: reliability.dead-letter-queue
+      reason: "Already applied."

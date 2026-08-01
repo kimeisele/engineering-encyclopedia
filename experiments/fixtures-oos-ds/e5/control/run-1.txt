@@ -1,0 +1,699 @@
+Here's a comprehensive error handler design for tracing a request across two services:
+
+## 1. Core Trace Context Structure
+
+```python
+# trace_context.py
+import uuid
+import time
+import json
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
+
+@dataclass
+class TraceContext:
+    """Unified trace context for cross-service request tracking"""
+    trace_id: str
+    request_id: str
+    service_name: str
+    operation_name: str
+    
+    # Timing and correlation
+    parent_trace_id: Optional[str] = None
+    start_time: float = field(default_factory=time.time)
+    end_time: Optional[float] = None
+    
+    # Service-specific metadata
+    service_a_request_id: Optional[str] = None
+    service_b_request_id: Optional[str] = None
+    
+    # Correlation keys for manual tracing
+    correlation_headers: Dict[str, str] = field(default_factory=dict)
+    
+    # User/tenant context for additional filtering
+    user_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    
+    # Debug/audit info
+    environment: str = "production"
+    ip_address: Optional[str] = None
+    
+    def to_log_dict(self) -> Dict[str, Any]:
+        """Serialize trace context for logging"""
+        return {
+            "trace_id": self.trace_id,
+            "request_id": self.request_id,
+            "service_name": self.service_name,
+            "operation_name": self.operation_name,
+            "parent_trace_id": self.parent_trace_id,
+            "duration_ms": self.get_duration_ms(),
+            "correlation_headers": self.correlation_headers,
+            "service_a_request_id": self.service_a_request_id,
+            "service_b_request_id": self.service_b_request_id,
+            "user_id": self.user_id,
+            "tenant_id": self.tenant_id,
+            "environment": self.environment,
+            "ip_address": self.ip_address,
+            "timestamp": self.start_time
+        }
+    
+    def get_duration_ms(self) -> Optional[float]:
+        if self.end_time is None:
+            return None
+        return (self.end_time - self.start_time) * 1000
+    
+    def finish_trace(self):
+        self.end_time = time.time()
+
+class TraceContextManager:
+    """Manages trace context across multiple services"""
+    
+    @staticmethod
+    def create(service_name: str, operation_name: str, 
+               parent_trace_id: Optional[str] = None,
+               correlation_headers: Optional[Dict[str, str]] = None) -> TraceContext:
+        return TraceContext(
+            trace_id=str(uuid.uuid4()),
+            request_id=str(uuid.uuid4()),
+            service_name=service_name,
+            operation_name=operation_name,
+            parent_trace_id=parent_trace_id,
+            correlation_headers=correlation_headers or {}
+        )
+    
+    @staticmethod
+    def propagate(trace_context: TraceContext, target_service: str) -> Dict[str, str]:
+        """Generate headers to propagate trace info to next service"""
+        return {
+            "X-Trace-ID": trace_context.trace_id,
+            "X-Request-ID": trace_context.request_id,
+            "X-Parent-Service": trace_context.service_name,
+            "X-Service-A-Request-ID": str(trace_context.service_a_request_id) if trace_context.service_a_request_id else "",
+            "X-Service-B-Request-ID": str(trace_context.service_b_request_id) if trace_context.service_b_request_id else "",
+            "X-Correlation-ID": trace_context.correlation_headers.get("X-Correlation-ID", "")
+        }
+    
+    @staticmethod
+    def extract_from_headers(headers: Dict[str, str], current_service: str) -> TraceContext:
+        """Reconstruct trace context from incoming headers"""
+        trace_context = TraceContext(
+            trace_id=headers.get("X-Trace-ID", str(uuid.uuid4())),
+            request_id=headers.get("X-Request-ID", str(uuid.uuid4())),
+            service_name=current_service,
+            operation_name=headers.get("X-Operation", "unknown"),
+            parent_trace_id=headers.get("X-Parent-Trace-ID"),
+            correlation_headers={"X-Correlation-ID": headers.get("X-Correlation-ID", "")}
+        )
+        
+        # Preserve service-specific IDs from headers
+        if headers.get("X-Service-A-Request-ID"):
+            trace_context.service_a_request_id = headers["X-Service-A-Request-ID"]
+        if headers.get("X-Service-B-Request-ID"):
+            trace_context.service_b_request_id = headers["X-Service-B-Request-ID"]
+            
+        return trace_context
+```
+
+## 2. Unified Error Handler
+
+```python
+# error_handler.py
+import traceback
+import logging
+import sys
+from typing import Optional, Dict, Any
+from trace_context import TraceContext, TraceContextManager
+
+class CrossServiceError(Exception):
+    """Base exception for cross-service errors"""
+    def __init__(self, message: str, service_name: str, 
+                 trace_context: Optional[TraceContext] = None,
+                 error_code: str = "CROSS_SERVICE_ERROR",
+                 http_status: int = 500,
+                 inner_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.message = message
+        self.service_name = service_name
+        self.trace_context = trace_context
+        self.error_code = error_code
+        self.http_status = http_status
+        self.inner_exception = inner_exception
+        self.timestamp = time.time()
+
+class ServiceAError(CrossServiceError):
+    """Specific error for Service A"""
+    pass
+
+class ServiceBError(CrossServiceError):
+    """Specific error for Service B"""
+    pass
+
+class TimeoutError(CrossServiceError):
+    """Service timeout error"""
+    def __init__(self, service_name: str, timeout_ms: int, **kwargs):
+        super().__init__(
+            message=f"Service {service_name} timed out after {timeout_ms}ms",
+            service_name=service_name,
+            error_code="SERVICE_TIMEOUT",
+            http_status=504,
+            **kwargs
+        )
+
+class CircuitBreakerOpenError(CrossServiceError):
+    """Circuit breaker is open"""
+    pass
+
+class RateLimitError(CrossServiceError):
+    """Rate limit exceeded"""
+    pass
+
+class GlobalErrorHandler:
+    """Centralized error handler for both services"""
+    
+    def __init__(self, logger=None, log_level=logging.INFO):
+        self.logger = logger or self._setup_default_logger(log_level)
+        self.trace_manager = TraceContextManager()
+        
+    def _setup_default_logger(self, log_level):
+        logger = logging.getLogger('cross_service_tracer')
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(log_level)
+        return logger
+    
+    def log_trace_event(self, trace_context: TraceContext, 
+                       event_name: str, 
+                       status: str,
+                       error_details: Optional[Dict] = None):
+        """Log a trace event with full context"""
+        log_data = {
+            **trace_context.to_log_dict(),
+            "event": event_name,
+            "status": status,
+            "error_details": error_details or {}
+        }
+        
+        if status == "ERROR":
+            self.logger.error(json.dumps(log_data))
+        elif status == "SUCCESS":
+            self.logger.info(json.dumps(log_data))
+        else:
+            self.logger.debug(json.dumps(log_data))
+    
+    def handle_error(self, error: CrossServiceError, 
+                     service_name: str,
+                     operation_name: str,
+                     request_data: Optional[Dict] = None) -> Dict[str, Any]:
+        """Handle an error and return appropriate response with trace info"""
+        
+        trace_context = error.trace_context
+        
+        # If no trace context exists, create one
+        if trace_context is None:
+            trace_context = self.trace_manager.create(
+                service_name=service_name,
+                operation_name=operation_name
+            )
+        
+        # Extract stack trace
+        stack_trace = "".join(traceback.format_exception(
+            type(error.inner_exception), 
+            error.inner_exception, 
+            error.inner_exception.__traceback__
+        )) if error.inner_exception else "".join(traceback.format_exception(
+            type(error), error, error.__traceback__
+        ))
+        
+        # Log the error with full trace context
+        self.log_trace_event(
+            trace_context=trace_context,
+            event_name=f"error_{operation_name}",
+            status="ERROR",
+            error_details={
+                "error_code": error.error_code,
+                "error_message": error.message,
+                "http_status": error.http_status,
+                "service_name": error.service_name,
+                "stack_trace": stack_trace,
+                "request_data": request_data
+            }
+        )
+        
+        # Return error response with trace headers for operator
+        return {
+            "status": "error",
+            "error": {
+                "code": error.error_code,
+                "message": error.message,
+                "http_status": error.http_status,
+                "service": error.service_name,
+                "operation": operation_name
+            },
+            "trace": {
+                "trace_id": trace_context.trace_id,
+                "request_id": trace_context.request_id,
+                "cross_service_trace": {
+                    "service_a_request_id": trace_context.service_a_request_id,
+                    "service_b_request_id": trace_context.service_b_request_id,
+                    "correlation_id": trace_context.correlation_headers.get("X-Correlation-ID")
+                }
+            }
+        }
+    
+    def handle_success(self, trace_context: TraceContext, 
+                      service_name: str,
+                      operation_name: str,
+                      response_data: Optional[Dict] = None) -> Dict[str, Any]:
+        """Handle successful operation with tracing"""
+        trace_context.finish_trace()
+        
+        self.log_trace_event(
+            trace_context=trace_context,
+            event_name=f"success_{operation_name}",
+            status="SUCCESS",
+            error_details={"response_data": response_data}
+        )
+        
+        # Prepare response with trace info for operator
+        return {
+            "status": "success",
+            "data": response_data,
+            "trace": {
+                "trace_id": trace_context.trace_id,
+                "request_id": trace_context.request_id,
+                "cross_service_trace": {
+                    "service_a_request_id": trace_context.service_a_request_id,
+                    "service_b_request_id": trace_context.service_b_request_id,
+                    "correlation_id": trace_context.correlation_headers.get("X-Correlation-ID")
+                },
+                "duration_ms": trace_context.get_duration_ms()
+            }
+        }
+
+# Decorator for easy integration
+def trace_and_handle_errors(service_name, operation_name):
+    """Decorator to add tracing and error handling to service methods"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            handler = GlobalErrorHandler()
+            trace_context = handler.trace_manager.create(
+                service_name=service_name,
+                operation_name=operation_name
+            )
+            
+            try:
+                # Execute the actual service method
+                result = func(*args, **kwargs, trace_context=trace_context)
+                
+                # Update trace context with response info
+                if hasattr(result, 'request_id'):
+                    if service_name == "ServiceA":
+                        trace_context.service_a_request_id = result.request_id
+                    elif service_name == "ServiceB":
+                        trace_context.service_b_request_id = result.request_id
+                
+                return handler.handle_success(
+                    trace_context=trace_context,
+                    service_name=service_name,
+                    operation_name=operation_name,
+                    response_data=result
+                )
+                
+            except CrossServiceError as e:
+                e.trace_context = trace_context
+                trace_context.finish_trace()
+                return handler.handle_error(
+                    error=e,
+                    service_name=service_name,
+                    operation_name=operation_name,
+                    request_data=kwargs.get('request_data')
+                )
+            except Exception as e:
+                # Wrap unknown exceptions
+                wrapped_error = CrossServiceError(
+                    message=f"Unexpected error in {service_name}: {str(e)}",
+                    service_name=service_name,
+                    trace_context=trace_context,
+                    error_code="UNEXPECTED_ERROR",
+                    http_status=500,
+                    inner_exception=e
+                )
+                trace_context.finish_trace()
+                return handler.handle_error(
+                    error=wrapped_error,
+                    service_name=service_name,
+                    operation_name=operation_name,
+                    request_data=kwargs.get('request_data')
+                )
+        
+        return wrapper
+    return decorator
+```
+
+## 3. Example Service Implementation
+
+```python
+# service_a.py
+from error_handler import GlobalErrorHandler, CrossServiceError, trace_and_handle_errors
+from trace_context import TraceContextManager
+
+class ServiceA:
+    def __init__(self):
+        self.handler = GlobalErrorHandler()
+        self.trace_manager = TraceContextManager()
+        
+    @trace_and_handle_errors("ServiceA", "process_request")
+    def process_request(self, request_data, trace_context):
+        """Main entry point for Service A"""
+        
+        # Simulate initial processing
+        trace_context.service_a_request_id = "req_A_" + trace_context.request_id
+        
+        # Propagate trace to Service B
+        propagation_headers = self.trace_manager.propagate(
+            trace_context, "ServiceB"
+        )
+        
+        # Call Service B (simulated)
+        try:
+            # Simulate Service B call
+            self._call_service_b(trace_context, propagation_headers)
+        except TimeoutError as e:
+            raise
+        except CrossServiceError as e:
+            # Log the cross-service error
+            self.handler.log_trace_event(
+                trace_context=trace_context,
+                event_name="service_b_call_failed",
+                status="ERROR",
+                error_details={"error": str(e)}
+            )
+            raise
+            
+        # Continue processing after Service B response
+        trace_context.finish_trace()
+        
+        return {
+            "request_id": trace_context.request_id,
+            "operation_completed": True,
+            "response": f"Processed via Service A with trace {trace_context.trace_id}"
+        }
+    
+    def _call_service_b(self, trace_context, headers):
+        """Simulated call to Service B"""
+        try:
+            # Simulate network call
+            import time
+            time.sleep(0.1)
+            
+            # In real implementation, make HTTP call with headers
+            # response = requests.post('http://service-b/api', headers=headers)
+            
+            # Simulate trace propagation
+            service_b_context = self.trace_manager.extract_from_headers(
+                headers, "ServiceB"
+            )
+            if headers.get("X-Service-A-Request-ID"):
+                service_b_context.service_a_request_id = headers["X-Service-A-Request-ID"]
+            
+            # Simulate Service B processing
+            service_b_context.service_b_request_id = "req_B_" + service_b_context.request_id
+            
+            # Link the trace contexts
+            trace_context.service_b_request_id = service_b_context.service_b_request_id
+            
+            # Log the successful integration point
+            self.handler.log_trace_event(
+                trace_context=trace_context,
+                event_name="service_b_call_completed",
+                status="SUCCESS",
+                error_details={
+                    "service_b_trace_id": service_b_context.trace_id,
+                    "service_b_request_id": service_b_context.service_b_request_id
+                }
+            )
+            
+        except Exception as e:
+            raise CrossServiceError(
+                message=f"Failed to call Service B: {str(e)}",
+                service_name="ServiceB",
+                trace_context=trace_context,
+                error_code="SERVICE_B_CALL_FAILED",
+                http_status=502,
+                inner_exception=e
+            )
+```
+
+## 4. API Route Handler with Operator View
+
+```python
+# operator_trace_api.py
+from flask import Flask, request, jsonify, render_template
+from error_handler import GlobalErrorHandler, CrossServiceError
+from trace_context import TraceContextManager
+
+app = Flask(__name__)
+handler = GlobalErrorHandler()
+trace_manager = TraceContextManager()
+
+# In-memory trace store (use database in production)
+trace_store = {}
+
+@app.route('/api/process', methods=['POST'])
+def process_request_api():
+    """Main API endpoint that triggers cross-service processing"""
+    
+    request_data = request.get_json()
+    
+    # Create initial trace context
+    trace_context = trace_manager.create(
+        service_name="API-Gateway",
+        operation_name="process_request",
+        correlation_headers={"X-Correlation-ID": request.headers.get("X-Correlation-ID", "")}
+    )
+    
+    # Store trace context
+    trace_store[trace_context.trace_id] = trace_context
+    
+    try:
+        # Initialize Service A
+        service_a = ServiceA()
+        
+        # Call Service A
+        result = service_a.process_request(
+            request_data=request_data,
+            trace_context=trace_context
+        )
+        
+        # Update trace store with completion
+        trace_store[trace_context.trace_id].finish_trace()
+        
+        # Return response with trace info
+        return jsonify(result), 200
+        
+    except CrossServiceError as e:
+        # Handle error and return response with trace context
+        e.trace_context = trace_context
+        trace_context.finish_trace()
+        
+        error_response = handler.handle_error(
+            error=e,
+            service_name="API-Gateway",
+            operation_name="process_request",
+            request_data=request_data
+        )
+        return jsonify(error_response), e.http_status
+        
+@app.route('/api/trace/<trace_id>', methods=['GET'])
+def get_trace_details(trace_id):
+    """Operator endpoint to view full trace of a request"""
+    
+    if trace_id not in trace_store:
+        return jsonify({"error": "Trace not found"}), 404
+    
+    trace_context = trace_store[trace_id]
+    
+    # Gather all trace information
+    trace_details = {
+        "trace_id": trace_context.trace_id,
+        "request_id": trace_context.request_id,
+        "correlation_id": trace_context.correlation_headers.get("X-Correlation-ID"),
+        "timeline": [
+            {
+                "timestamp": trace_context.start_time,
+                "event": "API Gateway Entry",
+                "service": "API-Gateway",
+                "operation": "process_request"
+            },
+            {
+                "timestamp": trace_context.start_time + 0.1,
+                "event": "Service A Processing",
+                "service": "ServiceA",
+                "request_id": trace_context.service_a_request_id
+            },
+            {
+                "timestamp": trace_context.start_time + 0.1,
+                "event": "Service B Call Initiated",
+                "service": "ServiceB",
+                "request_id": trace_context.service_b_request_id
+            },
+            {
+                "timestamp": trace_context.end_time,
+                "event": "Request Complete",
+                "service": "API-Gateway",
+                "duration_ms": trace_context.get_duration_ms()
+            }
+        ],
+        "cross_service_links": {
+            "service_a_request_id": trace_context.service_a_request_id,
+            "service_b_request_id": trace_context.service_b_request_id,
+            "parent_trace_id": trace_context.parent_trace_id,
+            "all_propagation_headers": trace_context.correlation_headers
+        },
+        "additional_context": trace_context.to_log_dict()
+    }
+    
+    return jsonify(trace_details)
+
+@app.route('/api/traces', methods=['GET'])
+def list_traces():
+    """Operator endpoint to list all traces with filtering"""
+    
+    filters = {
+        "trace_id": request.args.get("trace_id"),
+        "request_id": request.args.get("request_id"),
+        "status": request.args.get("status"),
+        "time_range_ms": request.args.get("time_range_ms", default=60000)
+    }
+    
+    current_time = time.time()
+    traces = []
+    
+    for trace_id, trace_context in trace_store.items():
+        # Apply filters
+        if filters["trace_id"] and trace_id != filters["trace_id"]:
+            continue
+            
+        if filters["request_id"] and trace_context.request_id != filters["request_id"]:
+            continue
+            
+        if filters["time_range_ms"]:
+            if current_time - trace_context.start_time > int(filters["time_range_ms"]) / 1000:
+                continue
+        
+        traces.append(trace_context.to_log_dict())
+    
+    return jsonify({
+        "total_traces": len(traces),
+        "traces": traces
+    })
+
+@app.route('/api/trace/reconstruct', methods=['POST'])
+def reconstruct_trace():
+    """Reconstruct a full trace from partial information"""
+    
+    reconstruction_data = request.get_json()
+    
+    # Lookup by service request IDs
+    service_a_id = reconstruction_data.get("service_a_request_id")
+    service_b_id = reconstruction_data.get("service_b_request_id")
+    
+    for trace_id, trace_context in trace_store.items():
+        if service_a_id and trace_context.service_a_request_id == service_a_id:
+            return jsonify(trace_context.to_log_dict())
+        if service_b_id and trace_context.service_b_request_id == service_b_id:
+            return jsonify(trace_context.to_log_dict())
+    
+    return jsonify({"error": "Trace not found"}), 404
+```
+
+## 5. Configuration and Environment Setup
+
+```python
+# config.py
+class Config:
+    """Configuration for tracing across services"""
+    
+    # Elasticsearch/Logstash configuration for centralized logging
+    LOG_SINK = "http://elk-stack:9200"  # Elasticsearch endpoint
+    LOG_INDEX_PREFIX = "cross-service-traces"
+    
+    # Service-specific configuration
+    SERVICE_CONFIG = {
+        "ServiceA": {
+            "url": "http://service-a:8080",
+            "timeout_ms": 3000,
+            "circuit_breaker_threshold": 10
+        },
+        "ServiceB": {
+            "url": "http://service-b:8080",
+            "timeout_ms": 3000,
+            "circuit_breaker_threshold": 10
+        }
+    }
+    
+    # Trace retention policy
+    TRACE_RETENTION_DAYS = 30
+    
+    # Sampling rates (e.g., sample 10% of production traffic)
+    SAMPLING_RATE_SUCCESS = 0.1
+    SAMPLING_RATE_ERROR = 1.0  # Always sample errors
+    
+    # Sensitive data masking
+    MASK_FIELDS = ["password", "credit_card", "ssn"]
+```
+
+## 6. Usage Example
+
+```python
+# main.py
+from flask import Flask, request, jsonify
+from operator_trace_api import app
+
+if __name__ == "__main__":
+    # Start with operator API
+    app.run(host="0.0.0.0", port=8080, debug=True)
+    
+    # Example curl commands for testing:
+    """
+    # Process a request (gets trace correlation)
+    curl -X POST http://localhost:8080/api/process \
+         -H "Content-Type: application/json" \
+         -d '{"user_id": "12345", "operation": "purchase"}'
+    
+    # View full trace details
+    curl http://localhost:8080/api/trace/<trace_id_from_response>
+    
+    # List all traces (operator view)
+    curl http://localhost:8080/api/traces?time_range_ms=60000
+    
+    # Reconstruct trace from partial info
+    curl -X POST http://localhost:8080/api/trace/reconstruct \
+         -H "Content-Type: application/json" \
+         -d '{"service_a_request_id": "req_A_abc123"}'
+    """
+```
+
+## Key Features for the Operator:
+
+1. **Unified Trace ID**: Every request gets a unique trace_id that spans both services
+2. **Request Correlation**: Both services share correlation headers (X-Trace-ID, X-Correlation-ID)
+3. **Service-Specific IDs**: Each service has its own request ID that gets linked to the main trace
+4. **Timeline Visualization**: Operator can see the exact sequence of events
+5. **Full Context Propagation**: All relevant headers are passed between services
+6. **Searchable Logs**: Trace info is stored with comprehensive metadata for searching
+7. **Reconstruction**: Can reconstruct a trace from partial information (service A ID, service B ID)
+8. **Filtering**: Can filter traces by various criteria
+9. **Error Context**: Errors include full stack traces and linked to specific trace IDs
+10. **Health Monitoring**: Real-time tracking of service-to-service calls
+
+This solution provides a complete observability solution where an operator can:
+- Search by trace_id to see the complete journey
+- Filter by service-specific request IDs
+- View error details with full context
+- Understand the entire request flow across both services
+- Debug issues with correlation IDs and request tracking

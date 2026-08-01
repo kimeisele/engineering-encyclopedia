@@ -1,0 +1,334 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request across two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured logging
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection
+
+## Implementation (Python Example)
+
+```python
+import logging
+import uuid
+import time
+import json
+from functools import wraps
+from typing import Optional, Dict, Any
+import requests
+from requests.exceptions import RequestException
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('service_errors.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class ServiceError(Exception):
+    """Base class for service errors"""
+    def __init__(self, message: str, original_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.original_exception = original_exception
+        self.timestamp = time.time()
+
+class ServiceAError(ServiceError):
+    """Errors specific to Service A"""
+    pass
+
+class ServiceBError(ServiceError):
+    """Errors specific to Service B"""
+    pass
+
+class CrossServiceTracer:
+    """Handles tracing of requests across multiple services"""
+
+    @staticmethod
+    def generate_correlation_id() -> str:
+        """Generate a unique correlation ID for request tracing"""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def log_error(correlation_id: str, service_name: str, error: ServiceError, context: Dict[str, Any] = None):
+        """Log structured error information with correlation ID"""
+        error_data = {
+            'correlation_id': correlation_id,
+            'service': service_name,
+            'timestamp': error.timestamp,
+            'error_type': error.__class__.__name__,
+            'message': str(error),
+            'original_exception': str(error.original_exception) if error.original_exception else None,
+            'context': context or {}
+        }
+
+        logger.error(json.dumps(error_data, indent=2))
+
+        # Additional metrics could be sent to monitoring systems here
+        # e.g., increment error counter with labels
+
+class ServiceA:
+    """Example Service A implementation"""
+
+    def __init__(self):
+        self.base_url = "http://service-a.example.com"
+
+    def call_service_b(self, correlation_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Make a call to Service B with error handling"""
+        headers = {
+            'X-Correlation-ID': correlation_id,
+            'Content-Type': 'application/json'
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/v1/process",
+                json=payload,
+                headers=headers,
+                timeout=5
+            )
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            error = ServiceBError(f"Service B call failed: {str(e)}", e)
+            CrossServiceTracer.log_error(correlation_id, "ServiceA", error, {
+                'endpoint': '/api/v1/process',
+                'request_payload': payload
+            })
+            raise error
+
+    def process_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Main request handler for Service A"""
+        correlation_id = CrossServiceTracer.generate_correlation_id()
+
+        try:
+            logger.info(f"Starting request processing - Correlation ID: {correlation_id}")
+
+            # Process request in Service A
+            result = self._process_in_service_a(request_data)
+
+            # Call Service B
+            service_b_result = self.call_service_b(correlation_id, result)
+
+            return {
+                'status': 'success',
+                'data': service_b_result,
+                'correlation_id': correlation_id
+            }
+
+        except ServiceBError as e:
+            # Error already logged by call_service_b
+            return {
+                'status': 'error',
+                'error': str(e),
+                'correlation_id': correlation_id
+            }
+        except ServiceAError as e:
+            CrossServiceTracer.log_error(correlation_id, "ServiceA", e, {
+                'request_data': request_data
+            })
+            return {
+                'status': 'error',
+                'error': str(e),
+                'correlation_id': correlation_id
+            }
+        except Exception as e:
+            error = ServiceAError(f"Unexpected error in Service A: {str(e)}", e)
+            CrossServiceTracer.log_error(correlation_id, "ServiceA", error, {
+                'request_data': request_data
+            })
+            return {
+                'status': 'error',
+                'error': str(error),
+                'correlation_id': correlation_id
+            }
+
+    def _process_in_service_a(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Internal processing logic for Service A"""
+        # Your actual Service A processing logic here
+        if not data.get('valid_field'):
+            raise ServiceAError("Invalid input data in Service A")
+
+        return {'processed': True, **data}
+
+class ServiceB:
+    """Example Service B implementation"""
+
+    def __init__(self):
+        self.base_url = "http://service-b.example.com"
+
+    def call_service_a(self, correlation_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Make a call to Service A with error handling"""
+        headers = {
+            'X-Correlation-ID': correlation_id,
+            'Content-Type': 'application/json'
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/v1/validate",
+                json=payload,
+                headers=headers,
+                timeout=5
+            )
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            error = ServiceAError(f"Service A call failed: {str(e)}", e)
+            CrossServiceTracer.log_error(correlation_id, "ServiceB", error, {
+                'endpoint': '/api/v1/validate',
+                'request_payload': payload
+            })
+            raise error
+
+    def process_request(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Main request handler for Service B"""
+        correlation_id = request_data.get('correlation_id') or CrossServiceTracer.generate_correlation_id()
+
+        try:
+            logger.info(f"Starting request processing in Service B - Correlation ID: {correlation_id}")
+
+            # Call Service A first
+            service_a_result = self.call_service_a(correlation_id, request_data)
+
+            # Process in Service B
+            result = self._process_in_service_b(service_a_result)
+
+            return {
+                'status': 'success',
+                'data': result,
+                'correlation_id': correlation_id
+            }
+
+        except ServiceAError as e:
+            # Error already logged by call_service_a
+            return {
+                'status': 'error',
+                'error': str(e),
+                'correlation_id': correlation_id
+            }
+        except ServiceBError as e:
+            CrossServiceTracer.log_error(correlation_id, "ServiceB", e, {
+                'request_data': request_data
+            })
+            return {
+                'status': 'error',
+                'error': str(e),
+                'correlation_id': correlation_id
+            }
+        except Exception as e:
+            error = ServiceBError(f"Unexpected error in Service B: {str(e)}", e)
+            CrossServiceTracer.log_error(correlation_id, "ServiceB", error, {
+                'request_data': request_data
+            })
+            return {
+                'status': 'error',
+                'error': str(error),
+                'correlation_id': correlation_id
+            }
+
+    def _process_in_service_b(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Internal processing logic for Service B"""
+        # Your actual Service B processing logic here
+        if data.get('processed') is not True:
+            raise ServiceBError("Data not properly processed by Service A")
+
+        return {'final_result': 'success', **data}
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize services
+    service_a = ServiceA()
+    service_b = ServiceB()
+
+    # Example request
+    request_data = {
+        'valid_field': 'some_value',
+        'other_data': 123
+    }
+
+    # Process through Service A (which calls Service B)
+    print("Processing through Service A:")
+    result_a = service_a.process_request(request_data)
+    print(f"Result: {result_a}")
+
+    # Process through Service B (which calls Service A)
+    print("\nProcessing through Service B:")
+    request_data['correlation_id'] = result_a['correlation_id']
+    result_b = service_b.process_request(request_data)
+    print(f"Result: {result_b}")
+```
+
+## Key Features
+
+1. **Correlation IDs**:
+   - Unique identifier generated for each request
+   - Propagated between services via HTTP headers
+   - Allows tracing a single request across both services
+
+2. **Structured Error Logging**:
+   - JSON-formatted logs with all relevant context
+   - Includes correlation ID, service name, timestamps, and error details
+   - Preserves original exceptions for root cause analysis
+
+3. **Error Propagation**:
+   - Custom exception hierarchy for different service errors
+   - Errors are caught and logged with full context
+   - Original exceptions are preserved for debugging
+
+4. **Centralized Tracing**:
+   - `CrossServiceTracer` class handles all tracing logic
+   - Consistent error logging format across services
+   - Easy to extend with additional monitoring systems
+
+5. **Context Preservation**:
+   - All relevant request data is included in error logs
+   - Helps operators understand the full request flow
+
+## Operator Instructions
+
+To trace a request across both services:
+
+1. **Find the Correlation ID**:
+   - Look in the response from either service (in the `correlation_id` field)
+   - Or check the logs for the initial request
+
+2. **Search Logs**:
+   - Use the correlation ID to search through logs in both services
+   - Example grep command: `grep "correlation_id: abc123" service_a.log service_b.log`
+
+3. **Analyze the Flow**:
+   - The logs will show the complete request flow
+   - You can see where errors occurred and what data was involved
+
+4. **Error Analysis**:
+   - Check the `error_type` field to identify which service failed
+   - Review the `original_exception` for technical details
+   - Examine the `context` field for request-specific data
+
+## Extensions
+
+For a production environment, you might want to add:
+
+1. **Distributed Tracing**:
+   - Integrate with tools like Jaeger, Zipkin, or OpenTelemetry
+   - Add span IDs for more granular tracing
+
+2. **Metrics Collection**:
+   - Track error rates by service and error type
+   - Monitor request latency across services
+
+3. **Alerting**:
+   - Set up alerts for high error rates
+   - Notify operators when errors exceed thresholds
+
+4. **Dashboard**:
+   - Create a dashboard showing request flows
+   - Visualize error rates and patterns
+
+This implementation provides a solid foundation for cross-service error handling and tracing that can be adapted to most service architectures.

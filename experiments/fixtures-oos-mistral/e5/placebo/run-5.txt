@@ -1,0 +1,92 @@
+Here's an error handler implementation for tracing a request across two services, followed by the application report:
+
+```python
+import logging
+from typing import Dict, Any, Optional
+from dataclasses import dataclass
+
+@dataclass
+class RequestContext:
+    request_id: str
+    service_name: str
+    operation: str
+    step: str
+    state: Dict[str, Any]
+
+class CrossServiceErrorHandler:
+    def __init__(self, logger: logging.Logger):
+        self.logger = logger
+
+    def handle_error(
+        self,
+        context: RequestContext,
+        original_exception: Exception,
+        additional_context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Handle and log errors with cross-service traceability.
+
+        Args:
+            context: Request context containing identifiers and state
+            original_exception: The exception that occurred
+            additional_context: Any extra context to include
+        """
+        # Build comprehensive error message
+        error_msg = (
+            f"Service {context.service_name} failed during {context.operation} "
+            f"at step {context.step} for request {context.request_id}. "
+            f"State: {self._sanitize_state(context.state)}"
+        )
+
+        # Include additional context if provided
+        if additional_context:
+            error_msg += f" Additional context: {self._sanitize_state(additional_context)}"
+
+        # Log the error with all available context
+        self.logger.error(
+            error_msg,
+            exc_info=original_exception,
+            extra={
+                'request_id': context.request_id,
+                'service': context.service_name,
+                'operation': context.operation,
+                'step': context.step,
+                'state': self._sanitize_state(context.state),
+                'original_exception': original_exception
+            }
+        )
+
+    def _sanitize_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove sensitive data from state before logging."""
+        sanitized = state.copy()
+        # Remove known sensitive fields
+        for key in ['password', 'token', 'secret', 'api_key']:
+            sanitized.pop(key, None)
+        return sanitized
+```
+
+```python
+---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error handler includes both operation and step in the error message.
+          location: error_handler.py:18
+        - question: Can the operator find the request or job from the message?
+          answer: The request_id is prominently included in both message and logging context.
+          location: error_handler.py:18
+        - question: Is sensitive data excluded from the message?
+          answer: A sanitization method removes known sensitive fields before logging.
+          location: error_handler.py:45
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the error is first handled, before any wrapping.
+          location: error_handler.py:22
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in context pack - already applied above
+```

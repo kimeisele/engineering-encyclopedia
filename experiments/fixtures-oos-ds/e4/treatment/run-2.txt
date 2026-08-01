@@ -1,0 +1,200 @@
+```python
+import logging
+import random
+import threading
+import time
+from datetime import datetime, timedelta
+from typing import Callable, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """Circuit breaker to stop hammering a downstream API while it's down.
+
+    State machine:
+      CLOSED -> OPEN (when failure threshold reached)
+      OPEN -> HALF_OPEN (after cooldown period, on next call attempt)
+      HALF_OPEN -> CLOSED (on success) or OPEN (on failure)
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        cooldown_seconds: float = 30.0,
+        half_open_max_calls: int = 1,
+    ):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.half_open_max_calls = half_open_max_calls
+
+        self._lock = threading.Lock()
+        self._consecutive_failures = 0
+        self._state = "CLOSED"  # CLOSED | OPEN | HALF_OPEN
+        self._opened_at: Optional[datetime] = None
+        self._half_open_calls_in_flight = 0
+
+    def _should_allow_call(self) -> bool:
+        with self._lock:
+            if self._state == "CLOSED":
+                return True
+            if self._state == "OPEN":
+                # Check if cooldown has elapsed -> transition to HALF_OPEN
+                if self._opened_at and datetime.now() - self._opened_at >= timedelta(seconds=self.cooldown_seconds):
+                    self._state = "HALF_OPEN"
+                    self._half_open_calls_in_flight = 0
+                    return True
+                return False
+            # HALF_OPEN: limit concurrent probe calls
+            if self._half_open_calls_in_flight < self.half_open_max_calls:
+                self._half_open_calls_in_flight += 1
+                return True
+            return False
+
+    def _on_success(self):
+        with self._lock:
+            self._consecutive_failures = 0
+            if self._state == "HALF_OPEN":
+                self._state = "CLOSED"
+                self._opened_at = None
+            self._half_open_calls_in_flight = 0
+
+    def _on_failure(self):
+        with self._lock:
+            self._consecutive_failures += 1
+            self._half_open_calls_in_flight = 0
+            if self._state == "HALF_OPEN" or self._consecutive_failures >= self.failure_threshold:
+                self._state = "OPEN"
+                self._opened_at = datetime.now()
+                logger.warning("Circuit opened after %d failures", self._consecutive_failures)
+
+
+def call_with_circuit_breaker(
+    url: str,
+    *,
+    breaker: Optional[CircuitBreaker] = None,
+    timeout_seconds: float = 5.0,
+    max_retries: int = 2,
+    base_backoff_seconds: float = 0.5,
+    max_backoff_seconds: float = 5.0,
+    fallback: Optional[Callable[[], object]] = None,
+) -> object:
+    """Call a downstream HTTP API with circuit breaker + retry with jitter.
+
+    Returns:
+        The API response body (decoded bytes).
+
+    Raises:
+        RuntimeError: If the call fails after all retries or circuit is open
+                      and no fallback is provided.
+    """
+    cb = breaker or CircuitBreaker()
+    correlation_id = f"{threading.get_ident()}-{int(time.time() * 1000)}"
+
+    for attempt in range(max_retries + 1):
+        if not cb._should_allow_call():
+            logger.warning("Circuit open, not calling API (correlation_id=%s)", correlation_id)
+            if fallback:
+                return fallback()
+            raise RuntimeError(f"Downstream API is unavailable (circuit open), correlation_id={correlation_id}")
+
+        try:
+            req = Request(url, headers={"X-Correlation-ID": correlation_id})
+            with urlopen(req, timeout=timeout_seconds) as resp:
+                body = resp.read()
+            cb._on_success()
+            return body
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            cb._on_failure()
+            logger.error("API call failed (attempt %d/%d): %s (correlation_id=%s)", attempt + 1, max_retries + 1, exc, correlation_id)
+            if attempt < max_retries:
+                sleep_seconds = min(base_backoff_seconds * (2 ** attempt), max_backoff_seconds)
+                sleep_seconds = sleep_seconds * (0.5 + random.random())
+                time.sleep(sleep_seconds)
+            else:
+                if fallback:
+                    return fallback()
+                raise RuntimeError(f"API call failed after {max_retries + 1} attempts (correlation_id={correlation_id})") from exc
+
+    # Unreachable, but keep linters happy
+    return None
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any HTTPError/URLError/timeout/OSError counts as failure. Window is consecutive failures, not time-based."
+          location: "call_with_circuit_breaker:90 (except clause)"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Opens after failure_threshold consecutive failures. In-flight calls not tracked; new calls rejected immediately."
+          location: "CircuitBreaker._on_failure:65"
+        - question: "How does the half-open state test recovery?"
+          answer: "After cooldown, first new call is allowed. If it succeeds, circuit closes; if it fails, circuit opens again."
+          location: "CircuitBreaker._should_allow_call:40-43"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller can provide a fallback function; otherwise RuntimeError is raised. No HTTP request is attempted."
+          location: "call_with_circuit_breaker:82-85"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "GET requests are idempotent by nature; downstream should handle duplicates. No deduplication implemented here."
+          location: "call_with_circuit_breaker:94"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "max_retries + 1 total attempts (default 3). After last failure, fallback is used or RuntimeError raised."
+          location: "call_with_circuit_breaker:87-99"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff: base * 2^attempt, capped at max_backoff_seconds, multiplied by random(0.5, 1.5)."
+          location: "call_with_circuit_breaker:96-97"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per call invocation. Each call to call_with_circuit_breaker has its own retry budget."
+          location: "call_with_circuit_breaker:71"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "Thread ID + timestamp millis, created at function entry. Unique per call."
+          location: "call_with_circuit_breaker:78"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Sent as HTTP header 'X-Correlation-ID' on the request."
+          location: "call_with_circuit_breaker:91"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes, all logger.warning/error calls and RuntimeError messages include correlation_id."
+          location: "call_with_circuit_breaker:84, 93, 99"
+        - question: "What happens when an inbound call has no id?"
+          answer: "This function generates its own; it doesn't accept inbound correlation IDs."
+          location: "call_with_circuit_breaker:78"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "Correlation ID serves as the operation identifier; generated by caller."
+          location: "call_with_circuit_breaker:78"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Not applicable—this is a read-only GET call. No completion recording needed."
+          location: "call_with_circuit_breaker:91"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "N/A for GET. For state-changing APIs, caller must supply idempotency key."
+          location: "call_with_circuit_breaker:94"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No — each call has unique correlation ID; worker parallelism not applicable here."
+          location: "call_with_circuit_breaker:78"
+      unanswered: []
+  not_applied: []
+```

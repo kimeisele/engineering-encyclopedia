@@ -1,0 +1,172 @@
+```python
+import time
+import random
+import threading
+from dataclasses import dataclass
+from typing import Callable, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+@dataclass
+class CircuitBreakerConfig:
+    """Configuration for the circuit breaker."""
+    failure_threshold: int = 5          # failures before opening
+    success_threshold: int = 2          # successes in half-open needed to close
+    open_timeout: float = 30.0          # seconds circuit stays open
+    window_size: float = 60.0           # sliding window for failure counting
+    max_retries: int = 3                # retries per call attempt
+    base_backoff: float = 0.5           # seconds, before retry backoff
+    max_backoff: float = 8.0            # max backoff seconds
+
+
+class CircuitBreaker:
+    """Circuit breaker that stops hammering a downstream API when it's down.
+
+    States: CLOSED (calls pass through), OPEN (calls fail fast),
+    HALF_OPEN (one probe call allowed to test recovery).
+    """
+
+    def __init__(self, config: Optional[CircuitBreakerConfig] = None):
+        self.config = config or CircuitBreakerConfig()
+        self._lock = threading.Lock()
+        self._state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self._failure_times: list[float] = []
+        self._success_count = 0
+        self._open_since: Optional[float] = None
+
+    def _reset(self) -> None:
+        """Reset to CLOSED state with empty history."""
+        self._failure_times = []
+        self._success_count = 0
+        self._open_since = None
+        self._state = "CLOSED"
+
+    def _record_failure(self) -> None:
+        now = time.monotonic()
+        self._failure_times = [
+            t for t in self._failure_times if now - t < self.config.window_size
+        ]
+        self._failure_times.append(now)
+
+        if len(self._failure_times) >= self.config.failure_threshold:
+            self._state = "OPEN"
+            self._open_since = now
+            self._success_count = 0
+
+    def _record_success(self) -> None:
+        if self._state == "HALF_OPEN":
+            self._success_count += 1
+            if self._success_count >= self.config.success_threshold:
+                self._reset()
+        else:
+            # In CLOSED, a success resets failure count
+            self._failure_times = []
+
+    def allow_request(self) -> bool:
+        """Decide whether a call may proceed right now."""
+        with self._lock:
+            now = time.monotonic()
+            if self._state == "OPEN":
+                if now - self._open_since >= self.config.open_timeout:
+                    # Timeout elapsed -> HALF_OPEN, allow one probe
+                    self._state = "HALF_OPEN"
+                    self._success_count = 0
+                    return True
+                return False
+            if self._state == "HALF_OPEN":
+                # Only one probe at a time
+                return self._success_count == 0
+            return True
+
+    def report_success(self) -> None:
+        with self._lock:
+            self._record_success()
+
+    def report_failure(self) -> None:
+        with self._lock:
+            self._record_failure()
+
+
+def call_with_retry_and_breaker(
+    url: str,
+    breaker: CircuitBreaker,
+    request_timeout: float = 5.0,
+    correlation_id: str = "unknown",
+) -> bytes:
+    """Call downstream HTTP API with circuit breaking, retries, and backoff.
+
+    Args:
+        url: The HTTP endpoint to call.
+        breaker: Circuit breaker instance shared across callers.
+        request_timeout: Per-attempt timeout in seconds.
+        correlation_id: Identifier for this logical request, for observability.
+
+    Returns:
+        The response body bytes.
+
+    Raises:
+        RuntimeError: After retries exhausted or circuit is open.
+    """
+    attempt = 0
+    while attempt <= breaker.config.max_retries:
+        if not breaker.allow_request():
+            # Circuit open - fail fast, don't hammer the API
+            raise RuntimeError(
+                f"[correlation={correlation_id}] Circuit open, skipping call to {url}"
+            )
+
+        # Each retry attempt uses exponential backoff with jitter
+        if attempt > 0:
+            sleep_s = min(
+                breaker.config.base_backoff * (2 ** (attempt - 1)),
+                breaker.config.max_backoff,
+            )
+            sleep_s *= 0.5 + random.random() * 0.5  # jitter
+            print(
+                f"[correlation={correlation_id}] Retry {attempt}/{breaker.config.max_retries} "
+                f"after {sleep_s:.2f}s"
+            )
+            time.sleep(sleep_s)
+
+        try:
+            req = Request(url, headers={"X-Correlation-ID": correlation_id})
+            with urlopen(req, timeout=request_timeout) as resp:
+                body = resp.read()
+            # Success
+            breaker.report_success()
+            return body
+        except (HTTPError, URLError, TimeoutError) as e:
+            breaker.report_failure()
+            print(
+                f"[correlation={correlation_id}] Attempt {attempt} failed: {e.__class__.__name__}: {e}"
+            )
+            attempt += 1
+
+    raise RuntimeError(
+        f"[correlation={correlation_id}] All retries exhausted for {url}"
+    )
+
+
+# Example usage:
+if __name__ == "__main__":
+    breaker = CircuitBreaker(
+        CircuitBreakerConfig(
+            failure_threshold=3,
+            success_threshold=1,
+            open_timeout=5.0,
+            max_retries=2,
+        )
+    )
+    try:
+        # Simulate a downstream that's down
+        data = call_with_retry_and_breaker(
+            "http://localhost:8080/nonexistent", breaker
+        )
+        print(f"OK: {data}")
+    except RuntimeError as e:
+        print(f"Final failure (after breaker made several attempts): {e}")
+```
+
+---
+APPLICATION_REPORT---

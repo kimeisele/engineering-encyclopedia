@@ -1,0 +1,1 @@
+Write an error handler for a two-service request so an operator can trace one request across both services.
