@@ -44,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[1]  # repository root
 TASKS_DIR = ROOT / "experiments" / "tasks"
 RUBRICS_DIR = ROOT / "experiments" / "rubrics"
 PACKS_DIR = ROOT / "experiments" / "packs"
+PACKS_PLACEBO_DIR = ROOT / "experiments" / "packs-placebo"
 DEFAULT_FIXTURES = ROOT / "experiments" / "fixtures"
 
 RUBRIC_FILES = {
@@ -52,22 +53,36 @@ RUBRIC_FILES = {
     "e3": "e3_atomic_replacement.yaml",
 }
 
-ARMS = ("control", "treatment")
+ARMS = ("control", "treatment", "placebo")
 
 # The explicit artifact/report boundary used in the treatment prompts.
 # Everything above this line is the artifact to be scored; everything below
 # is the Application Report.
 ARTIFACT_DELIMITER = "---APPLICATION_REPORT---"
 
+# Report-boundary markers, in detection order. The delimiter is the primary
+# boundary; the YAML keys are fallbacks for models that ignore it — every
+# report written per the instruction contains one of them (the observed
+# miss was a report that started directly at ``knowledge_revision:`` without
+# the ``application_report:`` container). These strings cannot occur in code
+# artifacts for these tasks.
+_REPORT_MARKER_RE = re.compile(
+    r"(?m)^\s*("
+    r"---APPLICATION_REPORT---"
+    r"|application_report:"
+    r"|knowledge_revision:"
+    r"|context_pack_hash:"
+    r")"
+)
+
 
 def extract_artifact(text: str) -> str:
     """The artifact to be scored: the completion with the report removed.
 
-    The treatment prompts instruct the model to separate implementation from
-    report with the ``---APPLICATION_REPORT---`` delimiter; as a fallback
-    (older runs, or a model that ignores the delimiter) the cut is made at
-    the first ``application_report:`` line. Control runs have no report, so
-    their whole completion is the artifact.
+    Cuts at the first report-boundary marker (the ``---APPLICATION_REPORT---``
+    delimiter, else ``application_report:`` / ``knowledge_revision:`` /
+    ``context_pack_hash:`` — the report's mandatory YAML keys). Control runs
+    have no report, so their whole completion is the artifact.
 
     Rationale: the Application Report reproduces a node's questions verbatim,
     and those strings are exactly what the rubric's absent-patterns look for
@@ -75,12 +90,69 @@ def extract_artifact(text: str) -> str:
     string ``shell=True``). Scoring the artifact together with its own
     description contaminates the score — see knowledge node
     ``testing.evaluation-contamination``.
+
+    Residual limit (documented, cannot be removed by detection): a model that
+    emits a report containing none of the markers cannot have its report
+    separated — chat completions return a single free-form string, so no
+    protocol can force the delimiter. ``verify-report`` is the final check.
     """
-    for marker in (ARTIFACT_DELIMITER, "\napplication_report:", "application_report:"):
-        idx = text.find(marker)
-        if idx != -1:
-            return text[:idx]
+    match = _REPORT_MARKER_RE.search(text)
+    if match is not None:
+        return text[: match.start()]
     return text
+
+
+def strip_comments(code: str) -> str:
+    """Remove Python ``#`` comments without touching string literals.
+
+    Walks the text tracking string state (single, double and triple quotes)
+    and escape sequences; a ``#`` outside a string starts a comment that runs
+    to end of line (the newline is preserved so line structure is unchanged).
+
+    Rationale: the rubric's absent-patterns are tripped by prose the model
+    wrote as comments (observed: ``# Run the command without shell=True to
+    prevent injection`` in an otherwise safe artifact). Comments are not part
+    of the executed program, so they are removed before scoring.
+    """
+    out = []
+    i = 0
+    n = len(code)
+    state = None  # None | "'" | '"' | "'''" | '"""'
+    while i < n:
+        ch = code[i]
+        if state is None:
+            if ch in "'\"":
+                triple = code[i : i + 3]
+                if triple in ("'''", '"""'):
+                    state = triple
+                    out.append(triple)
+                    i += 3
+                else:
+                    state = ch
+                    out.append(ch)
+                    i += 1
+            elif ch == "#":
+                while i < n and code[i] != "\n":
+                    i += 1
+            else:
+                out.append(ch)
+                i += 1
+        else:
+            if ch == "\\":
+                out.append(code[i : i + 2])
+                i += 2
+            elif len(state) == 3 and code[i : i + 3] == state:
+                out.append(state)
+                i += 3
+                state = None
+            elif len(state) == 1 and ch == state:
+                out.append(ch)
+                i += 1
+                state = None
+            else:
+                out.append(ch)
+                i += 1
+    return "".join(out)
 
 
 def prompt_for(task: str, arm: str) -> str:
@@ -98,7 +170,7 @@ def rubric_for(task: str) -> Dict[str, Any]:
 
 def score_code(task: str, code: str) -> Dict[str, Any]:
     rubric = rubric_for(task)
-    artifact = extract_artifact(code)
+    artifact = strip_comments(extract_artifact(code))
     results = []
     score = 0
     for criterion in rubric["criteria"]:
@@ -166,8 +238,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         "runner": runner,
         "pack_hash": None,
     }
-    if args.arm == "treatment":
-        pack = yaml.safe_load((PACKS_DIR / f"{args.task}.yaml").read_text(encoding="utf-8"))
+    if args.arm in ("treatment", "placebo"):
+        pack_dir = PACKS_DIR if args.arm == "treatment" else PACKS_PLACEBO_DIR
+        pack = yaml.safe_load((pack_dir / f"{args.task}.yaml").read_text(encoding="utf-8"))
         entry["pack_hash"] = pack.get("context_pack_hash") if isinstance(pack, dict) else None
     with open(manifest_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, sort_keys=True) + "\n")
@@ -236,7 +309,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
     per_task: Dict[str, Dict[str, List[int]]] = {}
     for task in RUBRIC_FILES:
-        per_task[task] = {"control": [], "treatment": []}
+        per_task[task] = {arm: [] for arm in ARMS}
     for row in rows:
         code = Path(row["output"]).read_text(encoding="utf-8")
         result = score_code(row["task"], code)
@@ -273,8 +346,8 @@ def _write_results(out, per_task: Optional[Dict[str, Dict[str, List[int]]]]) -> 
     else:
         lines.append("Status: completions recorded; scores below are current as of the manifest.\n")
     lines += [
-        "| Task | Node under test | Control mean | Treatment mean | Delta |",
-        "|---|---|---|---|---|",
+        "| Task | Node under test | Control mean | Treatment mean | Placebo mean | Treatment-Control | Placebo-Control |",
+        "|---|---|---|---|---|---|---|",
     ]
     for task, node in (
         ("e1", "reliability.idempotency"),
@@ -282,18 +355,25 @@ def _write_results(out, per_task: Optional[Dict[str, Dict[str, List[int]]]]) -> 
         ("e3", "python.files.atomic-replacement"),
     ):
         if per_task is None:
-            lines.append(f"| {task} | {node} | _ | _ | _ |")
+            lines.append(f"| {task} | {node} | _ | _ | _ | _ | _ |")
             continue
         control = _mean(per_task[task]["control"])
         treatment = _mean(per_task[task]["treatment"])
-        delta = (
+        placebo = _mean(per_task[task].get("placebo", []))
+        delta_t = (
             round(treatment - control, 2)
             if control is not None and treatment is not None
             else None
         )
+        delta_p = (
+            round(placebo - control, 2)
+            if control is not None and placebo is not None
+            else None
+        )
         fmt = lambda v: ("_" if v is None else f"{v:.2f}")
         lines.append(
-            f"| {task} | {node} | {fmt(control)} | {fmt(treatment)} | {fmt(delta)} |"
+            f"| {task} | {node} | {fmt(control)} | {fmt(treatment)} | {fmt(placebo)} "
+            f"| {fmt(delta_t)} | {fmt(delta_p)} |"
         )
     lines += [
         "",
