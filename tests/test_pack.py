@@ -110,10 +110,26 @@ class TestPackLimits(unittest.TestCase):
         self.assertLessEqual(count_words(pack["request"]["original"]), 120)
 
     def test_frozen_experiment_packs_match_corpus(self):
-        # Review finding F7: the frozen treatment packs must stay recomposable
-        # from the current corpus. The first edit to any knowledge node makes
-        # this fail loudly instead of silently breaking verify-report.
-        nodes = load_nodes()
+        # The frozen treatment packs are evidence of the corpus the Section 8
+        # experiment ran against: the original eight nodes. The corpus has
+        # since grown to ten (docs/CORPUS_RULE.md, DEVIATIONS D10), so this
+        # test recomposes against the pinned experiment corpus — an edit to
+        # any of those eight nodes still fails loudly instead of silently
+        # breaking verify-report of the recorded runs.
+        experiment_ids = {
+            "reliability.idempotency",
+            "reliability.retry-semantics",
+            "concurrency.race-conditions",
+            "python.files.atomic-replacement",
+            "python.processes.subprocess-safety",
+            "security.input-validation",
+            "testing.coverage-limitations",
+            "observability.error-context",
+        }
+        all_nodes = load_nodes()
+        corpus_ids = {n.id for n in all_nodes}
+        self.assertTrue(experiment_ids <= corpus_ids, "experiment corpus ids missing")
+        nodes = [n for n in all_nodes if n.id in experiment_ids]
         requests = {
             "e1": "Write a worker that consumes jobs from a queue and charges a customer.",
             "e2": "Write a Python function that runs a git command with a user-supplied branch name.",

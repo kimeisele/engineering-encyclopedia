@@ -1,0 +1,85 @@
+id: reliability.outbox-pattern
+version: 1
+title: Outbox pattern
+kind: pattern
+status: established
+
+summary: >
+  The outbox pattern makes a side effect reliable by writing the intent to a
+  durable outbox row in the same transaction as the state change; a separate
+  publisher then delivers the rows. The decision is what records the intent
+  and what identifies a row as published.
+
+intent_signals:
+  - publish a message only after the transaction commits
+  - record the intent before publishing the event
+  - the outbox row is delivered exactly once
+  - the publisher claims rows without double-sending
+  - a crash between state change and publish
+  - send events from a durable table
+
+applies_when:
+  - a state change must also produce a message, event or webhook
+  - the delivery must survive a crash after the transaction commits
+  - consumers must not miss rows when the process restarts
+
+does_not_apply_when:
+  - the side effect is a pure read with no downstream delivery
+  - the platform already guarantees durable delivery
+
+does_not_imply:
+  - exactly-once delivery
+  - that the publisher is a separate service
+  - that the outbox replaces idempotency
+  - that ordering is preserved across partitions
+
+questions:
+  - What row durably records the intent, and is it written in the same transaction as the state change?
+  - What identifies an outbox row as published, and who can claim it?
+  - What happens when the publish fails after the row is marked published?
+  - Can two publishers claim the same row at the same time?
+
+techniques:
+  - outbox row inserted in the same transaction as the state change
+  - publisher claims rows with an atomic update and unique constraint
+  - published marker or watermark with idempotent redelivery
+  - replaying unprocessed rows after a restart
+
+risks:
+  - inserting the outbox row after the transaction commits
+  - two publishers racing to claim the same row
+  - rows never replayed after a crash
+  - redelivering the same event without idempotency
+
+tradeoffs:
+  - technique: one outbox table per service
+    benefit: one place to replay from
+    cost: couples state and message storage
+    choose_when: one service owns state and message
+  - technique: append-only event table
+    benefit: natural order for consumers
+    cost: retention and compaction
+    choose_when: consumers need ordered replay
+
+relations:
+  related:
+    - reliability.idempotency
+  requires_consideration_of:
+    - concurrency.race-conditions
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Outbox rows fail when the intent is recorded outside the transaction or
+    when claims are not idempotent; the questions and risks record those
+    decisions rather than the mechanics of a specific queue.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [outbox pattern, transactional messaging, durable intent, event publishing, message delivery]
