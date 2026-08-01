@@ -106,8 +106,13 @@ final-pipeline numbers, after = repaired rubrics, same completions):
 Material moves: e3 control drops (the instrument now catches variable-path
 truncating writes — the exact failure e3 targets), e2 rises (argv_list
 widening), and e5 treatment rises on both providers (id_in_logs repair) —
-turning the Mistral e5 negative cell into +0.20. All before/after numbers
-come from the same completions; no re-runs were needed for the repair.
+turning the Mistral e5 negative cell into +0.20.
+
+**Re-runs (item 3): none.** The repair changes the scoring, not the
+completions: every cell that moved (e3 control, e2, e5 treatment on both
+providers) was corrected by re-scoring the same completions. Re-running
+those cells would replace valid completions with new samples for no
+measurement reason, so no cell was re-run.
 
 ## E2, stated plainly
 
