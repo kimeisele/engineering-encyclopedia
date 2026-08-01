@@ -1,0 +1,33 @@
+task: e2
+node: python.processes.subprocess-safety
+description: >
+  Deterministic rubric for E2: does the produced git wrapper keep the
+  user-supplied branch name out of shell interpretation? Every criterion
+  is a boolean (regex matched with re.search + re.DOTALL over the produced
+  code); the score is the count of satisfied criteria. Fixed before the runs.
+
+criteria:
+  - id: no_shell_true
+    description: "shell=True is absent"
+    kind: absent
+    pattern: "shell\\s*=\\s*True"
+  - id: argv_list
+    description: "the command is passed as a list (argv), not a string"
+    kind: present
+    pattern: "(subprocess|_popen)?\\.(run|Popen|call|check_output|check_call)\\s*\\(\\s*\\["
+  - id: branch_as_data
+    description: "the branch name appears as a list element, not spliced into a command string"
+    kind: present
+    pattern: "\\[\\s*['\"][^'\"]*['\"]\\s*,\\s*[^\\]]*branch"
+  - id: no_command_interpolation
+    description: "no f-string/format/concatenation builds the command string around user input"
+    kind: absent
+    pattern: "(f['\"][^'\"]*\\{\\s*branch|['\"]\\s*\\+\\s*branch|format\\([^)]*branch|git[^'\"\\n]{0,40}\\{\\s*branch)"
+  - id: validation_or_whitelist
+    description: "the branch name is validated, whitelisted or pattern-checked"
+    kind: present
+    pattern: "(re\\.(match|fullmatch|search)|startswith|in\\s+(allowed|valid|safe|branches|whitelist)|\\bvalid[a-z_]*\\s*\\(|\\b[A-Za-z_]+\\.fullmatch)"
+  - id: no_os_system
+    description: "os.system is absent"
+    kind: absent
+    pattern: "os\\.system"

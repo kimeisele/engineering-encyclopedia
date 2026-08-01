@@ -1,0 +1,83 @@
+id: security.input-validation
+version: 1
+title: Input validation
+kind: principle
+status: established
+
+summary: >
+  Validate input at the trust boundary: what enters a system is data, and
+  only a shape the program explicitly accepts should be used. Validation is
+  about rejecting what is not expected, not about patching what is.
+
+intent_signals:
+  - validate all user input
+  - sanitize input before use
+  - never trust input from the user
+  - check the input against a whitelist
+  - reject input that does not match the expected shape
+  - escape input before it reaches the database
+
+applies_when:
+  - data arrives from a user, network, file or another process
+  - the data is later used in queries, commands or output
+  - the data flows into a second system
+
+does_not_apply_when:
+  - the value is already trusted internal state
+  - the value is immediately discarded
+
+does_not_imply:
+  - that validation replaces escaping or parameterisation
+  - that a whitelist is the only correct approach
+  - that validation once at entry protects later use
+  - that type checks are the same as semantic validation
+
+questions:
+  - Where is the trust boundary, and is validation done there?
+  - What is the set of acceptable values, and what rejects everything else?
+  - Is the validated form used downstream, or the raw input?
+  - Does each use site still treat the value as untrusted?
+
+techniques:
+  - whitelist validation of type, length, charset and shape
+  - canonicalisation before comparison
+  - parameterised queries and argument lists at use sites
+  - failing closed on anything unrecognised
+
+risks:
+  - validating for display but using the raw value elsewhere
+  - blacklist filters bypassed by encodings or edge cases
+  - validation logic that changes the value silently
+
+tradeoffs:
+  - technique: strict whitelist
+    benefit: explicit contract, few bypasses
+    cost: rejects legitimate edge cases, needs maintenance
+    choose_when: the value space is bounded
+  - technique: lenient acceptance with escaping at use
+    benefit: accepts more real-world input
+    cost: every use site must escape correctly
+    choose_when: the value space is open-ended
+
+relations:
+  related:
+    - python.processes.subprocess-safety
+  requires_consideration_of:
+    - testing.coverage-limitations
+
+contexts:
+  languages: [any]
+  project_types: [web-service, cli, worker, script]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Injection failures recur because input is trusted past the boundary or
+    validated for one use and used raw elsewhere; the negative-knowledge
+    entries record those confusions.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [input validation, sanitization, whitelist, injection, boundary]

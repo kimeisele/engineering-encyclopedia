@@ -1,0 +1,85 @@
+id: reliability.retry-semantics
+version: 1
+title: Retry semantics
+kind: principle
+status: established
+
+summary: >
+  A retry repeats an operation that failed. Retrying is only correct when the
+  operation is safe to repeat, the retry budget is explicit, and backoff
+  prevents amplification; a retry without a policy is a loop that hides the
+  failure.
+
+intent_signals:
+  - retry the job after it fails
+  - the job failed, retry or give up
+  - run the operation again after an error
+  - redelivery means the job may run again
+  - backoff before trying again
+  - stop retrying after max attempts
+  - the queue redelivers a job
+
+applies_when:
+  - an operation failed and may succeed on a later attempt
+  - delivery is at-least-once and duplicates are possible
+  - a downstream system is temporarily unavailable
+
+does_not_apply_when:
+  - the failure is permanent, such as a rejected request or bad input
+  - the operation has side effects that cannot be made idempotent
+
+does_not_imply:
+  - that the operation is idempotent
+  - that retrying will eventually succeed
+  - that more attempts make the system more reliable
+  - that backoff alone prevents overload
+
+questions:
+  - What happens when the same attempt is delivered more than once?
+  - How many attempts are allowed, and what happens after the last one?
+  - How is the wait between attempts chosen, and is jitter added?
+  - Is the retry budget shared across workers or per attempt?
+
+techniques:
+  - exponential backoff with jitter
+  - capped retry budgets with an explicit give-up path
+  - honouring retry-after from the downstream system
+  - classifying errors as retryable or permanent
+
+risks:
+  - retry storms when many clients retry in lockstep
+  - retrying operations that are not idempotent
+  - unbounded retries masking a real outage
+
+tradeoffs:
+  - technique: fixed delay between attempts
+    benefit: simple and predictable
+    cost: no adaptation to recovery time
+    choose_when: the failure mode is short and rare
+  - technique: exponential backoff with jitter
+    benefit: spreads load and follows recovery
+    cost: longer worst-case latency
+    choose_when: many clients may fail at once
+
+relations:
+  related:
+    - reliability.idempotency
+  requires_consideration_of:
+    - observability.error-context
+
+contexts:
+  languages: [any]
+  project_types: [worker, cli, web-service, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Retry loops fail by repeating non-idempotent work and by hiding the
+    underlying failure; both failure modes recur across queue and service
+    implementations, so the node records them as first-class warnings.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [retry, backoff, redelivery, retry budget, max attempts]

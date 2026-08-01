@@ -1,0 +1,7 @@
+# Licensed under CC BY 4.0 — see knowledge/LICENSE.
+# Node kinds used by the eight v1 nodes. The taxonomy enumerates only values
+# the corpus actually uses.
+- principle
+- pattern
+- pitfall
+- guideline

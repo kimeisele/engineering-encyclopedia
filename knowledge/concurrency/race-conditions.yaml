@@ -1,0 +1,84 @@
+id: concurrency.race-conditions
+version: 1
+title: Race conditions
+kind: pitfall
+status: established
+
+summary: >
+  A race condition is a flaw in timing: the outcome depends on the order in
+  which concurrent operations happen to interleave. Any check-then-act
+  sequence that is not atomic can observe stale state and make a wrong
+  decision.
+
+intent_signals:
+  - two threads update the same counter
+  - check-then-act between two workers
+  - concurrent writes to the same record
+  - two workers claim the same job
+  - a race between read and write
+  - the same value is updated twice
+
+applies_when:
+  - two or more workers can run the same code path concurrently
+  - state is read, decided on, then written
+  - a value is incremented or claimed rather than assigned
+
+does_not_apply_when:
+  - the operation is single-threaded and cannot interleave
+  - state is immutable and only replaced
+
+does_not_imply:
+  - that locks are the only answer
+  - that a mutex makes the surrounding logic correct
+  - that a race will show up in tests
+  - that the bug is in the last code changed
+
+questions:
+  - What state is shared, and where is it mutated?
+  - Is the read-and-write sequence atomic as one step?
+  - Can two workers observe the same value as unclaimed?
+  - What happens if the check and the action are interleaved?
+
+techniques:
+  - atomic compare-and-swap or unique constraints
+  - single-writer ownership of mutable state
+  - locks scoped to the critical section
+  - idempotent operations that make the race harmless
+
+risks:
+  - check-then-act on shared state without atomicity
+  - locks held across slow I/O
+  - assuming tests expose the interleaving
+
+tradeoffs:
+  - technique: optimistic locking with conflict detection
+    benefit: scales with readers
+    cost: retry on conflict, needs versioned rows
+    choose_when: conflicts are rare
+  - technique: pessimistic locking
+    benefit: simple to reason about
+    cost: serialises writers and risks contention
+    choose_when: conflicts are frequent or expensive
+
+relations:
+  related:
+    - reliability.idempotency
+  requires_consideration_of:
+    - python.files.atomic-replacement
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, cli]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Race conditions are a recurring review finding; the negative-knowledge
+    entries counter the common belief that a race is fixed by any lock or
+    revealed by any test.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [race condition, data race, check-then-act, atomicity, locking]

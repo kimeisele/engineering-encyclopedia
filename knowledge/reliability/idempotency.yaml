@@ -1,0 +1,85 @@
+id: reliability.idempotency
+version: 1
+title: Idempotency
+kind: principle
+status: established
+
+summary: >
+  An idempotent operation can be repeated for the same logical intent without
+  producing unintended additional effects. Repetition is made safe by identity
+  and recorded completion, not by hoping the operation runs only once.
+
+intent_signals:
+  - must not run twice
+  - duplicate processing
+  - retry safely
+  - the same event arrives again
+  - charges the customer twice
+  - a worker must not process the same job twice
+  - the queue redelivers the same jobs twice
+  - consume the same job twice
+
+applies_when:
+  - an operation can be retried by a caller, a queue or an operator
+  - delivery or invocation can occur more than once
+  - execution may resume after interruption
+
+does_not_apply_when:
+  - the operation is a pure read with no side effects
+  - the caller can guarantee exactly-once invocation end to end
+
+does_not_imply:
+  - exactly-once delivery
+  - absence of concurrency
+  - transactional safety across systems
+  - that a retry loop is now correct
+
+questions:
+  - What value identifies one logical operation, and where does it come from?
+  - Where is completion recorded, and is that record durable before the effect?
+  - What state remains after a failure between effect and completion record?
+  - Can two workers observe the same operation as not-yet-done simultaneously?
+
+techniques:
+  - idempotency keys derived from caller-supplied identity
+  - deduplication records written in the same transaction as the effect
+  - atomic state transitions guarded by a unique constraint
+  - deterministic operation identifiers derived from input content
+
+risks:
+  - check-then-act races between the completion lookup and the effect
+  - deduplication state that is not durable across process restart
+  - keys derived from timestamps or request arrival order
+
+tradeoffs:
+  - technique: persistent deduplication table
+    benefit: survives restart and multi-worker deployment
+    cost: durable storage, retention policy, contention on the key
+    choose_when: effects are externally visible or irreversible
+  - technique: natural idempotency via full-state overwrite
+    benefit: no extra state to maintain
+    cost: only possible for total assignments
+    choose_when: the operation sets a value
+
+relations:
+  related:
+    - reliability.retry-semantics
+  requires_consideration_of:
+    - concurrency.race-conditions
+
+contexts:
+  languages: [any]
+  project_types: [worker, cli, web-service, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Distilled from recurring failure modes in retry and queue handling; the
+    negative-knowledge entries record confusions observed in practice rather
+    than claims taken from a cited source.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [idempotency, duplicate execution, retry, deduplication, exactly-once]
