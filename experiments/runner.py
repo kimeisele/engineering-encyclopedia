@@ -51,6 +51,8 @@ RUBRIC_FILES = {
     "e1": "e1_idempotency.yaml",
     "e2": "e2_subprocess_safety.yaml",
     "e3": "e3_atomic_replacement.yaml",
+    "e4": "e4_circuit_breaker.yaml",
+    "e5": "e5_correlation_id.yaml",
 }
 
 ARMS = ("control", "treatment", "placebo")
