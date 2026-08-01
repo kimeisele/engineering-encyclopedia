@@ -1,0 +1,152 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Callable
+
+
+def update_json_config(
+    filepath: str,
+    updater: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    validator: Callable[[dict[str, Any]], bool] | None = None,
+    fsync: bool = True,
+) -> dict[str, Any]:
+    """
+    Atomically update a JSON config file on disk.
+
+    The file is read, the updater is applied to its contents, the result is
+    validated (if a validator is provided), and then written to a temporary
+    file in the same directory, flushed, and atomically renamed over the
+    original.
+
+    Args:
+        filepath: Path to the JSON config file.
+        updater: Callable that receives the current config (dict) and
+            returns the new config (dict).
+        validator: Optional callable that receives the new config and
+            returns True if it is acceptable, False otherwise.
+        fsync: If True (default), fsync both the file and the directory
+            to ensure durability across power loss.
+
+    Returns:
+        The new config that was written.
+
+    Raises:
+        FileNotFoundError: If the target file does not exist.
+        ValueError: If the new config fails validation.
+        OSError: On I/O errors (including cross-filesystem rename errors).
+    """
+    # Read the current config
+    with open(filepath, "r", encoding="utf-8") as f:
+        current_config = json.load(f)
+
+    # Apply the updater
+    new_config = updater(current_config)
+
+    # Validate the new config (reject invalid data)
+    if validator is not None and not validator(new_config):
+        raise ValueError("New config failed validation")
+
+    # Write to a temp file in the same directory (atomic rename requires
+    # same filesystem)
+    directory = os.path.dirname(os.path.abspath(filepath))
+    fd, temp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(new_config, f, indent=2)
+            f.flush()
+            if fsync:
+                os.fsync(f.fileno())
+
+        # Atomic rename over the target
+        os.replace(temp_path, filepath)
+
+        # Flush directory metadata so the rename is durable
+        if fsync:
+            dir_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    except Exception:
+        # Clean up the temp file on failure
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+    return new_config
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, tempfile.mkstemp uses the target's directory, ensuring same-filesystem rename."
+          location: "update_json_config:58"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and optional fsync(f.fileno()) are called before os.replace."
+          location: "update_json_config:62-64"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "An except block unlinks the temp file before re-raising the exception."
+          location: "update_json_config:75-80"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, os.replace is atomic but last-writer-wins; no locking prevents concurrent writes."
+          location: "update_json_config:67"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Caller-provided validator rejects invalid dicts; ValueError is raised for unacceptable configs."
+          location: "update_json_config:52-54"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Validated new_config is returned and written; no raw input bypasses the validator."
+          location: "update_json_config:55,72"
+      unanswered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          reason: "Trust boundary is external input via the updater callable; validation is done on its output, not at system entry."
+        - question: "Does each use site still treat the value as untrusted?"
+          reason: "Only one use site exists (the returned dict); outside the function scope is the caller's responsibility."
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: "Which behaviours are asserted, not just which lines run?"
+          answer: "None asserted here; this is implementation code. Behavioural tests must assert atomicity, validation, and durability."
+          location: "update_json_config:1"
+      unanswered:
+        - question: "What important paths are not covered at all?"
+          reason: "Not applicable; the function itself does not contain tests."
+        - question: "Does the suite fail when the behaviour regresses?"
+          reason: "Not applicable; no test suite is provided in this artifact."
+        - question: "Is the metric used as evidence of quality?"
+          reason: "Not applicable; no metric is used in the function."
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "No idempotency key exists; the updater itself must be idempotent to avoid applied-multiple-effects."
+          location: "update_json_config:47"
+      unanswered:
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          reason: "Not applicable; the function makes no completion-record guarantee."
+        - question: "What state remains after a failure between effect and completion record?"
+          reason: "Not applicable; this function has no explicit completion recording."
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          reason: "Not applicable; no operation identity is tracked in this function."
+  not_applied:
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      reason: "The function does not claim to be concurrency-safe; atomic replacement avoids partial reads but does not serialize writers. No locking is attempted, so this node's guidance on lock design is out of scope."

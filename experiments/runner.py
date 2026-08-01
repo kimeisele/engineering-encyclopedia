@@ -54,6 +54,34 @@ RUBRIC_FILES = {
 
 ARMS = ("control", "treatment")
 
+# The explicit artifact/report boundary used in the treatment prompts.
+# Everything above this line is the artifact to be scored; everything below
+# is the Application Report.
+ARTIFACT_DELIMITER = "---APPLICATION_REPORT---"
+
+
+def extract_artifact(text: str) -> str:
+    """The artifact to be scored: the completion with the report removed.
+
+    The treatment prompts instruct the model to separate implementation from
+    report with the ``---APPLICATION_REPORT---`` delimiter; as a fallback
+    (older runs, or a model that ignores the delimiter) the cut is made at
+    the first ``application_report:`` line. Control runs have no report, so
+    their whole completion is the artifact.
+
+    Rationale: the Application Report reproduces a node's questions verbatim,
+    and those strings are exactly what the rubric's absent-patterns look for
+    (e.g. a report answering "Is shell=True present anywhere?" contains the
+    string ``shell=True``). Scoring the artifact together with its own
+    description contaminates the score — see knowledge node
+    ``testing.evaluation-contamination``.
+    """
+    for marker in (ARTIFACT_DELIMITER, "\napplication_report:", "application_report:"):
+        idx = text.find(marker)
+        if idx != -1:
+            return text[:idx]
+    return text
+
 
 def prompt_for(task: str, arm: str) -> str:
     path = TASKS_DIR / f"{task}-{arm}.txt"
@@ -70,11 +98,12 @@ def rubric_for(task: str) -> Dict[str, Any]:
 
 def score_code(task: str, code: str) -> Dict[str, Any]:
     rubric = rubric_for(task)
+    artifact = extract_artifact(code)
     results = []
     score = 0
     for criterion in rubric["criteria"]:
         pattern = criterion["pattern"]
-        matched = re.search(pattern, code, re.DOTALL) is not None
+        matched = re.search(pattern, artifact, re.DOTALL) is not None
         satisfied = matched if criterion["kind"] == "present" else not matched
         if satisfied:
             score += 1

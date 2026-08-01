@@ -1,0 +1,157 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict
+
+def update_json_config(filepath: str, updater: Dict[str, Any]) -> None:
+    """
+    Update a JSON config file by atomically replacing it with new content.
+
+    The function reads the existing config (or starts with an empty dict),
+    applies the updater dict on top of it (shallow merge), and writes the
+    result to a temp file in the same directory, flushes it to disk, then
+    renames it over the original. This ensures readers see either the old
+    or the new content, never a truncated/mixed state.
+
+    Args:
+        filepath: Path to the JSON config file.
+        updater: Dict of key/value pairs to update in the config.
+
+    Raises:
+        ValueError: If updater is not a dict.
+        OSError: If the file cannot be written (e.g. permissions).
+        json.JSONDecodeError: If the existing file contains invalid JSON.
+    """
+    if not isinstance(updater, dict):
+        raise ValueError("updater must be a dict")
+
+    # Validate the updater is JSON-serializable before touching the file
+    try:
+        json.dumps(updater)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"updater is not JSON-serializable: {e}")
+
+    # Read existing config (or start fresh if file doesn't exist)
+    if os.path.exists(filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+    else:
+        config = {}
+
+    # Merge updater into config (shallow merge)
+    config.update(updater)
+
+    # Write atomically: temp file in same dir, flush, rename
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    fd, tmp_path = tempfile.mkstemp(dir=dirpath, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, filepath)
+    except Exception:
+        # Clean up temp file if anything goes wrong before rename
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, using tempfile.mkstemp with dirpath set to the target's directory (line 35)."
+          location: "update_json_config:35"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and os.fsync(f.fileno()) are called before os.replace (lines 44-45)."
+          location: "update_json_config:44-45"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The except block removes the temp file with os.unlink before re-raising the exception (lines 47-52)."
+          location: "update_json_config:47-52"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, os.replace is atomic, but no locking is used. Final content depends on last writer; function does not guarantee merge consistency."
+          location: "update_json_config:46"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The config file is shared. It is read and then replaced, not mutated in-place."
+          location: "update_json_config:40-46"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, read and write are separate. The write is atomic, but a concurrent read-modify-write can lose updates."
+          location: "update_json_config:40-46"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "This is a config update, not a claim. Two workers can both read old config and apply different changes, losing one."
+          location: "update_json_config:40-46"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "If two writers read the same old config, both write their own version; the last os.replace wins, losing the other update."
+          location: "update_json_config:46"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The function signature is the boundary. Updater dict is validated for type and JSON-serializability before use."
+          location: "update_json_config:17-27"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Only dict is accepted; non-dict raises ValueError. JSON-serializable check rejects invalid content."
+          location: "update_json_config:17-27"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The validated updater dict is used; it is checked serializable, then merged and dumped."
+          location: "update_json_config:40-45"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "The JSON file content is parsed and re-serialized; invalid existing JSON raises a clear error."
+          location: "update_json_config:40-41"
+      unanswered: []
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: "Which behaviours are asserted, not just which lines run?"
+          answer: "Not applicable—this is implementation code. For tests, assert atomicity, content update, and error handling."
+          location: "update_json_config:1"
+        - question: "What important paths are not covered at all?"
+          answer: "Concurrent writes and disk-full scenarios are untested; tests should cover these if required."
+          location: "update_json_config:1"
+        - question: "Does the suite fail when the behaviour regresses?"
+          answer: "Tests should verify content and atomicity; a regression in those would fail assertions."
+          location: "update_json_config:1"
+        - question: "Is the metric used as evidence of quality?"
+          answer: "No coverage target is set; tests are behaviour-focused, not metric-driven."
+          location: "update_json_config:1"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "No operation ID exists. Each call is independent; idempotency is not explicitly supported."
+          location: "update_json_config:1"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is the rename; the file content is durable via fsync before rename."
+          location: "update_json_config:44-46"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "If crash before rename, temp file remains; cleanup only on exception, not on power loss."
+          location: "update_json_config:47-52"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No deduplication mechanism exists; each call is a new operation."
+          location: "update_json_config:1"
+      unanswered: []
+  not_applied:
+    - node: reliability.retry-semantics
+      reason: No retry logic is implemented; the function either succeeds or raises. Retry is left to the caller.
+    - node: observability.error-context
+      reason: The function raises exceptions with basic messages; no logging or error context enrichment is added. It is intentionally minimal.

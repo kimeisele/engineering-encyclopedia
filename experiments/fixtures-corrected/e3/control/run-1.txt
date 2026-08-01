@@ -1,0 +1,227 @@
+Here's a comprehensive function for updating a JSON config file on disk with robust error handling and multiple update modes:
+
+```python
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+def update_json_config(
+    file_path: Union[str, Path],
+    updates: Dict[str, Any],
+    *,
+    merge_lists: bool = True,
+    create_if_missing: bool = False,
+    backup: bool = False,
+    raise_on_error: bool = True
+) -> Optional[Dict[str, Any]]:
+    """
+    Update a JSON config file on disk with new values.
+
+    Args:
+        file_path: Path to the JSON file
+        updates: Dictionary of updates to apply (supports nested keys)
+        merge_lists: If True, merges lists by appending new items. If False, replaces lists entirely.
+        create_if_missing: If True, creates the file if it doesn't exist
+        backup: If True, creates a backup of the original file before updating
+        raise_on_error: If True, raises exceptions. If False, returns None on error.
+
+    Returns:
+        Updated configuration dictionary, or None if error and raise_on_error is False
+
+    Raises:
+        FileNotFoundError: If file doesn't exist and create_if_missing is False
+        json.JSONDecodeError: If file exists but contains invalid JSON
+        TypeError: If updates contains incompatible types
+    """
+    file_path = Path(file_path)
+    
+    try:
+        # Ensure directory exists
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Load existing config or start with empty dict
+        if file_path.exists():
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+        elif create_if_missing:
+            config = {}
+        else:
+            raise FileNotFoundError(f"Config file not found: {file_path}")
+        
+        # Create backup if requested
+        if backup and file_path.exists():
+            backup_path = file_path.with_suffix(file_path.suffix + '.bak')
+            import shutil
+            shutil.copy2(file_path, backup_path)
+        
+        # Apply updates
+        config = _deep_merge(config, updates, merge_lists)
+        
+        # Write updated config atomically
+        _atomic_write_json(file_path, config)
+        
+        return config
+        
+    except Exception as e:
+        if raise_on_error:
+            raise
+        else:
+            print(f"Error updating config: {e}")
+            return None
+
+def _deep_merge(base: Any, updates: Any, merge_lists: bool) -> Any:
+    """Recursively merge updates into base."""
+    if isinstance(base, dict) and isinstance(updates, dict):
+        result = base.copy()
+        for key, value in updates.items():
+            if key in result:
+                result[key] = _deep_merge(result[key], value, merge_lists)
+            else:
+                result[key] = value
+        return result
+    elif isinstance(base, list) and isinstance(updates, list):
+        if merge_lists:
+            # Merge lists by combining and deduplicating
+            return list(dict.fromkeys(base + updates))
+        else:
+            # Replace list entirely
+            return updates
+    else:
+        # None-dict/non-list values always replace
+        return updates
+
+def _atomic_write_json(file_path: Path, data: Dict[str, Any]) -> None:
+    """Write JSON file atomically to prevent corruption."""
+    temp_file = None
+    try:
+        # Write to temporary file first
+        fd, temp_path = tempfile.mkstemp(
+            dir=file_path.parent,
+            prefix=f".{file_path.stem}.",
+            suffix=".tmp"
+        )
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        
+        # Replace original file with temp file
+        os.replace(temp_path, file_path)
+        
+    finally:
+        # Clean up temp file if it still exists
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+# Example usage and test cases
+if __name__ == "__main__":
+    # Example config file content
+    example_config = {
+        "server": {
+            "host": "localhost",
+            "port": 8080,
+            "features": ["auth", "logging"],
+            "maintenance": False
+        },
+        "database": {
+            "url": "sqlite:///test.db",
+            "pool_size": 5
+        }
+    }
+    
+    # Test 1: Simple update
+    with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        f.write(json.dumps(example_config).encode())
+        temp_file = Path(f.name)
+    
+    # Update nested values
+    updates = {
+        "server": {
+            "port": 9090,
+            "maintenance": True
+        },
+        "database": {
+            "pool_size": 10
+        }
+    }
+    
+    result = update_json_config(temp_file, updates)
+    print("Updated config:", result)
+    
+    # Test 2: List merging
+    updates = {
+        "server": {
+            "features": ["new_feature"]
+        }
+    }
+    
+    result = update_json_config(temp_file, updates, merge_lists=True)
+    print("After list merge:", result)
+    
+    # Test 3: Replace lists instead of merging
+    updates = {
+        "server": {
+            "features": ["only_this_feature"]
+        }
+    }
+    
+    result = update_json_config(temp_file, updates, merge_lists=False)
+    print("After list replacement:", result)
+    
+    # Test 4: Create missing file
+    new_file = Path(tempfile.mktemp(suffix='.json'))
+    result = update_json_config(
+        new_file,
+        {"app": {"name": "MyApp", "version": "1.0.0"}},
+        create_if_missing=True
+    )
+    print("Created new config:", result)
+    
+    # Test 5: Error handling
+    try:
+        update_json_config(
+            Path("/nonexistent/path/config.json"),
+            {"key": "value"}
+        )
+    except FileNotFoundError as e:
+        print(f"Expected error: {e}")
+    
+    # Cleanup
+    temp_file.unlink()
+    new_file.unlink()
+```
+
+This function provides:
+
+1. **Nested Updates**: Supports updating nested dictionary keys
+2. **List Handling**: Options to either merge lists or replace them
+3. **Atomic Writes**: Prevents file corruption by using temp files
+4. **Backup Support**: Optional backup of original file
+5. **Error Handling**: Flexible error handling with `raise_on_error` parameter
+6. **File Creation**: Can create missing files if desired
+7. **Type Safety**: Proper type hints for better IDE support
+
+The function is production-ready and handles common edge cases like:
+- Missing directories
+- Invalid JSON in existing files
+- Concurrent access (through atomic writes)
+- Preservation of formatting through `indent=2`
+
+You can also create a simpler version if you don't need all the advanced features:
+
+```python
+import json
+from pathlib import Path
+
+def simple_update(file_path, updates):
+    """Simple version for basic use cases."""
+    path = Path(file_path)
+    with open(path, 'r') as f:
+        config = json.load(f)
+    config.update(updates)
+    with open(path, 'w') as f:
+        json.dump(config, f)
+    return config
+```

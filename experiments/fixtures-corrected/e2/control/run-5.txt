@@ -1,0 +1,178 @@
+Here's a Python function that runs git commands with a user-supplied branch name, with proper security considerations:
+
+```python
+import subprocess
+import shlex
+from typing import List, Optional
+
+def run_git_command(branch_name: str, action: str = "checkout", extra_args: Optional[List[str]] = None) -> subprocess.CompletedProcess:
+    """
+    Runs a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name: The branch name to use in the command
+        action: The git action to perform (default: "checkout")
+        extra_args: Additional arguments to pass to the git command
+    
+    Returns:
+        subprocess.CompletedProcess: The result of the command execution
+    
+    Raises:
+        ValueError: If branch_name contains invalid characters
+        subprocess.CalledProcessError: If the git command fails
+    """
+    
+    # Security check: Validate branch name
+    # Git branch names can contain letters, digits, hyphens, underscores, and dots
+    # but should not contain spaces, shell metacharacters, or start with '-'
+    if not branch_name or any(char in branch_name for char in [' ', ';', '|', '&', '$', '`', '>', '<', '"', "'", '\\', '\n', '\r']):
+        raise ValueError(f"Invalid branch name: {branch_name}")
+    
+    if branch_name.startswith('-'):
+        raise ValueError(f"Branch name cannot start with '-': {branch_name}")
+    
+    # Construct the command safely using list format (no shell interpretation)
+    command = ["git", action, branch_name]
+    
+    # Add any extra arguments
+    if extra_args:
+        command.extend(extra_args)
+    
+    try:
+        # Run the command without shell=True to prevent shell injection
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30  # Timeout to prevent hanging
+        )
+        return result
+    
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(f"Git command timed out: {command}")
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Git command failed with exit code {e.returncode}")
+        print(f"Error output: {e.stderr}")
+        raise
+
+# Example usage functions with specific git operations
+def checkout_branch(branch_name: str) -> subprocess.CompletedProcess:
+    """Checkout an existing branch"""
+    return run_git_command(branch_name, action="checkout")
+
+def create_branch(branch_name: str) -> subprocess.CompletedProcess:
+    """Create and checkout a new branch"""
+    return run_git_command(branch_name, action="checkout", extra_args=["-b"])
+
+def reset_branch(branch_name: str, commit: str = "HEAD") -> subprocess.CompletedProcess:
+    """Reset a branch to a specific commit"""
+    if not branch_name or not commit:
+        raise ValueError("Both branch name and commit are required")
+    return run_git_command(branch_name, action="reset", extra_args=[commit])
+
+# More secure version that uses regex validation
+import re
+
+def run_git_command_secure(branch_name: str, action: str = "checkout") -> subprocess.CompletedProcess:
+    """
+    More secure version with strict regex validation for branch names.
+    Git branch names follow a strict pattern.
+    """
+    
+    # Git branch name validation regex
+    # Allows: letters, digits, '/', '-', '_', '.'
+    # Cannot start with '-' or contain '..', '@{', or whitespace
+    branch_pattern = r'^[a-zA-Z0-9\/_.-]+$'
+    
+    if not re.match(branch_pattern, branch_name):
+        raise ValueError(f"Invalid git branch name: {branch_name}")
+    
+    # Additional checks
+    if branch_name in ['HEAD', 'head'] or '..' in branch_name or '@{' in branch_name:
+        raise ValueError(f"Potentially unsafe branch name: {branch_name}")
+    
+    command = ["git", action, branch_name]
+    
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,  # Don't raise on error, we'll handle it
+        timeout=30
+    )
+    
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, 
+            command, 
+            output=result.stdout, 
+            stderr=result.stderr
+        )
+    
+    return result
+
+# Example of safe usage
+def safe_branch_operation():
+    try:
+        # User input
+        branch_input = input("Enter branch name: ")
+        
+        # Choose operation
+        operation = input("Enter operation (checkout/create/reset): ").lower()
+        
+        if operation == "checkout":
+            result = checkout_branch(branch_input)
+            print(f"Successfully checked out {branch_input}")
+        elif operation == "create":
+            result = create_branch(branch_input)
+            print(f"Created and checked out {branch_input}")
+        elif operation == "reset":
+            commit = input("Enter commit to reset to: ")
+            result = reset_branch(branch_input, commit)
+            print(f"Reset {branch_input} to {commit}")
+        else:
+            print("Invalid operation")
+            return
+        
+        print(result.stdout)
+        
+    except ValueError as e:
+        print(f"Validation error: {e}")
+    except subprocess.CalledProcessError as e:
+        print(f"Git operation failed: {e}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+if __name__ == "__main__":
+    safe_branch_operation()
+```
+
+**Key Security Features:**
+
+1. **No shell=True**: The function uses `subprocess.run()` without shell=True, which prevents shell injection attacks
+2. **List format**: Commands are passed as lists, not strings, preventing argument injection
+3. **Input validation**: Branch names are validated to prevent command injection
+4. **Timeout protection**: Prevents hanging through a 30-second timeout
+5. **No shell metacharacters**: Validates against dangerous characters
+6. **Regular expression validation**: Strict pattern matching for safer branch names
+7. **Error handling**: Proper exception handling for various failure modes
+
+**Usage Examples:**
+
+```python
+# Simple usage
+result = checkout_branch("feature/my-branch")
+print(result.stdout)
+
+# Create a new branch
+result = create_branch("hotfix/bug-123")
+print(result.stdout)
+
+# Reset a branch
+result = reset_branch("main", "abc123def")
+print(result.stdout)
+```
+
+**Note:** Always validate and sanitize user input before using it in system commands, especially when dealing with subprocess execution.

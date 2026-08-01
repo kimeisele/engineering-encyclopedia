@@ -1,0 +1,209 @@
+Here's a comprehensive function that updates a JSON config file on disk with various safety features:
+
+```python
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+def update_json_config(
+    file_path: Union[str, Path],
+    updates: Dict[str, Any],
+    create_if_missing: bool = False,
+    backup: bool = True,
+    pretty_print: bool = True,
+    atomic_write: bool = True
+) -> Dict[str, Any]:
+    """
+    Update a JSON config file on disk with the given updates.
+    
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of keys to update. Can be nested using dot notation
+                 (e.g., {"database.host": "localhost"})
+        create_if_missing: If True, create the file if it doesn't exist
+        backup: If True, create a .bak backup before writing
+        pretty_print: If True, write JSON with indentation
+        atomic_write: If True, write to temp file then rename (safer)
+    
+    Returns:
+        The updated configuration dictionary
+    
+    Raises:
+        FileNotFoundError: If file doesn't exist and create_if_missing is False
+        json.JSONDecodeError: If existing file contains invalid JSON
+    """
+    
+    file_path = Path(file_path)
+    
+    # Check if file exists
+    if not file_path.exists():
+        if not create_if_missing:
+            raise FileNotFoundError(f"Config file {file_path} not found")
+        config = {}
+    else:
+        # Read existing config
+        with open(file_path, 'r') as f:
+            try:
+                config = json.load(f)
+            except json.JSONDecodeError as e:
+                raise json.JSONDecodeError(
+                    f"Invalid JSON in {file_path}: {e.msg}", 
+                    e.doc, 
+                    e.pos
+                )
+    
+    # Apply updates
+    for key, value in updates.items():
+        # Support dot notation for nested keys
+        if '.' in key:
+            keys = key.split('.')
+            current = config
+            for k in keys[:-1]:
+                # Create intermediate dictionaries if needed
+                if k not in current:
+                    current[k] = {}
+                current = current[k]
+            current[keys[-1]] = value
+        else:
+            config[key] = value
+    
+    # Create backup if requested
+    if backup and file_path.exists():
+        backup_path = file_path.with_suffix(file_path.suffix + '.bak')
+        import shutil
+        shutil.copy2(file_path, backup_path)
+    
+    # Write updated config
+    try:
+        if atomic_write:
+            # Atomic write using temporary file
+            with tempfile.NamedTemporaryFile(
+                mode='w', 
+                dir=file_path.parent, 
+                delete=False
+            ) as temp_file:
+                if pretty_print:
+                    json.dump(config, temp_file, indent=4, sort_keys=True)
+                else:
+                    json.dump(config, temp_file)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            
+            # Replace original file
+            os.replace(temp_file.name, file_path)
+        else:
+            # Direct write
+            with open(file_path, 'w') as f:
+                if pretty_print:
+                    json.dump(config, f, indent=4, sort_keys=True)
+                else:
+                    json.dump(config, f)
+                
+    except Exception as e:
+        # Clean up temp file if error occurred
+        if atomic_write and os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
+        raise e
+    
+    return config
+
+# Convenience functions for specific use cases
+def set_json_value(file_path: Union[str, Path], key: str, value: Any, **kwargs):
+    """Set a single value in the JSON config file."""
+    return update_json_config(file_path, {key: value}, **kwargs)
+
+def get_json_value(file_path: Union[str, Path], key: str, default: Any = None):
+    """Get a single value from the JSON config file."""
+    with open(file_path, 'r') as f:
+        config = json.load(f)
+    
+    # Support dot notation
+    if '.' in key:
+        keys = key.split('.')
+        current = config
+        for k in keys:
+            if isinstance(current, dict) and k in current:
+                current = current[k]
+            else:
+                return default
+        return current
+    else:
+        return config.get(key, default)
+
+# Unix-style CLI interface
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Update a JSON config file")
+    parser.add_argument("config_file", help="Path to config file")
+    parser.add_argument("--set", action="append", nargs=2, metavar=("KEY", "VALUE"),
+                       help="Set key-value pairs (can use dot notation for nested)")
+    parser.add_argument("--get", metavar="KEY", help="Get a value from config")
+    parser.add_argument("--create", action="store_true", help="Create file if missing")
+    parser.add_argument("--no-backup", action="store_true", help="Skip backup creation")
+    parser.add_argument("--compact", action="store_true", help="Write JSON without indentation")
+    
+    args = parser.parse_args()
+    
+    if args.get:
+        print(json.dumps(get_json_value(args.config_file, args.get), indent=2))
+    elif args.set:
+        updates = dict(args.set)
+        print(json.dumps(
+            update_json_config(
+                args.config_file, 
+                updates,
+                create_if_missing=args.create,
+                backup=not args.no_backup,
+                pretty_print=not args.compact
+            ),
+            indent=2
+        ))
+    else:
+        parser.print_help()
+```
+
+This function includes several important features:
+
+## Key Features:
+
+1. **Safe file handling**: Uses atomic writes to prevent corruption
+2. **Backup support**: Creates `.bak` backups before modifying
+3. **Nested key support**: Use dot notation like `"database.host"` to update nested values
+4. **Error handling**: Proper exceptions for missing files and invalid JSON
+5. **Pretty printing**: Human-readable JSON output option
+6. **Create if missing**: Option to create new files
+
+## Example Usage:
+
+```python
+# Update a config file
+update_json_config("config.json", {
+    "server.host": "localhost",
+    "server.port": 8080,
+    "debug": True,
+    "features": ["login", "signup"]
+})
+
+# Set a single value
+set_json_value("config.json", "database.url", "postgres://localhost/db")
+
+# Get a value
+db_host = get_json_value("config.json", "database.host")
+
+# CLI usage
+# python update_config.py config.json --set server.port 9090 --set debug True
+# python update_config.py config.json --get database.host
+```
+
+## Advanced Features:
+
+The function also provides:
+- **Type preservation**: JSON types are properly maintained
+- **Merging behavior**: Updates are merged with existing config, not replacing entirely
+- **File locking**: Could be added for concurrent access scenarios
+- **Schema validation**: Could be extended to validate changes against a schema
+
+This approach ensures your config file updates are safe, reliable, and maintainable.

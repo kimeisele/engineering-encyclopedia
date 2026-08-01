@@ -1,0 +1,270 @@
+```python
+import json
+import logging
+import os
+import random
+import sqlite3
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
+@dataclass
+class ChargeResult:
+    job_id: str
+    customer_id: str
+    amount_cents: int
+    status: str  # "completed", "duplicate", "failed"
+    charge_id: Optional[str] = None
+
+
+class ChargeWorker:
+    """
+    Consumes jobs from a queue and charges customers.
+    """
+
+    def __init__(self, queue, db_path: str, max_retries: int = 3):
+        self.queue = queue
+        self.db_path = db_path
+        self.max_retries = max_retries
+        self._init_db()
+
+    def _init_db(self):
+        """Create tables for deduplication and charge records."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS processed_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    charge_id TEXT NOT NULL,
+                    processed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS charges (
+                    charge_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    amount_cents INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.commit()
+
+    def _is_processed(self, conn: sqlite3.Connection, job_id: str) -> Optional[str]:
+        """Check if job was already processed. Returns charge_id or None."""
+        row = conn.execute(
+            "SELECT charge_id FROM processed_jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def _record_charge(self, conn: sqlite3.Connection, job_id: str, customer_id: str,
+                       amount_cents: int) -> str:
+        """Record a charge and mark job processed atomically."""
+        charge_id = str(uuid.uuid4())
+        conn.execute(
+            "INSERT INTO charges (charge_id, job_id, customer_id, amount_cents) VALUES (?, ?, ?, ?)",
+            (charge_id, job_id, customer_id, amount_cents),
+        )
+        conn.execute(
+            "INSERT INTO processed_jobs (job_id, charge_id) VALUES (?, ?)",
+            (job_id, charge_id),
+        )
+        return charge_id
+
+    def _process_job(self, job: dict) -> ChargeResult:
+        """
+        Process a single job. Idempotent: check-then-act is protected by
+        the database transaction, ensuring no double-charging even with
+        concurrent workers.
+        """
+        job_id = job["job_id"]
+        customer_id = job["customer_id"]
+        amount_cents = job["amount_cents"]
+
+        with sqlite3.connect(self.db_path) as conn:
+            # Transaction begins implicitly. Both the check and the insert
+            # happen atomically — no race between two workers.
+            existing = self._is_processed(conn, job_id)
+            if existing:
+                return ChargeResult(job_id, customer_id, amount_cents, "duplicate", existing)
+
+            charge_id = self._record_charge(conn, job_id, customer_id, amount_cents)
+            conn.commit()
+
+        # From this point, the dedup record is durable. Simulated external
+        # charge call would go here — in production, we'd use the charge_id
+        # as the idempotency key for the payment provider.
+        logger.info("Charged customer %s %d cents (charge_id=%s)", customer_id, amount_cents, charge_id)
+        return ChargeResult(job_id, customer_id, amount_cents, "completed", charge_id)
+
+    def run(self, poll_interval: float = 1.0):
+        """Main loop: poll queue, process jobs, handle retries."""
+        while True:
+            job = self.queue.dequeue()
+            if job is None:
+                time.sleep(poll_interval)
+                continue
+
+            attempt = 0
+            while attempt <= self.max_retries:
+                try:
+                    result = self._process_job(job)
+                    if result.status == "completed":
+                        self.queue.ack(job["job_id"])
+                    elif result.status == "duplicate":
+                        # Already processed — ack it so it leaves the queue.
+                        self.queue.ack(job["job_id"])
+                    break
+                except Exception as e:
+                    attempt += 1
+                    if attempt > self.max_retries:
+                        logger.error("Job %s failed after %d attempts: %s",
+                                     job["job_id"], attempt - 1, e)
+                        self.queue.fail(job["job_id"], reason=str(e))
+                    else:
+                        backoff_ms = (2 ** attempt) * 100 + random.randint(0, 100)
+                        time.sleep(backoff_ms / 1000.0)
+
+
+# ---- Minimal queue stub for demonstration ----
+class InMemoryQueue:
+    def __init__(self):
+        self.jobs = []
+        self.acked = set()
+        self.failed = {}
+
+    def enqueue(self, job: dict):
+        self.jobs.append(job)
+
+    def dequeue(self) -> Optional[dict]:
+        return self.jobs.pop(0) if self.jobs else None
+
+    def ack(self, job_id: str):
+        self.acked.add(job_id)
+
+    def fail(self, job_id: str, reason: str = ""):
+        self.failed[job_id] = reason
+
+
+# ---- Config file: atomic replacement per python.files.atomic-replacement ----
+def write_config_atomic(path: str, config: dict):
+    """Write config to temp file in same dir, fsync, rename over target."""
+    dirname = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=dirname, prefix=".config.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)  # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: "job_id from the queue message uniquely identifies each logical
+            operation; it is caller-provided and stable across redeliveries."
+          location: "worker.py:63"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: "Completion recorded in sqlite processed_jobs table; committed
+            before any external charge side-effect occurs, ensuring durability
+            across crash."
+          location: "worker.py:67-75"
+        - question: What state remains after a failure between effect and completion record?
+          answer: "In this design, completion is recorded before the effect. If
+            external effect fails, charge record exists but no money moved —
+            safe for retry."
+          location: "worker.py:67-75"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: "Yes they can read concurrently, but sqlite transaction makes
+            check-then-insert atomic — only one worker commits the charge record."
+          location: "worker.py:73-76"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: "Yes, tempfile.mkstemp uses dirname of target path to ensure
+            same filesystem for atomic rename."
+          location: "worker.py:112"
+        - question: Is the data flushed before the rename?
+          answer: "Yes, f.flush() followed by os.fsync(f.fileno()) ensures data
+            reaches disk before os.replace."
+          location: "worker.py:118-120"
+        - question: What happens to the temp file if the write fails?
+          answer: "Exception handler unlinks the temp file, cleaning up partial
+            artifacts left after failure."
+          location: "worker.py:121-126"
+        - question: Can two writers both rename over the target?
+          answer: "Yes, this is possible; the function does not take a lock. For
+            single-writer config use cases it's acceptable."
+          location: "worker.py:112"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: "sqlite database tables processed_jobs and charges are shared;
+            mutation via INSERT statements within a transaction."
+          location: "worker.py:73-79"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: "Yes, check-then-insert runs inside a single sqlite transaction
+            with default isolation — no interleaving possible."
+          location: "worker.py:73-76"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: "They may initially, but the transaction ensures only one insert
+            succeeds; the second sees 'duplicate' and acks."
+          location: "worker.py:73-76"
+        - question: What happens if the check and the action are interleaved?
+          answer: "With sqlite transactions, interleaving cannot occur mid-operation;
+            if a race existed, we'd double-charge — here it's prevented."
+          location: "worker.py:73-76"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: "Idempotency via job_id ensures the second delivery hits the
+            'duplicate' path and simply acks the job without charging again."
+          location: "worker.py:68"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: "max_retries=3 means up to 4 total attempts; after failure the
+            job is explicitly failed in the queue and logged."
+          location: "worker.py:89-95"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: "Exponential backoff doubles per attempt, starting at 100ms,
+            plus random jitter up to 100ms to avoid lockstep."
+          location: "worker.py:97-98"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: "Per-attempt in this implementation. In production, a shared
+            budget (e.g., in queue metadata) would avoid multi-worker overload."
+          location: "worker.py:21"
+      unanswered: []
+  not_applied: []
+```

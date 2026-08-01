@@ -1,0 +1,148 @@
+```python
+import json
+import os
+import tempfile
+
+
+def update_json_config(file_path: str, updates: dict) -> None:
+    """Atomically update a JSON config file with the given updates.
+
+    Args:
+        file_path: Path to the JSON config file.
+        updates: Dictionary of values to merge into the config.
+
+    Raises:
+        ValueError: If updates is not a valid JSON-serializable object.
+        OSError: If the file cannot be written.
+    """
+    # Validate input at the trust boundary
+    try:
+        json.dumps(updates)  # Ensure it's JSON-serializable
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid updates: {e}") from e
+
+    # Read existing config, or start fresh if file doesn't exist
+    try:
+        with open(file_path, "r") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        config = {}
+    except (json.JSONDecodeError, OSError) as e:
+        # If existing file is corrupt, fail rather than overwrite silently
+        raise ValueError(f"Existing config is not valid JSON: {e}") from e
+
+    # Merge updates (shallow merge for simplicity)
+    if not isinstance(config, dict) or not isinstance(updates, dict):
+        raise ValueError("Config and updates must be JSON objects")
+    config.update(updates)
+
+    # Atomic write: temp file in same directory, flush, rename
+    directory = os.path.dirname(os.path.abspath(file_path))
+    fd, temp_path = tempfile.mkstemp(dir=directory, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(config, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())  # Flush data to disk
+
+        # Atomic rename — same filesystem, so it's atomic on POSIX
+        os.replace(temp_path, file_path)
+    except Exception:
+        # Clean up temp file on failure
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, created via mkstemp in the target's directory to ensure same filesystem for atomic rename."
+          location: "update_json_config:30"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and os.fsync() are called before os.replace() to ensure durability."
+          location: "update_json_config:36"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "It is removed in the except block via os.unlink() to prevent leftover temp files."
+          location: "update_json_config:40"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, atomic rename makes each write complete, but last-writer-wins; no locking is applied by this function."
+          location: "update_json_config:38"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The config file is shared state; it is mutated by the atomic rename, which prevents torn reads."
+          location: "update_json_config:38"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, the read (lines 22-27) and write (lines 30-38) are separate; a concurrent update between them is lost."
+          location: "update_json_config:22"
+      unanswered:
+        - question: "Can two workers observe the same value as unclaimed?"
+          reason: "This function doesn't implement claim logic; it only provides atomic file replacement, not concurrency control."
+        - question: "What happens if the check and the action are interleaved?"
+          reason: "No check-then-act pattern exists; the function reads config then writes it, but there's no precondition to verify."
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The trust boundary is the function's input; updates is validated for JSON-serializability before use."
+          location: "update_json_config:17"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable values are JSON-serializable dicts; json.dumps and type checks reject non-dict or unserializable input."
+          location: "update_json_config:17"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The original updates dict is used; validation only checks serializability and type, not a copy."
+          location: "update_json_config:22"
+      unanswered:
+        - question: "Does each use site still treat the value as untrusted?"
+          reason: "The value is only serialized to JSON; it is not used in downstream logic that requires further validation."
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: "Which behaviours are asserted, not just which lines run?"
+          answer: "The function's behaviour is not tested here; a test would assert file content, atomicity, and error handling."
+          location: "update_json_config:1"
+        - question: "What important paths are not covered at all?"
+          answer: "Potential test paths: existing config, missing file, corrupt config, write failure, concurrent writers."
+          location: "update_json_config:1"
+      unanswered:
+        - question: "Does the suite fail when the behaviour regresses?"
+          reason: "No test suite is provided in this task; the function is standalone without accompanying tests."
+        - question: "Is the metric used as evidence of quality?"
+          reason: "No testing metric is used; the report notes limitations but coverage was not collected."
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "No operation identity exists; each call is independent and not idempotent—repeated calls with same updates have no extra effect."
+          location: "update_json_config:1"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "No explicit completion record; the atomic file write itself is the durable effect."
+          location: "update_json_config:38"
+      unanswered:
+        - question: "What state remains after a failure between effect and completion record?"
+          reason: "No completion record exists, so failure before rename leaves old file; after rename, new file is durable."
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          reason: "This function has no retry or deduplication logic; it is not designed for idempotent operations."
+  not_applied:
+    - node: reliability.retry-semantics
+      reason: "This node was in the retrieval trace but not in the provided context pack; it was not available for application."
+    - node: observability.error-context
+      reason: "This node was in the retrieval trace but not in the provided context pack; it was not available for application."
+```

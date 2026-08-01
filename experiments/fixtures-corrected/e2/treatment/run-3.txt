@@ -1,0 +1,107 @@
+```python
+import subprocess
+import re
+
+def run_git_command(branch_name: str) -> subprocess.CompletedProcess:
+    """
+    Run a git command (git checkout) with a user-supplied branch name.
+
+    Args:
+        branch_name: The branch name provided by the user.
+
+    Returns:
+        The CompletedProcess result of the git command.
+
+    Raises:
+        ValueError: If the branch name is not a valid git branch name format.
+    """
+    # Validate that the branch name matches git's safe branch name pattern.
+    # Git branch names must not start with '-', must not contain '..',
+    # must not contain '~', '^', ':', '?', '*', '[', '\\', space, or control chars,
+    # and must not end with '/', '.', or '.lock'.
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._/-]*', branch_name):
+        raise ValueError(f"Invalid git branch name: {branch_name!r}")
+
+    # Pass the command as a list, never as a string with shell=True.
+    # The branch name is an argument element, not interpolated into a shell string.
+    result = subprocess.run(
+        ["git", "checkout", branch_name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: "Is the command passed as a list, with input as elements?"
+          answer: "Yes, subprocess.run receives a list ['git', 'checkout', branch_name]; the branch name is an element, not interpolated."
+          location: "solution.py:18"
+        - question: "Is shell=True present anywhere, even conditionally?"
+          answer: "No, shell=True is never used; the command list is passed directly to subprocess.run."
+          location: "solution.py:18"
+        - question: "Can a user-supplied value change which program runs?"
+          answer: "No, git is fixed as the first element; the user-supplied value is only an argument to git checkout."
+          location: "solution.py:18"
+        - question: "Is the input validated or is it passed as opaque data?"
+          answer: "Input is validated with a regex that rejects branch names starting with '-' or containing unsafe characters before execution."
+          location: "solution.py:13"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The function boundary is the trust boundary; validation rejects invalid branch names before subprocess executes."
+          location: "solution.py:13"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable: alphanumeric start, then alphanumeric, dot, underscore, slash, hyphen. Regex rejects leading '-', spaces, control chars."
+          location: "solution.py:13"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The validated form is used; if the regex doesn't match, ValueError is raised, so only safe values reach subprocess."
+          location: "solution.py:13-18"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, subprocess treats it as a single argument element; no shell interpolation or string concatenation occurs."
+          location: "solution.py:18"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The branch name plus 'git checkout' identifies the operation; it comes from the function argument."
+          location: "solution.py:15"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "This function only runs the command and returns the result; it does not record completion—caller decides if that is needed."
+          location: "solution.py:18-20"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "Not applicable: no completion record is maintained here; the git checkout itself is idempotent (same branch yields same state)."
+          location: "solution.py:18-20"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Not applicable: this function performs no read-then-act on shared state; git itself handles checkout idempotently."
+          location: "solution.py:15"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "This function runs a git command; it does not write or replace any file on disk, so atomic file replacement is not relevant."
+        - question: "Is the data flushed before the rename?"
+          reason: "No file writing occurs in this function; git handles repository file operations internally, not via this code."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "No temp file is created by this function; atomic replacement is outside its scope."
+        - question: "Can two writers both rename over the target?"
+          reason: "This function does not perform renames; git's internal operations handle concurrency, which is not addressed here."
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: "This function performs no shared state reads/writes or check-then-act sequences; it simply executes a git command. Race-conditions are not relevant to a single subprocess invocation."

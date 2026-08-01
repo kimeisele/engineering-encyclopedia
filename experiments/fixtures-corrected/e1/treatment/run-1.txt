@@ -1,0 +1,302 @@
+```python
+"""
+Worker that consumes jobs from a queue and charges a customer.
+
+Design principles (from context pack):
+- Idempotency: each job has a stable idempotency key; we record completion
+  durably BEFORE charging, and the charge call itself is idempotent.
+- Race safety: claim the job atomically in the queue (atomic read-and-delete
+  or lease). Never check-then-act without atomicity.
+- Atomic config writes: write config via temp file + fsync + rename.
+- Retry: bounded, with exponential backoff and jitter; only retry idempotent
+  operations.
+"""
+
+import json
+import os
+import random
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# Configuration & storage (simplified for demonstration)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Config:
+    queue_dir: Path
+    completion_dir: Path
+    max_retries: int = 5
+    base_backoff_ms: float = 100.0
+    max_backoff_ms: float = 5000.0
+
+
+class DurableStore:
+    """Minimal durable key-value store using atomic file replacement."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+
+    def _path_for(self, key: str) -> Path:
+        # key is a stable idempotency key (uuid) — safe as filename
+        return self.directory / f"{key}.json"
+
+    def read(self, key: str) -> Optional[dict]:
+        path = self._path_for(key)
+        if not path.exists():
+            return None
+        with path.open("r") as f:
+            return json.load(f)
+
+    def write_atomic(self, key: str, data: dict) -> None:
+        """Atomic write: temp file in same dir, flush, fsync, rename."""
+        path = self._path_for(key)
+        fd, tmp_path_str = tempfile.mkstemp(
+            dir=self.directory,
+            prefix=f".{key}.",
+            suffix=".tmp",
+        )
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            # cleanup on failure
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def claim_job(self, queue: "JobQueue", job_id: str) -> bool:
+        """Atomically claim a job — no check-then-act race.
+
+        In a real system this would be a database UPDATE ... WHERE status='pending'
+        or a queue claim operation. Here we use the filesystem as a simplified
+        stand-in: rename the job file to a 'claimed' state atomically.
+        """
+        pending = queue.pending_dir / f"{job_id}.json"
+        claimed = queue.claimed_dir / f"{job_id}.json"
+        try:
+            os.rename(pending, claimed)
+            return True
+        except FileNotFoundError:
+            return False
+
+
+# ---------------------------------------------------------------------------
+# Job queue (simplified filesystem-backed)
+# ---------------------------------------------------------------------------
+
+class JobQueue:
+    def __init__(self, root: Path):
+        self.root = root
+        self.pending_dir = root / "pending"
+        self.claimed_dir = root / "claimed"
+        for d in (self.pending_dir, self.claimed_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+    def read_job(self, job_id: str) -> Optional[dict]:
+        for d in (self.claimed_dir, self.pending_dir):
+            p = d / f"{job_id}.json"
+            if p.exists():
+                with p.open("r") as f:
+                    return json.load(f)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Charging service (external — we only call it; it is idempotent)
+# ---------------------------------------------------------------------------
+
+class ChargingService:
+    """External service. Its charge() is idempotent when given the same
+    idempotency_key — it will not double-charge even if called twice."""
+
+    def charge(self, customer_id: str, amount_cents: int, idempotency_key: str) -> bool:
+        # In production this would be an HTTP call with the key in a header.
+        # We simulate: it always succeeds and records the key.
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+class ChargeWorker:
+    def __init__(self, config: Config, queue: JobQueue, store: DurableStore,
+                 charger: ChargingService):
+        self.config = config
+        self.queue = queue
+        self.store = store
+        self.charger = charger
+
+    def process_job(self, job_id: str) -> None:
+        # 1. Atomically claim the job — prevents two workers charging twice
+        if not self.store.claim_job(self.queue, job_id):
+            # Another worker claimed it, or it doesn't exist; skip.
+            return
+
+        job = self.queue.read_job(job_id)
+        if job is None:
+            return
+
+        customer_id = job["customer_id"]
+        amount_cents = job["amount_cents"]
+        # The stable, externally-supplied idempotency key:
+        idempotency_key = job["idempotency_key"]
+
+        # 2. Check completion record (racing with another worker is fine because
+        #    only one worker can hold the claim from step 1).
+        completion = self.store.read(idempotency_key)
+        if completion and completion.get("status") == "completed":
+            return
+
+        # 3. Record "in-progress" BEFORE the external effect, durably.
+        self.store.write_atomic(idempotency_key, {"status": "in_progress"})
+
+        # 4. Charge with retries (bounded, jittered backoff)
+        success = self._charge_with_retry(customer_id, amount_cents, idempotency_key)
+
+        # 5. Record the final outcome durably.
+        status = "completed" if success else "failed"
+        self.store.write_atomic(idempotency_key, {"status": status})
+
+    def _charge_with_retry(self, customer_id: str, amount_cents: int,
+                           idempotency_key: str) -> bool:
+        attempt = 0
+        while attempt <= self.config.max_retries:
+            try:
+                if self.charger.charge(customer_id, amount_cents, idempotency_key):
+                    return True
+            except Exception:
+                pass  # in production, log with error context
+            attempt += 1
+            if attempt <= self.config.max_retries:
+                backoff_ms = min(
+                    self.config.base_backoff_ms * (2 ** attempt),
+                    self.config.max_backoff_ms,
+                )
+                # Add jitter to avoid retry storms
+                backoff_ms = backoff_ms * random.uniform(0.5, 1.5)
+                time.sleep(backoff_ms / 1000.0)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Example usage
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    work_root = Path(tempfile.mkdtemp()) / "work"
+    queue_root = work_root / "queue"
+    completion_root = work_root / "completions"
+
+    config = Config(
+        queue_dir=queue_root,
+        completion_dir=completion_root,
+    )
+    queue = JobQueue(queue_root)
+    store = DurableStore(completion_root)
+    charger = ChargingService()
+
+    worker = ChargeWorker(config, queue, store, charger)
+
+    # Simulate a job arriving in the queue
+    job_id = str(uuid.uuid4())
+    idem_key = str(uuid.uuid4())
+    job_data = {
+        "customer_id": "cust_123",
+        "amount_cents": 500,
+        "idempotency_key": idem_key,
+    }
+    with (queue.pending_dir / f"{job_id}.json").open("w") as f:
+        json.dump(job_data, f)
+
+    worker.process_job(job_id)
+
+    # Verify
+    final_state = store.read(idem_key)
+    assert final_state["status"] == "completed", final_state
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The idempotency_key from the job message; it is client-supplied and stable per logical charge operation."
+          location: "worker.py:114"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is recorded in DurableStore via fsync+atomic rename, written as 'in_progress' before charging."
+          location: "worker.py:120-122"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The completion record says 'in_progress'; a retry will re-attempt the idempotent charge and then update to 'completed'."
+          location: "worker.py:120-126"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No—claim_job atomically renames the job file, so only one worker owns it; others cannot process it."
+          location: "worker.py:91-97"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, tempfile.mkstemp uses dir=self.directory, same as the target file's directory."
+          location: "worker.py:50"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and os.fsync(f.fileno()) are called before os.replace."
+          location: "worker.py:58-59"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "An exception handler deletes tmp_path via unlink(missing_ok=True) before re-raising."
+          location: "worker.py:60-64"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, possible; os.replace is atomic but last-writer-wins. For this worker, completion keys are unique per job, mitigating conflict."
+          location: "worker.py:66"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Queue job files and completion records; mutated in pending/claimed dirs and DurableStore files."
+          location: "worker.py:68-97, 104-126"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Job claiming uses atomic os.rename; completion read-then-write is protected by the claim, making ownership exclusive."
+          location: "worker.py:91-97"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No—the rename to claimed_dir is atomic; the second worker gets FileNotFoundError and skips."
+          location: "worker.py:96-97"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving cannot occur because claim is atomic; only the owner proceeds to completion check."
+          location: "worker.py:91-97"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The charge call is idempotent via idempotency_key; duplicate deliveries re-use the same key and won't double-charge."
+          location: "worker.py:107"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "max_retries (5) plus initial attempt; after last failure, completion is marked 'failed' and no further retry occurs."
+          location: "worker.py:129-133, 126"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff (2^attempt) capped at max_backoff_ms, multiplied by random 0.5–1.5 for jitter."
+          location: "worker.py:135-141"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per job invocation, not shared across workers; each job carries its own budget."
+          location: "worker.py:129"
+      unanswered: []
+  not_applied: []

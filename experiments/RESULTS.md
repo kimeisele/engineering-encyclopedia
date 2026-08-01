@@ -1,10 +1,24 @@
 # Experiment results
 
-Three tasks from the founding brief, Section 8. Five runs per arm, ten
-per task, thirty in total. Rubrics are fixed and deterministic
+Three tasks from the founding brief, Section 8. Five runs per arm, ten per
+task, thirty in total per run set. Rubrics are fixed and deterministic
 (`experiments/rubrics/`); the score is the count of satisfied criteria.
 
-## Summary table
+There are **two run sets**, recorded because the harness changed between
+them:
+
+- **Set A — original run** (`experiments/fixtures/`): scored the raw
+  completion, including the Application Report.
+- **Set B — corrected run** (`experiments/fixtures-corrected/`): the harness
+  now separates report from artifact (`---APPLICATION_REPORT---` delimiter,
+  `runner.extract_artifact`); the rubric scores only the code above the
+  delimiter, never the report.
+
+Both sets use the same provider (deepseek-v4-flash, thinking disabled) and
+the same rubrics. Set A is kept as the evidence for why the change was made;
+it is not deleted.
+
+## Set A — original run (confounded)
 
 | Task | Node under test | Control mean | Treatment mean | Delta |
 |---|---|---|---|---|
@@ -12,9 +26,7 @@ per task, thirty in total. Rubrics are fixed and deterministic
 | e2 | python.processes.subprocess-safety | 3.80 | 3.80 | 0.00 |
 | e3 | python.files.atomic-replacement | 5.00 | 6.00 | 1.00 |
 
-## Raw scores per run
-
-n=5 per arm; spread is the sample standard deviation.
+Raw scores (min/max/mean/stdev):
 
 | Task / arm | run-1 | run-2 | run-3 | run-4 | run-5 | min | max | mean | stdev |
 |---|---|---|---|---|---|---|---|---|---|
@@ -25,52 +37,65 @@ n=5 per arm; spread is the sample standard deviation.
 | e3 control | 6 | 5 | 4 | 6 | 4 | 4 | 6 | 5.00 | 1.00 |
 | e3 treatment | 6 | 6 | 6 | 6 | 6 | 6 | 6 | 6.00 | 0.00 |
 
-## E2: ceiling effect or rubric blind spot?
+## Set B — corrected run (report separated from artifact)
 
-Not a ceiling effect — control averages only 3.80/6.00 with raw scores
-{3,3,3,4,6} (one run at the rubric maximum, so headroom exists) — it is a
-rubric blind spot: the rubric scans the raw completion, and the treatment
-outputs embed the application_report, whose verbatim pack questions repeat
-the banned phrases (e.g. `shell=True` occurs in e2/treatment/run-1's report
-and a comment while its code is a safe `subprocess.run(["git","branch",branch])`
-list call), so the absent-criteria fail on self-description and both arms
-land on the identical 3.80 mean with overlapping distributions
-({3,3,3,4,6} vs {3,3,4,4,5}). The criterion breakdown confirms it:
-treatment satisfies no rubric criterion more often than control
-(no_shell_true 0/5 vs 1/5, no_command_interpolation 1/5 vs 2/5), so the
-0.00 delta is a measurement artefact of the fixed rubric, not evidence
-that the pack had no effect.
+| Task | Node under test | Control mean | Treatment mean | Delta |
+|---|---|---|---|---|
+| e1 | reliability.idempotency | 3.80 | 5.00 | 1.20 |
+| e2 | python.processes.subprocess-safety | 3.60 | 4.00 | 0.40 |
+| e3 | python.files.atomic-replacement | 5.60 | 6.00 | 0.40 |
+
+Raw scores (min/max/mean/stdev):
+
+| Task / arm | run-1 | run-2 | run-3 | run-4 | run-5 | min | max | mean | stdev |
+|---|---|---|---|---|---|---|---|---|---|
+| e1 control | 5 | 3 | 3 | 4 | 4 | 3 | 5 | 3.80 | 0.84 |
+| e1 treatment | 6 | 4 | 4 | 5 | 6 | 4 | 6 | 5.00 | 1.00 |
+| e2 control | 2 | 5 | 5 | 3 | 3 | 2 | 5 | 3.60 | 1.34 |
+| e2 treatment | 4 | 3 | 4 | 5 | 4 | 3 | 5 | 4.00 | 0.71 |
+| e3 control | 6 | 5 | 5 | 6 | 6 | 5 | 6 | 5.60 | 0.55 |
+| e3 treatment | 6 | 6 | 6 | 6 | 6 | 6 | 6 | 6.00 | 0.00 |
+
+## E2, stated plainly
+
+The corrected run shows a **small positive delta, not a null result**:
+e2 treatment {4,3,4,5,4} → 4.00 vs control {2,5,5,3,3} → 3.60, +0.40, with
+overlapping distributions — consistent with an effect smaller than the
+n=5 noise, not with no effect. The earlier write-up attributed the original
+0.00 to report-text contamination; re-scoring the original files with the
+report extracted changes **no** criterion on **any** run (verified
+criterion-by-criterion), so that attribution was wrong for Set A: the
+original deficit was driven by code comments (e.g. a comment reading
+"no shell=True" still matches the rubric's absent-pattern) and genuinely
+absent criteria. The report-contamination defect is nevertheless real as a
+contract issue — an artifact scored together with its own description breaks
+any scanner whose patterns the report's verbatim questions happen to match —
+and is documented as node `testing.evaluation-contamination`. The corrected
+harness is the valid protocol; Set A remains as the confounded evidence.
 
 ## Limitation
 
 One provider (deepseek-v4-flash, thinking disabled), n=5 per arm, three
-tasks, one rubric per task. These results are a **signal, not proof**: the
-sample is small, the rubric is a fixed string checklist with a documented
-blind spot (E2), and no cross-provider or cross-seed generalisation is
-claimed.
+tasks, one rubric per task, two independent run sets. These results are a
+**signal, not proof**: the sample is small, the rubric is a fixed string
+checklist whose absent-patterns also match code comments, and no
+cross-provider or cross-seed generalisation is claimed.
 
-## Run record
+## Run records
 
-- Provider: DeepSeek Flash via the DeepSeek API (OpenAI-compatible
-  chat/completions), model `deepseek-v4-flash`, endpoint
-  `https://api.deepseek.com/chat/completions`.
-- Adapter: `experiments/provider_chat_completions.py` (generic, vendor-free),
-  invoked through `ENCYCLOPEDIA_RUNNER`. Thinking was disabled
-  (`thinking: {type: disabled}`): with reasoning enabled the model exhausts
-  the token budget on `reasoning_content` and returns an empty `content`, so
-  every run uses the same disabled-thinking configuration.
-- Date: 2026-08-01. 30/30 runs recorded in
-  `experiments/fixtures/manifest.jsonl` (per-run model command and date).
-- Rubrics: `experiments/rubrics/`, fixed before the runs; score = count of
-  satisfied boolean criteria.
-- Application Report check (treatment arm): 14 of 15 outputs contained an
-  `application_report`; 12 were extractable as YAML and 8 fully verified
-  with `encyclopedia verify-report <report> --pack experiments/packs/<task>.yaml`.
-  The others failed verification with report-format errors (altered or
-  omitted questions, duplicated dispositions, unparseable YAML) — recorded
-  here as evidence about agent behaviour, not about the harness.
+Set A (original): DeepSeek Flash via the DeepSeek API, model
+`deepseek-v4-flash`, thinking disabled; 2026-08-01;
+`experiments/fixtures/manifest.jsonl` (30 runs).
 
-How results are produced: `runner.py run` records each completion and a
-manifest entry; `runner.py summarize <fixtures-dir> --out experiments/RESULTS.md`
-regenerates this table from the manifest. Treatment-arm reports can be
-verified with `encyclopedia verify-report <report> --pack experiments/packs/<task>.yaml`.
+Set B (corrected): same provider and configuration; treatment prompts gained
+the `---APPLICATION_REPORT---` delimiter instruction; 2026-08-01;
+`experiments/fixtures-corrected/manifest.jsonl` (30 runs). 15/15 treatment
+outputs used the delimiter; 7 were extractable as YAML and 6 verified with
+`encyclopedia verify-report <report> --pack experiments/packs/<task>.yaml`
+(the rest failed with report-format errors — altered/omitted questions,
+unparseable YAML — recorded as evidence about agent behaviour).
+
+Rubrics: `experiments/rubrics/`, fixed before the runs; score = count of
+satisfied boolean criteria. `runner.py score` applies `extract_artifact`
+before scoring; `runner.py summarize <fixtures-dir>` regenerates the per-set
+table from a manifest.

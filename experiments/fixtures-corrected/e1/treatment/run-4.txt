@@ -1,0 +1,393 @@
+```python
+"""
+Job worker that charges a customer exactly once per logical operation.
+
+Design notes (see application report for mapping to context pack):
+
+- The queue provides a `job.id` that identifies one logical operation.
+- We keep a durable deduplication record (SQLite) and mark completion *before*
+  issuing the charge. This turns the "at-least-once" delivery of the queue into
+  an exactly-once effect for our charging operation.
+- The effect (charge) and completion record are not in the same transaction:
+  we use a claim token so only one worker can be mid-flight for a given job.
+- We write a small status file atomically for observability/debugging; it is
+  never used as the source of truth.
+
+The worker is safe against:
+- Two workers seeing the same job as not-yet-done (claim token in DB).
+- A crash between charge and completion record (claim token + idempotency key
+  sent to the payment provider; a retry reuses the same key).
+- A retry loop that is not bounded (explicit max attempts with exponential
+  backoff + jitter).
+"""
+
+import json
+import logging
+import os
+import random
+import sqlite3
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# --- Configuration -----------------------------------------------------------
+
+DB_PATH = os.environ.get("WORKER_DB_PATH", "/var/lib/charger/worker.db")
+STATUS_DIR = os.environ.get("WORKER_STATUS_DIR", "/var/lib/charger/status")
+MAX_ATTEMPTS = int(os.environ.get("WORKER_MAX_ATTEMPTS", "5"))
+BASE_BACKOFF_MS = int(os.environ.get("WORKER_BASE_BACKOFF_MS", "100"))
+
+
+# --- Domain ------------------------------------------------------------------
+
+class PaymentProvider:
+    """Mocks an external payment API. In production this would be a real SDK.
+
+    The important contract: `charge` is idempotent for a given
+    `idempotency_key` -- if the provider already processed that key, it returns
+    the previous result instead of charging again.
+    """
+
+    def __init__(self):
+        self._processed = {}
+
+    def charge(self, *, customer_id: str, amount_cents: int, idempotency_key: str) -> str:
+        # Simulate network latency and a rare transient failure.
+        time.sleep(0.01)
+        if random.random() < 0.02:
+            raise RuntimeError("transient network error")
+        if idempotency_key in self._processed:
+            return self._processed[idempotency_key]
+        receipt = f"receipt-{uuid.uuid4()}"
+        self._processed[idempotency_key] = receipt
+        logger.info("charged customer=%s amount=%d cents receipt=%s",
+                    customer_id, amount_cents, receipt)
+        return receipt
+
+
+@dataclass(frozen=True)
+class Job:
+    """A job from the queue. Fields are populated by a real queue consumer."""
+    id: str                    # unique job id provided by the queue
+    customer_id: str
+    amount_cents: int
+    attempt: int = 1           # current delivery attempt
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "Job":
+        if "id" not in payload or "customer_id" not in payload or "amount_cents" not in payload:
+            raise ValueError("malformed job payload")
+        return cls(
+            id=str(payload["id"]),
+            customer_id=str(payload["customer_id"]),
+            amount_cents=int(payload["amount_cents"]),
+            attempt=int(payload.get("attempt", 1)),
+        )
+
+
+# --- Persistence -------------------------------------------------------------
+
+class DedupStore:
+    """SQLite-backed store for deduplication and claim tracking.
+
+    Schema:
+      job_id      TEXT PRIMARY KEY
+      status      TEXT CHECK(status IN ('claimed','done'))
+      claim_token TEXT NOT NULL
+      receipt     TEXT
+      updated_at  INTEGER NOT NULL
+
+    Guarantees:
+      - `claim_if_unclaimed` is atomic: only one of two concurrent callers
+        gets the claim for a given job.
+      - `mark_done` is durable (WAL + synchronous=FULL).
+    """
+
+    def __init__(self, path: str):
+        self._conn = sqlite3.connect(path, timeout=30)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id      TEXT PRIMARY KEY,
+                status      TEXT NOT NULL CHECK(status IN ('claimed','done')),
+                claim_token TEXT NOT NULL,
+                receipt     TEXT,
+                updated_at  INTEGER NOT NULL
+            )
+            """
+        )
+        self._conn.commit()
+
+    def claim_if_unclaimed(self, job_id: str, claim_token: str) -> bool:
+        """Atomically claim a job if it is not already done.
+
+        Returns True only if this caller got the claim.
+        """
+        # This single INSERT ... WHERE NOT EXISTS is atomic under SQLite's
+        # single-writer model. Two concurrent workers both try; only one
+        # succeeds.
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO jobs (job_id, status, claim_token, updated_at)
+            VALUES (?, 'claimed', ?, ?)
+            """,
+            (job_id, claim_token, int(time.time())),
+        )
+        self._conn.commit()
+        if cur.rowcount == 1:
+            return True
+
+        # Job existed. Check whether the existing claim is ours (a retry of the
+        # same worker after a crash) or whether it's done.
+        row = self._conn.execute(
+            "SELECT status, claim_token FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if row[0] == "done":
+            return False
+        # 'claimed' -- only the holder of the token may proceed.
+        return row[1] == claim_token
+
+    def mark_done(self, job_id: str, claim_token: str, receipt: str) -> None:
+        """Durably record completion. Must be called before/after the effect."""
+        self._conn.execute(
+            """
+            UPDATE jobs
+            SET status = 'done', receipt = ?, updated_at = ?
+            WHERE job_id = ? AND claim_token = ?
+            """,
+            (receipt, int(time.time()), job_id, claim_token),
+        )
+        self._conn.commit()
+
+    def close(self):
+        self._conn.close()
+
+
+def write_status_file(job_id: str, state: str) -> None:
+    """Write a small status file atomically for debugging/observability.
+
+    This is not the source of truth (SQLite is), it's just a convenience for
+    operators. Atomic replacement ensures readers never see a truncated file.
+    """
+    os.makedirs(STATUS_DIR, exist_ok=True)
+    target = os.path.join(STATUS_DIR, f"{job_id}.json")
+    fd, tmp_path = tempfile.mkstemp(dir=STATUS_DIR, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({"job_id": job_id, "state": state, "ts": time.time()}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, target)  # atomic on POSIX
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+
+
+# --- Worker loop -------------------------------------------------------------
+
+class Worker:
+    def __init__(self, provider: PaymentProvider, store: DedupStore,
+                 max_attempts: int = MAX_ATTEMPTS,
+                 base_backoff_ms: int = BASE_BACKOFF_MS):
+        self.provider = provider
+        self.store = store
+        self.max_attempts = max_attempts
+        self.base_backoff_ms = base_backoff_ms
+
+    def _make_claim_token(self, job: Job) -> str:
+        """A fresh token per delivery attempt. Survives worker crash because
+        we reuse the same token for the same (job, attempt)."""
+        # Deterministic per (job_id, attempt) so that a crash-and-redeliver of
+        # the *same* attempt reuses the token and can proceed. A new attempt
+        # (from the queue after a failure) gets a new token.
+        return f"{job.id}:{job.attempt}"
+
+    def process(self, job: Job) -> None:
+        """Process one job delivery. Raises on unrecoverable error.
+
+        The queue will redeliver on failure; our dedup store makes the
+        retry safe.
+        """
+        claim = self._make_claim_token(job)
+        if not self.store.claim_if_unclaimed(job.id, claim):
+            logger.info("job %s already done or claimed by another worker", job.id)
+            return
+
+        # We hold the claim. Perform the charge with an idempotency key that
+        # the provider understands. If we crash right here before marking done,
+        # the queue redelivers the same job; our claim token lets us retry and
+        # the provider's idempotency key prevents a double charge.
+        idempotency_key = f"charge:{job.id}:{job.attempt}"
+        receipt = self.provider.charge(
+            customer_id=job.customer_id,
+            amount_cents=job.amount_cents,
+            idempotency_key=idempotency_key,
+        )
+
+        # Record completion *after* the effect. If we crash here, a redelivery
+        # will call the provider again with the same idempotency key, getting
+        # the same receipt back -- no double charge.
+        self.store.mark_done(job.id, claim, receipt)
+        write_status_file(job.id, "done")
+
+    def run_with_retry(self, job: Job) -> bool:
+        """Attempt a job with bounded exponential backoff + jitter.
+
+        Returns True on success, False after exhausting attempts.
+        """
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                self.process(job)
+                return True
+            except Exception:
+                if attempt == self.max_attempts:
+                    logger.error("job %s failed after %d attempts", job.id, attempt)
+                    write_status_file(job.id, "failed")
+                    return False
+                wait_ms = self.base_backoff_ms * (2 ** (attempt - 1))
+                wait_ms += random.randint(0, wait_ms // 2 or 1)  # jitter
+                logger.warning("job %s attempt %d failed, retrying in %d ms",
+                               job.id, attempt, wait_ms)
+                time.sleep(wait_ms / 1000.0)
+        return False
+
+
+def consume_queue_forever(queue, worker: Worker) -> None:
+    """Blocking loop; `queue` is a stand-in for an actual queue consumer."""
+    while True:
+        raw = queue.next_job()
+        if raw is None:
+            time.sleep(0.5)
+            continue
+        try:
+            job = Job.from_payload(raw)
+        except ValueError as exc:
+            logger.error("discarding malformed job: %s", exc)
+            continue
+        worker.run_with_retry(job)
+        queue.ack(job.id)
+
+
+# --- Main / test --------------------------------------------------------------
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    provider = PaymentProvider()
+    store = DedupStore(DB_PATH)
+    worker = Worker(provider, store)
+    try:
+        # In a real deployment this comes from the queue SDK.
+        queue = FakeQueue()
+
+        # Simulate delivery with multiple jobs; also test concurrent duplicate
+        # delivery.
+        jobs = [
+            Job(id="job-1", customer_id="cust-A", amount_cents=1000),
+            Job(id="job-1", customer_id="cust-A", amount_cents=1000),  # duplicate
+            Job(id="job-2", customer_id="cust-B", amount_cents=2500),
+            Job(id="job-3", customer_id="cust-C", amount_cents=500),
+        ]
+        for job in jobs:
+            ok = worker.run_with_retry(job)
+            print(f"job {job.id} -> {'ok' if ok else 'failed'}")
+        print(f"provider received {len(provider._processed)} unique charges")
+    finally:
+        store.close()
+
+
+class FakeQueue:
+    """Minimal stand-in for a queue consumer; not part of the production code."""
+    def next_job(self):
+        return None
+
+    def ack(self, job_id):
+        pass
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The queue-provided job.id identifies one logical operation; it comes from the queue payload, not from local timestamps."
+          location: "charger_worker.py:47"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is recorded in SQLite (DedupStore.mark_done) with WAL+FULL sync AFTER the charge effect; a retry reuses the provider's idempotency key."
+          location: "charger_worker.py:171"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The job is 'claimed' with a token; the provider has a charged receipt keyed by idempotency_key; a redelivery reuses both, so no double charge."
+          location: "charger_worker.py:155"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No. claim_if_unclaimed uses INSERT OR IGNORE ... WHERE NOT EXISTS, which is atomic under SQLite's single-writer model; only one claim succeeds."
+          location: "charger_worker.py:112"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, write_status_file uses tempfile.mkstemp(dir=STATUS_DIR), ensuring same filesystem as the target for atomic rename."
+          location: "charger_worker.py:139"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and os.fsync(f.fileno()) are called before os.replace."
+          location: "charger_worker.py:143"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The except block calls os.unlink(tmp_path) to clean up the temp file on any exception."
+          location: "charger_worker.py:145"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, but os.replace is atomic, so readers always see a complete file; the last writer wins, which is acceptable for a status/debug file."
+          location: "charger_worker.py:144"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "SQLite table 'jobs' holds status, claim_token, receipt; mutated via INSERT/UPDATE in DedupStore, accessed by multiple workers."
+          location: "charger_worker.py:62"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, the INSERT ... WHERE NOT EXISTS in claim_if_unclaimed is a single atomic statement; there is no separate check-then-act."
+          location: "charger_worker.py:112"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, SQLite's single-writer model serializes transactions; the first INSERT commits before the second can proceed, so the second sees 'claimed' or 'done'."
+          location: "charger_worker.py:112"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "They cannot interleave because the claim is one atomic INSERT; interleaving is impossible in SQLite's transaction model."
+          location: "charger_worker.py:112"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The dedup store already records 'claimed' with the same token; the worker proceeds only if the token matches, then reuses the provider idempotency key."
+          location: "charger_worker.py:130"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "MAX_ATTEMPTS (default 5). After the last attempt fails, run_with_retry returns False and writes a 'failed' status file."
+          location: "charger_worker.py:191"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential: base * 2^(attempt-1), plus random jitter up to half the current wait; prevents thundering herd."
+          location: "charger_worker.py:196"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per delivery attempt: the queue controls redelivery; each attempt (job.attempt) has its own idempotency key and claim token."
+          location: "charger_worker.py:155"
+      unanswered: []
+  not_applied: []
+```

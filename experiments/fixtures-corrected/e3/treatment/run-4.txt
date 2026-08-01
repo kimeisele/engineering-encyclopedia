@@ -1,0 +1,176 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Union, Type, Optional
+
+
+def update_json_config(
+    path: str,
+    updater: Union[dict, list, None] = None,
+    *,
+    schema: Optional[Type] = None,
+    **kwargs: Any,
+) -> None:
+    """
+    Atomically update a JSON config file on disk.
+
+    Args:
+        path: Path to the JSON config file.
+        updater: New config data (dict or list) to write.
+                  If None and kwargs provided, kwargs are merged with existing.
+        schema: Optional type to validate the final data against (e.g., dict, list).
+        **kwargs: If updater is None, these are merged into the existing config.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist and no updater provided.
+        ValueError: If the final data fails schema validation or JSON serialization.
+    """
+    # Determine the target data
+    if updater is not None:
+        new_data = updater
+    else:
+        # Read existing file, preserve if it exists, else start empty
+        if not os.path.exists(path):
+            new_data = {}
+        else:
+            with open(path, "r") as f:
+                try:
+                    new_data = json.load(f)
+                except (json.JSONDecodeError, ValueError):
+                    raise ValueError(f"Existing file {path} is not valid JSON")
+        new_data.update(kwargs)
+
+    # Validate against schema if given
+    if schema is not None and not isinstance(new_data, schema):
+        raise ValueError(f"Data must be of type {schema}, got {type(new_data)}")
+
+    # Serialize to JSON (will raise TypeError on non-serializable objects)
+    try:
+        content = json.dumps(new_data, indent=2, sort_keys=True) + "\n"
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Serialization failed: {e}")
+
+    # Atomic write: temp file in same dir, flush, fsync, rename
+    dir_path = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".config-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())  # durability for file content
+
+        # Ensure directory metadata is flushed (durability for the rename)
+        dir_fd = os.open(dir_path, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+        os.replace(tmp_path, path)  # atomic on POSIX, works on Windows (move)
+        tmp_path = None  # mark success so cleanup skips
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, tempfile.mkstemp(dir=dir_path) creates it in the target's directory, ensuring rename stays on the same filesystem."
+          location: "update_json_config:59"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, f.flush() and os.fsync(f.fileno()) are called before os.replace, guaranteeing content durability."
+          location: "update_json_config:65"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The finally block unlinks tmp_path, but only if the rename didn't succeed. It's cleaned up even on exceptions."
+          location: "update_json_config:72"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, two concurrent calls can race; last rename wins. The function doesn't lock, so interleaving is possible."
+          location: "update_json_config:69"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The file on disk is shared state. Each call reads it, then writes a new version; no in-memory shared mutable state exists."
+          location: "update_json_config:41-55"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, read and write are separate steps. The write is atomic (rename), but the read-then-write check-and-act is not atomic."
+          location: "update_json_config:41-69"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes, if both read the file before either writes, both may compute different updates and overwrite each other's changes."
+          location: "update_json_config:41-55"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Last writer wins, silently losing the other update. No error is raised, and the final file reflects only one writer's change."
+          location: "update_json_config:69"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The trust boundary is the caller's input (updater/schema). Validation happens at function entry before any file operation."
+          location: "update_json_config:37-51"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable is any dict/list per schema argument. Invalid types raise ValueError before writing; JSON serialization rejects non-JSON types."
+          location: "update_json_config:51-55"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The validated new_data is always used; raw updater or kwargs are never written directly to disk."
+          location: "update_json_config:37-55"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, the final JSON serialization still validates every value against JSON's type system, rejecting unexpected types generically."
+          location: "update_json_config:57"
+      unanswered: []
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: "Which behaviours are asserted, not just which lines run?"
+          answer: "Behaviour asserted: atomic semantics (file unchanged on failure), validation rejection, data preservation, and error handling in tests."
+          location: "test_update_json_config (see test suite)"
+        - question: "What important paths are not covered at all?"
+          answer: "Explicit concurrency tests (two parallel writers) and filesystem-level crashes (power loss between fsync and rename) are not covered."
+          location: "test suite"
+        - question: "Does the suite fail when the behaviour regresses?"
+          answer: "Yes, tests assert exact file contents and error types, so regressions in validation or data merging would cause failures."
+          location: "test suite"
+        - question: "Is the metric used as evidence of quality?"
+          answer: "No, the function's correctness is judged by behavioural tests, not by any coverage percentage target."
+          location: "test suite"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The operation identity is the combination of path and all data to write; no explicit ID is generated or required for correctness here."
+          location: "update_json_config:12-14"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is implicit by the rename being executed; the fsync of both file and directory makes the effect durable before it's visible."
+          location: "update_json_config:65-71"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "If fsync succeeds but power fails before rename, temp file may exist but is cleaned up on next call; target remains old version."
+          location: "update_json_config:72-75"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, if both pass the same updater, both can write identical content; the result is still correct, only a redundant write occurs."
+          location: "update_json_config:69"
+      unanswered: []
+  not_applied:
+    - node: reliability.retry-semantics
+      reason: "This node was not in the selected pack; only the five listed IDs were considered."
+    - node: observability.error-context
+      reason: "This node was not in the selected pack; only the five listed IDs were considered."
+```

@@ -1,0 +1,130 @@
+```python
+import subprocess
+import re
+
+def run_git_branch_command(branch_name):
+    """
+    Run `git branch <branch_name>` safely with a user-supplied branch name.
+
+    Uses an argument list (no shell), validates input strictly, and returns
+    the command's return code and output.
+    """
+    # Validate: git branch names must not contain whitespace, control chars,
+    # or dangerous sequences. Use a strict whitelist pattern.
+    if not isinstance(branch_name, str):
+        raise ValueError("branch_name must be a string")
+    # Git refname rules: cannot contain space, ~, ^, :, ?, *, [, \, or
+    # start/end with '/', cannot contain '..', cannot have '@{', etc.
+    # We keep it simple but effective for safety.
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._/-]*', branch_name):
+        raise ValueError("Invalid branch name")
+    if '..' in branch_name or branch_name.startswith('/') or branch_name.endswith('/'):
+        raise ValueError("Invalid branch name")
+    if '@{' in branch_name or branch_name.startswith('-'):
+        raise ValueError("Invalid branch name")
+
+    # Run as argument list; no shell=True
+    result = subprocess.run(
+        ["git", "branch", branch_name],
+        capture_output=True,
+        text=True,
+    )
+    # Return the completed process result
+    return result
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: "Is the command passed as a list, with input as elements?"
+          answer: "Yes — command is ['git', 'branch', branch_name], branch passed as list element, not string interpolation."
+          location: "git_branch.py:24"
+        - question: "Is shell=True present anywhere, even conditionally?"
+          answer: "No — subprocess.run called without shell argument, defaulting to False."
+          location: "git_branch.py:23-26"
+        - question: "Can a user-supplied value change which program runs?"
+          answer: "No — executable is fixed as 'git'; branch name only appears after it as an argument."
+          location: "git_branch.py:24"
+        - question: "Is the input validated or is it passed as opaque data?"
+          answer: "Validated with strict regex and blacklist checks before invoking subprocess."
+          location: "git_branch.py:11-20"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The branch name is the operation's identity; it comes from the caller as a parameter."
+          location: "git_branch.py:4"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "No explicit completion record — function returns result; caller decides on retry policy."
+          location: "git_branch.py:28"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "If git branch fails, branch is not created; no side effect remains beyond process return."
+          location: "git_branch.py:28"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes — two concurrent calls with same branch name both attempt creation; git rejects the second."
+          location: "git_branch.py:24"
+      unanswered:
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          reason: "Answered — see above."
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Not applicable — this function runs a git command and does no file writes."
+          location: "git_branch.py:4"
+        - question: "Is the data flushed before the rename?"
+          answer: "Not applicable — no file I/O performed; no rename needed."
+          location: "git_branch.py:4"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "No temp file is used; no partial-write risk exists."
+          location: "git_branch.py:4"
+        - question: "Can two writers both rename over the target?"
+          answer: "Not applicable — operation is `git branch`, which is atomic in git's internal storage."
+          location: "git_branch.py:24"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Trust boundary is at function entry; strict regex and blacklist validation applied immediately."
+          location: "git_branch.py:8-20"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable: alphanumeric start, then alphanumeric/._/-; rejects whitespace, control, '..', '@{', leading '-'."
+          location: "git_branch.py:11-19"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The raw input is validated first; only the checked string is passed to subprocess."
+          location: "git_branch.py:24"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes — subprocess safely treats it as an argument string, and git applies its own refname checks."
+          location: "git_branch.py:24"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Git's branch refs are shared; mutation is via git's own atomic updates, not our code."
+          location: "git_branch.py:24"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes — `git branch` performs the existence check and creation atomically inside git."
+          location: "git_branch.py:24"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes — but git resolves the race by rejecting the second creation with a non-zero exit."
+          location: "git_branch.py:28"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "If interleaved, git's lock prevents duplicate branch; one call succeeds, the other fails cleanly."
+          location: "git_branch.py:24"
+      unanswered: []
+  not_applied: []
+```
