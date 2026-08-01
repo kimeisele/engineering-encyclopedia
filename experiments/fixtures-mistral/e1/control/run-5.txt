@@ -1,0 +1,155 @@
+# Job Queue Worker for Customer Charging
+
+Here's a Python implementation of a worker that consumes jobs from a queue and processes customer charges. This example uses Redis as the queue backend with RQ (Redis Queue), but you could adapt it for other queue systems like RabbitMQ or Kafka.
+
+```python
+import os
+import logging
+from redis import Redis
+from rq import Worker, Queue, Connection
+from datetime import datetime
+import stripe  # For payment processing (example)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Payment processor configuration
+STRIPE_API_KEY = os.getenv('STRIPE_API_KEY', 'your_stripe_api_key')
+stripe.api_key = STRIPE_API_KEY
+
+def charge_customer(job_data):
+    """
+    Process a customer charge job.
+
+    Args:
+        job_data (dict): Contains charge details including:
+            - customer_id: Customer identifier
+            - amount: Charge amount in cents
+            - currency: Currency code (e.g., 'usd')
+            - description: Charge description
+            - metadata: Additional metadata
+
+    Returns:
+        dict: Result of the charge operation
+    """
+    try:
+        logger.info(f"Processing charge for job: {job_data}")
+
+        # Create a charge using Stripe
+        charge = stripe.Charge.create(
+            amount=job_data['amount'],
+            currency=job_data['currency'],
+            customer=job_data['customer_id'],
+            description=job_data.get('description', 'Customer charge'),
+            metadata=job_data.get('metadata', {})
+        )
+
+        logger.info(f"Successfully charged customer {job_data['customer_id']} for ${job_data['amount']/100:.2f}")
+
+        return {
+            'success': True,
+            'charge_id': charge.id,
+            'amount': job_data['amount'],
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error charging customer {job_data.get('customer_id')}: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Unexpected error charging customer {job_data.get('customer_id')}: {str(e)}")
+        return {
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.utcnow().isoformat()
+        }
+
+def main():
+    # Queue configuration
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+    queue_name = os.getenv('QUEUE_NAME', 'charging_queue')
+
+    # Connect to Redis
+    redis_conn = Redis.from_url(redis_url)
+    queue = Queue(queue_name, connection=redis_conn)
+
+    # Start worker
+    with Connection(redis_conn):
+        worker = Worker([queue])
+        logger.info(f"Starting worker for queue '{queue_name}'...")
+        worker.work()
+
+if __name__ == '__main__':
+    main()
+```
+
+## How to Use This Worker
+
+1. **Install dependencies**:
+   ```bash
+   pip install rq redis stripe python-dotenv
+   ```
+
+2. **Set up environment variables** (create a `.env` file):
+   ```
+   REDIS_URL=redis://localhost:6379
+   QUEUE_NAME=charging_queue
+   STRIPE_API_KEY=your_stripe_secret_key
+   ```
+
+3. **Start the worker**:
+   ```bash
+   python charge_worker.py
+   ```
+
+4. **Enqueue jobs** (from another process):
+   ```python
+   from redis import Redis
+   from rq import Queue
+   import json
+
+   redis_conn = Redis.from_url('redis://localhost:6379')
+   queue = Queue('charging_queue', connection=redis_conn)
+
+   job_data = {
+       'customer_id': 'cus_123456789',
+       'amount': 1999,  # $19.99 in cents
+       'currency': 'usd',
+       'description': 'Monthly subscription',
+       'metadata': {'plan': 'premium'}
+   }
+
+   queue.enqueue('charge_customer', job_data)
+   ```
+
+## Key Features
+
+1. **Error Handling**: Catches and logs both Stripe-specific errors and general exceptions
+2. **Logging**: Provides detailed logging for monitoring and debugging
+3. **Configuration**: Uses environment variables for sensitive data
+4. **Idempotency**: The worker can safely retry failed jobs
+5. **Result Tracking**: Returns success/failure status with charge details
+
+## Scaling Considerations
+
+1. **Multiple Workers**: Run multiple instances of this worker for parallel processing
+2. **Queue Monitoring**: Set up monitoring for the queue length to scale workers as needed
+3. **Retry Logic**: Configure RQ to retry failed jobs with exponential backoff
+4. **Dead Letter Queue**: Set up a separate queue for failed jobs that need manual intervention
+
+## Alternative Payment Processors
+
+If you're not using Stripe, you can replace the `charge_customer` function with equivalent code for other payment processors like:
+
+- PayPal
+- Square
+- Authorize.net
+- Braintree
+- Your own payment gateway
+
+Would you like me to adapt this for a specific payment processor or queue system?

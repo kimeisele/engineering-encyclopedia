@@ -1,0 +1,113 @@
+# Function to Update a JSON Config File on Disk
+
+Here's a Python function that safely updates a JSON configuration file on disk:
+
+```python
+import json
+import os
+from typing import Any, Dict
+
+def update_json_config(file_path: str, updates: Dict[str, Any]) -> bool:
+    """
+    Safely updates a JSON configuration file with new values.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update in the config
+
+    Returns:
+        bool: True if update was successful, False otherwise
+    """
+    try:
+        # Read existing config
+        with open(file_path, 'r') as f:
+            config = json.load(f)
+
+        # Update with new values
+        config.update(updates)
+
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return True
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {file_path}")
+        return False
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON in config file at {file_path}")
+        return False
+    except Exception as e:
+        print(f"Error updating config file: {str(e)}")
+        return False
+```
+
+## Usage Example
+
+```python
+# Example usage
+config_updates = {
+    "timeout": 30,
+    "debug_mode": True,
+    "max_retries": 5
+}
+
+success = update_json_config("config.json", config_updates)
+if success:
+    print("Config updated successfully!")
+else:
+    print("Failed to update config.")
+```
+
+## Features
+
+1. **Safe file handling**: Uses context managers (`with` statements) for proper file handling
+2. **Error handling**: Catches common file and JSON parsing errors
+3. **Type hints**: Includes type annotations for better code clarity
+4. **Pretty printing**: Maintains JSON formatting with indentation
+5. **Return status**: Returns boolean indicating success/failure
+
+## Alternative Version (More Robust)
+
+If you need more robust handling (like creating the file if it doesn't exist):
+
+```python
+import json
+import os
+from typing import Any, Dict
+
+def update_json_config(file_path: str, updates: Dict[str, Any], default_config: Dict[str, Any] = None) -> bool:
+    """
+    Safely updates a JSON configuration file with new values, creating it if needed.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update in the config
+        default_config: Default config to use if file doesn't exist
+
+    Returns:
+        bool: True if update was successful, False otherwise
+    """
+    try:
+        # Read existing config or create new one
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                config = json.load(f)
+        else:
+            config = default_config if default_config is not None else {}
+
+        # Update with new values
+        config.update(updates)
+
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return True
+    except Exception as e:
+        print(f"Error updating config file: {str(e)}")
+        return False
+```

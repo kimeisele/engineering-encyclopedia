@@ -1,0 +1,207 @@
+# Worker for Processing Payment Jobs
+
+Here's a Python implementation of a worker that consumes jobs from a queue and processes customer payments. This example uses Redis as the queue backend, but you could adapt it for other message brokers like RabbitMQ or Amazon SQS.
+
+```python
+import redis
+import json
+import logging
+from time import sleep
+from datetime import datetime
+import random
+import uuid
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('payment_worker')
+
+class PaymentWorker:
+    def __init__(self, redis_host='localhost', redis_port=6379, queue_name='payment_queue'):
+        """
+        Initialize the payment worker with Redis connection details.
+
+        Args:
+            redis_host (str): Redis server host
+            redis_port (int): Redis server port
+            queue_name (str): Name of the queue to consume from
+        """
+        self.redis = redis.Redis(host=redis_host, port=redis_port)
+        self.queue_name = queue_name
+        self.running = False
+
+    def process_payment(self, payment_data):
+        """
+        Process a single payment job.
+
+        Args:
+            payment_data (dict): Payment information including:
+                - customer_id: ID of the customer
+                - amount: Payment amount
+                - currency: Currency code (e.g., 'USD')
+                - payment_method: Credit card, bank transfer, etc.
+                - reference_id: Unique reference for the payment
+
+        Returns:
+            dict: Result of the payment processing
+        """
+        try:
+            # Simulate payment processing delay (0.5-2 seconds)
+            sleep(random.uniform(0.5, 2.0))
+
+            # In a real implementation, this would interact with a payment gateway
+            # For this example, we'll simulate a successful payment 95% of the time
+            success = random.random() < 0.95
+
+            if success:
+                result = {
+                    'status': 'success',
+                    'transaction_id': str(uuid.uuid4()),
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'amount': payment_data['amount'],
+                    'currency': payment_data['currency']
+                }
+            else:
+                result = {
+                    'status': 'failed',
+                    'error': 'Payment gateway declined the transaction',
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+
+            logger.info(f"Processed payment for customer {payment_data['customer_id']}: {result['status']}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Error processing payment: {str(e)}")
+            return {
+                'status': 'error',
+                'error': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+    def start_working(self, batch_size=10, poll_interval=1):
+        """
+        Start consuming and processing payment jobs from the queue.
+
+        Args:
+            batch_size (int): Number of jobs to process in each batch
+            poll_interval (int): Seconds to wait between polling for new jobs
+        """
+        self.running = True
+        logger.info(f"Payment worker started. Listening to queue: {self.queue_name}")
+
+        while self.running:
+            try:
+                # Blocking pop to get jobs from the queue
+                # Using a timeout to allow periodic checks of self.running
+                jobs = []
+                for _ in range(batch_size):
+                    job = self.redis.blpop(
+                        self.queue_name,
+                        timeout=poll_interval
+                    )
+                    if job:
+                        jobs.append(job)
+                    else:
+                        break
+
+                if not jobs:
+                    continue
+
+                for job in jobs:
+                    try:
+                        # Parse the job data
+                        _, job_data = job
+                        payment_data = json.loads(job_data)
+
+                        logger.info(f"Processing payment job: {payment_data.get('reference_id', 'unknown')}")
+
+                        # Process the payment
+                        result = self.process_payment(payment_data)
+
+                        # In a real system, you would:
+                        # 1. Store the result in a database
+                        # 2. Send a confirmation to the customer
+                        # 3. Update the order status
+                        # For this example, we'll just log it
+
+                        logger.info(f"Payment result: {result}")
+
+                    except json.JSONDecodeError:
+                        logger.error("Invalid JSON in queue message")
+                    except Exception as e:
+                        logger.error(f"Error processing job: {str(e)}")
+
+            except redis.RedisError as e:
+                logger.error(f"Redis error: {str(e)}")
+                sleep(poll_interval)  # Wait before retrying
+            except Exception as e:
+                logger.error(f"Unexpected error: {str(e)}")
+                sleep(poll_interval)
+
+    def stop_working(self):
+        """Gracefully stop the worker."""
+        self.running = False
+        logger.info("Payment worker stopped")
+
+# Example usage
+if __name__ == "__main__":
+    worker = PaymentWorker()
+
+    try:
+        # Start the worker in a separate thread in a real application
+        worker.start_working()
+    except KeyboardInterrupt:
+        worker.stop_working()
+```
+
+## Key Features:
+
+1. **Queue Consumption**: Uses Redis' blocking list operations to efficiently consume jobs
+2. **Payment Processing**: Simulates charging a customer through a payment gateway
+3. **Error Handling**: Robust error handling for both Redis operations and payment processing
+4. **Logging**: Comprehensive logging for monitoring and debugging
+5. **Graceful Shutdown**: Proper handling of shutdown signals
+
+## How to Use:
+
+1. **Install dependencies**:
+   ```bash
+   pip install redis
+   ```
+
+2. **Start Redis server** (if not already running)
+
+3. **Run the worker**:
+   ```bash
+   python payment_worker.py
+   ```
+
+4. **Send jobs to the queue** (from another process):
+   ```python
+   import redis
+   import json
+
+   r = redis.Redis()
+   payment_job = {
+       'customer_id': 'cust_12345',
+       'amount': 99.99,
+       'currency': 'USD',
+       'payment_method': 'credit_card',
+       'reference_id': 'order_67890'
+   }
+   r.rpush('payment_queue', json.dumps(payment_job))
+   ```
+
+## Production Considerations:
+
+1. **Scaling**: Run multiple worker instances for parallel processing
+2. **Persistence**: Store payment results in a database
+3. **Retry Logic**: Implement retry for failed payments
+4. **Monitoring**: Add metrics collection (e.g., Prometheus)
+5. **Security**: Secure Redis connection and payment data
+6. **Configuration**: Use environment variables for configuration
+
+Would you like me to modify any part of this implementation or add specific features?

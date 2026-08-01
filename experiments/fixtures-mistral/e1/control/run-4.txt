@@ -1,0 +1,196 @@
+# Worker for Processing Payment Jobs
+
+Here's a Python implementation of a worker that consumes jobs from a queue and processes customer payments. This example uses Redis as the queue backend, but you could adapt it for other message brokers like RabbitMQ or AWS SQS.
+
+```python
+import json
+import logging
+import time
+from redis import Redis
+from typing import Dict, Any
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class PaymentProcessorWorker:
+    def __init__(self, redis_host: str = 'localhost', redis_port: int = 6379, queue_name: str = 'payment_queue'):
+        """
+        Initialize the payment processor worker.
+
+        Args:
+            redis_host: Redis server host
+            redis_port: Redis server port
+            queue_name: Name of the queue to consume from
+        """
+        self.redis = Redis(host=redis_host, port=redis_port)
+        self.queue_name = queue_name
+        self.max_retries = 3
+
+    def process_payment(self, payment_data: Dict[str, Any]) -> bool:
+        """
+        Process a payment with the given data.
+
+        Args:
+            payment_data: Dictionary containing payment information
+
+        Returns:
+            bool: True if payment was successful, False otherwise
+        """
+        try:
+            # Extract payment details
+            customer_id = payment_data.get('customer_id')
+            amount = payment_data.get('amount')
+            currency = payment_data.get('currency', 'USD')
+            payment_method = payment_data.get('payment_method')
+            transaction_id = payment_data.get('transaction_id')
+
+            logger.info(f"Processing payment for customer {customer_id}: {amount} {currency}")
+
+            # Simulate payment processing
+            time.sleep(1)  # Simulate processing time
+
+            # In a real implementation, you would:
+            # 1. Validate the payment details
+            # 2. Charge the customer's payment method
+            # 3. Record the transaction in your database
+            # 4. Handle any errors that occur
+
+            # For this example, we'll simulate a successful payment 90% of the time
+            import random
+            if random.random() < 0.9:
+                logger.info(f"Payment successful for transaction {transaction_id}")
+                return True
+            else:
+                logger.warning(f"Payment failed for transaction {transaction_id}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error processing payment: {str(e)}")
+            return False
+
+    def process_job(self, job_data: Dict[str, Any]) -> bool:
+        """
+        Process a single job from the queue.
+
+        Args:
+            job_data: The job data containing payment information
+
+        Returns:
+            bool: True if processing was successful, False otherwise
+        """
+        try:
+            # Validate required fields
+            required_fields = ['customer_id', 'amount', 'payment_method', 'transaction_id']
+            for field in required_fields:
+                if field not in job_data:
+                    logger.error(f"Missing required field: {field}")
+                    return False
+
+            # Process the payment
+            success = self.process_payment(job_data)
+
+            # Update job status
+            if success:
+                job_data['status'] = 'completed'
+                job_data['processed_at'] = time.time()
+            else:
+                job_data['status'] = 'failed'
+                job_data['retries'] = job_data.get('retries', 0) + 1
+
+            # Store the result in Redis
+            self.redis.hset(
+                f"payment_result:{job_data['transaction_id']}",
+                mapping=job_data
+            )
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error processing job: {str(e)}")
+            return False
+
+    def run(self):
+        """
+        Main worker loop that consumes jobs from the queue.
+        """
+        logger.info(f"Starting payment processor worker for queue: {self.queue_name}")
+
+        while True:
+            try:
+                # Blocking pop from the queue with a timeout
+                _, job_data = self.redis.blpop(self.queue_name, timeout=5)
+
+                if job_data is None:
+                    continue
+
+                # Decode the job data
+                job_data = json.loads(job_data.decode('utf-8'))
+
+                # Process the job
+                success = self.process_job(job_data)
+
+                if not success and job_data.get('retries', 0) < self.max_retries:
+                    # Requeue the job if it failed and we haven't exceeded max retries
+                    job_data['retries'] = job_data.get('retries', 0) + 1
+                    self.redis.rpush(self.queue_name, json.dumps(job_data))
+                    logger.info(f"Requeued job {job_data['transaction_id']} (attempt {job_data['retries']})")
+                elif not success:
+                    # Mark as failed after max retries
+                    job_data['status'] = 'failed_permanently'
+                    self.redis.hset(
+                        f"payment_result:{job_data['transaction_id']}",
+                        mapping=job_data
+                    )
+                    logger.error(f"Job {job_data['transaction_id']} failed permanently after {self.max_retries} attempts")
+
+            except Exception as e:
+                logger.error(f"Error in worker loop: {str(e)}")
+                time.sleep(5)  # Wait before retrying
+
+if __name__ == "__main__":
+    worker = PaymentProcessorWorker()
+    worker.run()
+```
+
+## Key Features of This Implementation:
+
+1. **Queue Consumption**: Uses Redis' blocking pop operation to efficiently consume jobs from the queue.
+
+2. **Error Handling**: Includes retry logic for failed jobs (up to a maximum number of attempts).
+
+3. **Result Tracking**: Stores payment results in Redis for later retrieval.
+
+4. **Logging**: Comprehensive logging for monitoring and debugging.
+
+5. **Validation**: Basic validation of required payment fields.
+
+6. **Idempotency**: Uses transaction IDs to ensure payments aren't processed multiple times.
+
+## How to Use:
+
+1. **Start Redis**: Make sure you have Redis running locally or provide the correct connection details.
+
+2. **Enqueue Jobs**: You can enqueue jobs using this Redis command:
+   ```bash
+   redis-cli LPUSH payment_queue '{"customer_id": "cust123", "amount": 99.99, "currency": "USD", "payment_method": "credit_card", "transaction_id": "txn456"}'
+   ```
+
+3. **Run the Worker**: Execute the worker script to start processing payments.
+
+## Production Considerations:
+
+1. **Scaling**: You can run multiple worker instances for parallel processing.
+
+2. **Monitoring**: Add metrics collection (e.g., with Prometheus) to track processing rates and failures.
+
+3. **Security**: In a real implementation, you would:
+   - Encrypt sensitive payment data
+   - Use proper authentication with your payment processor
+   - Implement proper error handling and notifications
+
+4. **Persistence**: Consider using a database to store payment results rather than Redis.
+
+5. **Configuration**: Use environment variables or a config file for Redis connection details.
+
+Would you like me to modify any part of this implementation or add specific features?

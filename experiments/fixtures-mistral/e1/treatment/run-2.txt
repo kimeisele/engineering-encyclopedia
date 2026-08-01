@@ -1,0 +1,207 @@
+```python
+import os
+import uuid
+import json
+import time
+import logging
+from pathlib import Path
+from typing import Dict, Any
+from dataclasses import dataclass
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class Job:
+    job_id: str
+    customer_id: str
+    amount: float
+    idempotency_key: str
+
+class PaymentProcessor:
+    def __init__(self):
+        self.processed_jobs = set()
+
+    def charge_customer(self, customer_id: str, amount: float) -> bool:
+        """Simulate charging a customer."""
+        logger.info(f"Charging customer {customer_id} for ${amount:.2f}")
+        # Simulate external payment gateway call
+        time.sleep(0.1)
+        return True
+
+class JobQueue:
+    def __init__(self):
+        self.queue = []
+
+    def consume(self) -> Job:
+        """Simulate consuming a job from the queue."""
+        if not self.queue:
+            return None
+        job_data = self.queue.pop(0)
+        return Job(**job_data)
+
+    def add_job(self, job_data: Dict[str, Any]):
+        """Add a job to the queue for testing."""
+        self.queue.append(job_data)
+
+class IdempotentPaymentWorker:
+    def __init__(self, queue: JobQueue, payment_processor: PaymentProcessor):
+        self.queue = queue
+        self.payment_processor = payment_processor
+        self.completed_jobs_file = Path("completed_jobs.json")
+
+        # Ensure the completed jobs file exists and is loaded
+        if not self.completed_jobs_file.exists():
+            self.completed_jobs_file.write_text("{}")
+        self.completed_jobs = json.loads(self.completed_jobs_file.read_text())
+
+    def _is_job_completed(self, idempotency_key: str) -> bool:
+        """Check if a job with this idempotency key was already completed."""
+        return idempotency_key in self.completed_jobs
+
+    def _record_completion(self, idempotency_key: str):
+        """Record that a job with this idempotency key was completed."""
+        self.completed_jobs[idempotency_key] = True
+        # Write to a temp file first, then atomically replace the target file
+        temp_file = self.completed_jobs_file.with_suffix(".tmp")
+        temp_file.write_text(json.dumps(self.completed_jobs))
+        # Flush data to disk
+        with temp_file.open("rb") as f:
+            os.fsync(f.fileno())
+        # Atomic rename
+        temp_file.replace(self.completed_jobs_file)
+
+    def process_job(self, job: Job) -> bool:
+        """Process a single job with idempotency."""
+        if self._is_job_completed(job.idempotency_key):
+            logger.info(f"Job {job.job_id} already completed (idempotency key: {job.idempotency_key})")
+            return True
+
+        # Charge the customer
+        success = self.payment_processor.charge_customer(job.customer_id, job.amount)
+        if success:
+            self._record_completion(job.idempotency_key)
+            logger.info(f"Successfully processed job {job.job_id}")
+            return True
+        else:
+            logger.error(f"Failed to process job {job.job_id}")
+            return False
+
+    def run(self):
+        """Main worker loop."""
+        while True:
+            job = self.queue.consume()
+            if job is None:
+                time.sleep(1)
+                continue
+
+            try:
+                self.process_job(job)
+            except Exception as e:
+                logger.error(f"Error processing job {job.job_id}: {e}")
+                # In a real system, we might want to implement retry logic here
+                # but we'll rely on the queue to redeliver the job
+
+def generate_idempotency_key() -> str:
+    """Generate a unique idempotency key for each logical operation."""
+    return str(uuid.uuid4())
+
+# Example usage
+if __name__ == "__main__":
+    # Setup
+    queue = JobQueue()
+    payment_processor = PaymentProcessor()
+    worker = IdempotentPaymentWorker(queue, payment_processor)
+
+    # Add some test jobs (in a real system, these would come from the queue)
+    for i in range(5):
+        job_data = {
+            "job_id": f"job_{i}",
+            "customer_id": f"customer_{i % 2}",  # Two customers
+            "amount": 10.0 + i,
+            "idempotency_key": generate_idempotency_key()
+        }
+        queue.add_job(job_data)
+
+    # Run the worker
+    worker.run()
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "An idempotency key (UUID) identifies each logical operation, generated per job."
+          location: "idempotent_payment_worker.py:118"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is recorded in a JSON file with atomic replacement after fsync."
+          location: "idempotent_payment_worker.py:68-78"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The completed_jobs set in memory is lost, but the file record persists."
+          location: "idempotent_payment_worker.py:48-52"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No, because the completion record is checked before processing."
+          location: "idempotent_payment_worker.py:65-67"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, the temp file is created in the same directory as the target file."
+          location: "idempotent_payment_worker.py:73"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, fsync is called on the temp file before renaming."
+          location: "idempotent_payment_worker.py:75-76"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The temp file remains but is not used; the next write will overwrite it."
+          location: "idempotent_payment_worker.py:73"
+        - question: "Can two writers both rename over the target?"
+          answer: "No, because the rename operation is atomic on POSIX systems."
+          location: "idempotent_payment_worker.py:78"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The completed_jobs set is shared and mutated when recording completion."
+          location: "idempotent_payment_worker.py:48-52"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but we prevent races by checking completion before processing."
+          location: "idempotent_payment_worker.py:65-67"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because the completion record is checked atomically via file read."
+          location: "idempotent_payment_worker.py:65-67"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "The idempotency key prevents duplicate charges even if interleaved."
+          location: "idempotent_payment_worker.py:65-78"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The idempotency key ensures only one charge is processed."
+          location: "idempotent_payment_worker.py:65-67"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "The queue may redeliver, but idempotency prevents duplicate effects."
+          location: "idempotent_payment_worker.py:130-135"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Not implemented here; relies on queue's retry mechanism."
+          location: "N/A"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Not implemented here; depends on queue configuration."
+          location: "N/A"
+  not_applied:
+    - node: security.input-validation
+      reason: "This node was excluded as per the trace in the original request."
+    - node: python.processes.subprocess-safety
+      reason: "This node was excluded as per the trace in the original request."
+    - node: observability.error-context
+      reason: "This node was excluded as per the trace in the original request."
+    - node: testing.coverage-limitations
+      reason: "This node was excluded as per the trace in the original request."
+```

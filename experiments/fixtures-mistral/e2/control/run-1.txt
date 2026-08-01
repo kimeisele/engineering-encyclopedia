@@ -1,0 +1,84 @@
+Here's a Python function that runs a git command with a user-supplied branch name. This function uses the `subprocess` module to execute the git command and handles potential errors:
+
+```python
+import subprocess
+from typing import Optional
+
+def run_git_command(branch_name: str, git_command: str = "checkout") -> Optional[str]:
+    """
+    Run a git command with the specified branch name.
+
+    Args:
+        branch_name: The name of the branch to use in the git command.
+        git_command: The git command to run (e.g., "checkout", "push", "merge").
+                    Defaults to "checkout".
+
+    Returns:
+        The output of the git command if successful, None otherwise.
+
+    Raises:
+        ValueError: If the branch name is empty or contains invalid characters.
+    """
+    if not branch_name or not isinstance(branch_name, str):
+        raise ValueError("Branch name must be a non-empty string")
+
+    # Basic validation for branch name (git allows most characters but not some)
+    invalid_chars = [';', '&', '|', '>', '<', '$', '`', '\\', '"', "'"]
+    if any(char in branch_name for char in invalid_chars):
+        raise ValueError("Branch name contains invalid characters")
+
+    try:
+        # Construct the git command
+        cmd = ["git", git_command, branch_name]
+
+        # Run the command and capture output
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        return result.stdout.strip() if result.stdout else None
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error running git command: {e.stderr.strip()}")
+        return None
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return None
+
+# Example usage:
+if __name__ == "__main__":
+    branch = input("Enter branch name: ")
+    output = run_git_command(branch)
+    if output is not None:
+        print(f"Git command output: {output}")
+    else:
+        print("Failed to run git command")
+```
+
+### Features:
+1. **Input Validation**: Checks for empty branch names and invalid characters
+2. **Error Handling**: Catches and reports git command errors
+3. **Flexibility**: Can be used with different git commands (defaults to "checkout")
+4. **Type Hints**: Uses Python type hints for better code clarity
+5. **Output Handling**: Returns the command output or None if it fails
+
+### Example Usage:
+```python
+# Checkout a branch
+run_git_command("feature-branch")
+
+# Push to a branch
+run_git_command("main", "push")
+
+# Merge a branch
+run_git_command("develop", "merge")
+```
+
+### Notes:
+- The function uses `subprocess.run()` with `check=True` to raise an exception if the command fails
+- You can modify the command list to include additional git options as needed
+- For more complex git operations, you might want to add more parameters to the function

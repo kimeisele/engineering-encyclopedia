@@ -1,0 +1,72 @@
+Here's a Python function that runs a git command with a user-supplied branch name. This example uses the `subprocess` module to execute the git command:
+
+```python
+import subprocess
+
+def run_git_command(branch_name, command="checkout"):
+    """
+    Run a git command with the specified branch name.
+
+    Args:
+        branch_name (str): The name of the branch to use in the git command.
+        command (str): The git command to run (default is "checkout").
+
+    Returns:
+        str: The output of the git command, or an error message if the command fails.
+
+    Raises:
+        ValueError: If the branch_name is empty or None.
+    """
+    if not branch_name:
+        raise ValueError("Branch name cannot be empty or None")
+
+    try:
+        # Construct the git command
+        git_cmd = ["git", command, branch_name]
+
+        # Run the command and capture the output
+        result = subprocess.run(
+            git_cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        return result.stdout
+
+    except subprocess.CalledProcessError as e:
+        return f"Error running git command: {e.stderr}"
+    except Exception as e:
+        return f"An unexpected error occurred: {str(e)}"
+
+# Example usage:
+if __name__ == "__main__":
+    branch = input("Enter the branch name: ")
+    output = run_git_command(branch)
+    print(output)
+```
+
+### Features:
+1. Takes a branch name as input (required)
+2. Optional `command` parameter (defaults to "checkout")
+3. Handles errors gracefully
+4. Returns the command output or error message
+5. Validates the branch name isn't empty
+
+### Example Usage:
+```python
+# Checkout a branch
+output = run_git_command("feature-branch", "checkout")
+
+# Pull a branch
+output = run_git_command("main", "pull")
+
+# Delete a branch
+output = run_git_command("old-feature", "branch -D")
+```
+
+### Notes:
+- The function uses `subprocess.run()` with `check=True` to raise an exception if the command fails
+- The `text=True` parameter ensures the output is returned as a string rather than bytes
+- You can extend this to support more complex git commands by modifying the command construction

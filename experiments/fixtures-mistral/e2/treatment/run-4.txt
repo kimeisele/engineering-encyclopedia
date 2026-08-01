@@ -1,0 +1,106 @@
+```python
+import subprocess
+import re
+
+def run_git_command(branch_name: str) -> bool:
+    """
+    Run a git command with a user-supplied branch name safely.
+
+    Args:
+        branch_name: The branch name provided by the user
+
+    Returns:
+        bool: True if the command succeeded, False otherwise
+    """
+    # Validate the branch name to ensure it's safe
+    if not re.match(r'^[a-zA-Z0-9_\-\./]+$', branch_name):
+        raise ValueError("Invalid branch name")
+
+    # Build the command as a list to avoid shell injection
+    command = ['git', 'checkout', branch_name]
+
+    try:
+        # Run the command without shell=True to prevent injection
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Git command failed: {e.stderr}")
+        return False
+```
+
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: Is the command passed as a list, with input as elements?
+          answer: Command is passed as a list with user input as a separate element.
+          location: "function: run_git_command"
+        - question: Is shell=True present anywhere, even conditionally?
+          answer: shell=True is never used in the implementation.
+          location: "function: run_git_command"
+        - question: Can a user-supplied value change which program runs?
+          answer: User input is validated and passed as an argument, not as shell syntax.
+          location: "function: run_git_command"
+        - question: Is the input validated or is it passed as opaque data?
+          answer: Input is validated with a regex pattern before use.
+          location: "function: run_git_command"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The branch name identifies the operation and comes from user input.
+          location: "function: run_git_command"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: The subprocess return code records completion, checked via CalledProcessError.
+          location: "function: run_git_command"
+      unanswered:
+        - question: What state remains after a failure between effect and completion record?
+          reason: The function doesn't maintain state beyond the immediate operation.
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          reason: Not applicable as this is a single-process function without shared state.
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: Validation is done at the function entry point where user input is received.
+          location: "function: run_git_command"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Branch names must match [a-zA-Z0-9_\-\./]+ pattern to be accepted.
+          location: "function: run_git_command"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated input is used directly in the command list.
+          location: "function: run_git_command"
+        - question: Does each use site still treat the value as untrusted?
+          answer: The validated value is still treated as untrusted in the subprocess call.
+          location: "function: run_git_command"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: No shared state is mutated; the function is stateless.
+          location: "function: run_git_command"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: The entire operation is atomic with no intermediate shared state.
+          location: "function: run_git_command"
+      unanswered:
+        - question: Can two workers observe the same value as unclaimed?
+          reason: Not applicable as there is no shared state to observe.
+        - question: What happens if the check and the action are interleaved?
+          reason: Not applicable as there are no check-then-act sequences in shared state.
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: The function does not perform any file operations or atomic replacements.
+```

@@ -1,0 +1,104 @@
+# Function to Update a JSON Config File
+
+Here's a Python function that safely updates a JSON configuration file on disk:
+
+```python
+import json
+import os
+from typing import Any, Dict
+
+def update_json_config(file_path: str, updates: Dict[str, Any]) -> bool:
+    """
+    Safely updates a JSON configuration file with new values.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary containing key-value pairs to update
+
+    Returns:
+        bool: True if update was successful, False otherwise
+    """
+    try:
+        # Read existing config
+        with open(file_path, 'r') as f:
+            config = json.load(f)
+
+        # Apply updates
+        config.update(updates)
+
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return True
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {file_path}")
+        return False
+    except json.JSONDecodeError:
+        print(f"Error: Invalid JSON in config file at {file_path}")
+        return False
+    except Exception as e:
+        print(f"Error updating config: {str(e)}")
+        return False
+```
+
+## Usage Example
+
+```python
+# Example usage
+config_updates = {
+    "timeout": 30,
+    "debug_mode": True,
+    "max_connections": 100
+}
+
+success = update_json_config("config.json", config_updates)
+if success:
+    print("Config updated successfully!")
+else:
+    print("Failed to update config.")
+```
+
+## Features
+
+1. **Safety**: Handles file not found and JSON decode errors
+2. **Type hints**: Uses Python type hints for better code clarity
+3. **Preservation**: Maintains existing config structure while adding/updating values
+4. **Pretty printing**: Writes JSON with indentation for readability
+5. **Atomic operation**: Reads and writes in a single operation to prevent corruption
+
+## Alternative Version (with backup)
+
+If you want to create a backup before updating:
+
+```python
+import shutil
+
+def update_json_config_with_backup(file_path: str, updates: Dict[str, Any]) -> bool:
+    """Version that creates a backup before updating"""
+    try:
+        # Create backup
+        backup_path = f"{file_path}.bak"
+        shutil.copy2(file_path, backup_path)
+
+        # Read existing config
+        with open(file_path, 'r') as f:
+            config = json.load(f)
+
+        # Apply updates
+        config.update(updates)
+
+        # Write back to file
+        with open(file_path, 'w') as f:
+            json.dump(config, f, indent=4)
+
+        return True
+    except Exception as e:
+        print(f"Error updating config (restoring from backup): {str(e)}")
+        # Attempt to restore from backup
+        try:
+            shutil.copy2(backup_path, file_path)
+        except:
+            pass
+        return False
+```

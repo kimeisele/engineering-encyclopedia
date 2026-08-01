@@ -1,0 +1,129 @@
+```python
+import subprocess
+import re
+
+def run_git_command(branch_name):
+    """
+    Run a git command with a user-supplied branch name safely.
+
+    Args:
+        branch_name: The branch name to use in the git command.
+
+    Returns:
+        subprocess.CompletedProcess: The result of the git command execution.
+
+    Raises:
+        ValueError: If the branch name is invalid.
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    # Validate branch name: alphanumeric, hyphens, underscores, slashes, dots
+    # Disallow sequences like '..', '//', '@{', and control characters
+    if not re.match(r'^[a-zA-Z0-9_\-\./]+$', branch_name):
+        raise ValueError("Invalid branch name")
+
+    # Prevent path traversal or command injection by ensuring it's a single branch name
+    if '..' in branch_name or branch_name.startswith('/') or branch_name.endswith('/'):
+        raise ValueError("Invalid branch name")
+
+    # Use list form with no shell=True to prevent injection
+    command = ['git', 'checkout', branch_name]
+
+    # Run the command safely
+    result = subprocess.run(
+        command,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    return result
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: Is the command passed as a list, with input as elements?
+          answer: Command is passed as a list with user input as a separate element.
+          location: "run_git_command: command = ['git', 'checkout', branch_name]"
+        - question: Is shell=True present anywhere, even conditionally?
+          answer: shell=True is never used in the implementation.
+          location: "run_git_command: subprocess.run(..., check=True, ...)"
+        - question: Can a user-supplied value change which program runs?
+          answer: No, because command is a list and shell is not used.
+          location: "run_git_command: command construction and subprocess.run"
+        - question: Is the input validated or is it passed as opaque data?
+          answer: Input is validated with regex and structural checks before use.
+          location: "run_git_command: regex and path traversal checks"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: The branch name identifies the operation; it's validated input.
+          location: "run_git_command: branch_name parameter and validation"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Completion is recorded by subprocess return code; durable for this operation.
+          location: "run_git_command: subprocess.run with check=True"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No state is recorded; git command either succeeds or fails.
+          location: "run_git_command: no persistent state, just command execution"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Not applicable; this is a single command execution with no shared state.
+          location: "run_git_command: stateless function"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Not applicable; no file operations are performed.
+          location: "run_git_command: no file operations"
+        - question: Is the data flushed before the rename?
+          answer: Not applicable; no file operations are performed.
+          location: "run_git_command: no file operations"
+        - question: What happens to the temp file if the write fails?
+          answer: Not applicable; no file operations are performed.
+          location: "run_git_command: no file operations"
+        - question: Can two writers both rename over the target?
+          answer: Not applicable; no file operations are performed.
+          location: "run_git_command: no file operations"
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: Validation is done at the function entry point before use.
+          location: "run_git_command: validation at start of function"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Accepts git branch name characters; rejects control chars and sequences.
+          location: "run_git_command: regex and structural validation"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: Validated form is used; raw input is rejected if invalid.
+          location: "run_git_command: validation before command construction"
+        - question: Does each use site still treat the value as untrusted?
+          answer: Yes; validation is strict and no further trust is assumed.
+          location: "run_git_command: validation before any use"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: No shared state; function is stateless and reentrant.
+          location: "run_git_command: pure function with no shared state"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: Not applicable; no shared state to read or write.
+          location: "run_git_command: no shared state"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: Not applicable; no shared state or locks involved.
+          location: "run_git_command: stateless function"
+        - question: What happens if the check and the action are interleaved?
+          answer: Not applicable; no check-then-act pattern on shared state.
+          location: "run_git_command: no shared state or interleaving possible"
+  not_applied:
+    - node: reliability.idempotency
+      reason: All applicable questions were answered; no unanswered questions remain for this node.
+```

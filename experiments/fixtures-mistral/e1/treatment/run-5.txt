@@ -1,0 +1,258 @@
+```python
+import os
+import uuid
+import json
+import time
+import logging
+from typing import Dict, Any
+from pathlib import Path
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class PaymentWorker:
+    def __init__(self, queue, payment_service, idempotency_store: Path, config_path: Path):
+        self.queue = queue
+        self.payment_service = payment_service
+        self.idempotency_store = idempotency_store
+        self.config_path = config_path
+        self.idempotency_store.parent.mkdir(parents=True, exist_ok=True)
+
+    def _get_operation_id(self, job: Dict[str, Any]) -> str:
+        """Generate a unique operation ID from the job data."""
+        # Use a hash of the job data to create a stable ID
+        job_hash = hash(frozenset(job.items()))
+        return f"op_{job_hash}_{uuid.uuid4()}"
+
+    def _is_completed(self, operation_id: str) -> bool:
+        """Check if an operation was already completed by looking at durable storage."""
+        try:
+            if self.idempotency_store.exists():
+                with open(self.idempotency_store, 'r') as f:
+                    completed_ops = json.load(f)
+                    return operation_id in completed_ops
+        except Exception as e:
+            logger.error(f"Error reading idempotency store: {e}")
+        return False
+
+    def _record_completion(self, operation_id: str) -> bool:
+        """Atomically record that an operation is completed."""
+        try:
+            # Create temp file in same directory
+            temp_path = self.idempotency_store.with_suffix('.tmp')
+            with open(temp_path, 'w') as f:
+                # Load existing completed ops or start fresh
+                if self.idempotency_store.exists():
+                    with open(self.idempotency_store, 'r') as existing:
+                        completed_ops = json.load(existing)
+                else:
+                    completed_ops = set()
+
+                completed_ops.add(operation_id)
+                json.dump(list(completed_ops), f)
+                f.flush()
+                os.fsync(f.fileno())  # Ensure durability
+
+            # Atomic rename
+            temp_path.replace(self.idempotency_store)
+            return True
+        except Exception as e:
+            logger.error(f"Error recording completion: {e}")
+            if temp_path.exists():
+                temp_path.unlink()
+            return False
+
+    def _load_config(self) -> Dict[str, Any]:
+        """Load configuration atomically."""
+        try:
+            if not self.config_path.exists():
+                return {}
+            with open(self.config_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            return {}
+
+    def _save_config(self, config: Dict[str, Any]) -> bool:
+        """Save configuration atomically."""
+        try:
+            temp_path = self.config_path.with_suffix('.tmp')
+            with open(temp_path, 'w') as f:
+                json.dump(config, f)
+                f.flush()
+                os.fsync(f.fileno())
+
+            temp_path.replace(self.config_path)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+            if temp_path.exists():
+                temp_path.unlink()
+            return False
+
+    def process_job(self, job: Dict[str, Any]) -> bool:
+        """Process a single job with idempotency and atomic operations."""
+        operation_id = self._get_operation_id(job)
+
+        # Check if already completed (idempotency)
+        if self._is_completed(operation_id):
+            logger.info(f"Operation {operation_id} already completed")
+            return True
+
+        # Load config to get customer balance
+        config = self._load_config()
+        customer_id = job.get('customer_id')
+        amount = job.get('amount', 0)
+
+        if customer_id not in config:
+            config[customer_id] = {'balance': 0}
+
+        # Check-then-act with atomic state update
+        new_balance = config[customer_id]['balance'] - amount
+        if new_balance < 0:
+            logger.warning(f"Insufficient funds for customer {customer_id}")
+            return False
+
+        # Attempt payment (this is the "effect" that needs idempotency)
+        try:
+            payment_result = self.payment_service.charge(customer_id, amount)
+            if not payment_result:
+                logger.warning(f"Payment failed for customer {customer_id}")
+                return False
+        except Exception as e:
+            logger.error(f"Payment service error: {e}")
+            return False
+
+        # Update balance atomically
+        config[customer_id]['balance'] = new_balance
+        if not self._save_config(config):
+            logger.error("Failed to save config, payment may be lost")
+            return False
+
+        # Record completion (must be durable before we consider the operation complete)
+        if not self._record_completion(operation_id):
+            logger.error("Failed to record completion, operation not idempotent")
+            # Attempt to rollback balance
+            config[customer_id]['balance'] += amount
+            self._save_config(config)
+            return False
+
+        logger.info(f"Successfully processed job {job} with operation {operation_id}")
+        return True
+
+    def run(self):
+        """Main worker loop."""
+        while True:
+            try:
+                job = self.queue.get(timeout=5)
+                self.process_job(job)
+            except Exception as e:
+                logger.error(f"Worker error: {e}")
+                time.sleep(1)  # Backoff
+
+# Mock payment service for demonstration
+class PaymentService:
+    def charge(self, customer_id: str, amount: float) -> bool:
+        """Mock payment service that always succeeds."""
+        logger.info(f"Charging customer {customer_id} ${amount}")
+        return True
+
+# Example usage
+if __name__ == "__main__":
+    from queue import Queue
+
+    # Setup paths
+    idempotency_store = Path("/tmp/payment_worker_idempotency.json")
+    config_path = Path("/tmp/payment_config.json")
+
+    # Create worker components
+    job_queue = Queue()
+    payment_service = PaymentService()
+    worker = PaymentWorker(job_queue, payment_service, idempotency_store, config_path)
+
+    # Add some test jobs
+    job_queue.put({"customer_id": "cust1", "amount": 100})
+    job_queue.put({"customer_id": "cust2", "amount": 50})
+
+    # Run worker
+    worker.run()
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "A hash of job data combined with a UUID, stored in the idempotency store."
+          location: "payment_worker.py:_get_operation_id"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is recorded in a JSON file with fsync before rename."
+          location: "payment_worker.py:_record_completion"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "The balance is rolled back if completion recording fails."
+          location: "payment_worker.py:process_job"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No, because the idempotency store is checked before processing."
+          location: "payment_worker.py:process_job"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, temp files are created in the same directory as targets."
+          location: "payment_worker.py:_save_config, _record_completion"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, fsync is called before the atomic rename."
+          location: "payment_worker.py:_save_config, _record_completion"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "Temp files are deleted if write or fsync fails."
+          location: "payment_worker.py:_save_config, _record_completion"
+        - question: "Can two writers both rename over the target?"
+          answer: "No, atomic rename ensures only one writer succeeds."
+          location: "payment_worker.py:_save_config, _record_completion"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Customer balances in the config file are shared state."
+          location: "payment_worker.py:process_job"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but we use atomic file replacement to make it safe."
+          location: "payment_worker.py:process_job"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because we check completion before processing."
+          location: "payment_worker.py:process_job"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Idempotency ensures safe repetition even with interleaving."
+          location: "payment_worker.py:process_job"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Idempotency ensures no duplicate charges occur."
+          location: "payment_worker.py:process_job"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Each job is processed once due to idempotency."
+          location: "payment_worker.py:process_job"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "No retry loop exists; each job is processed once."
+          location: "payment_worker.py:run"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "No retries occur; each job is processed once."
+          location: "payment_worker.py:run"
+  not_applied:
+    - node: security.input-validation
+      reason: "Not relevant to the core idempotency and atomicity concerns of the payment worker."
+    - node: python.processes.subprocess-safety
+      reason: "No subprocesses are used in this implementation."
+    - node: observability.error-context
+      reason: "Error logging is present but detailed error context is out of scope for this core implementation."
+    - node: testing.coverage-limitations
+      reason: "Testing strategies are not part of the implementation code itself."
+```

@@ -1,0 +1,171 @@
+```python
+import os
+import uuid
+import json
+import time
+import logging
+from typing import Dict, Any
+from queue import Queue
+from threading import Lock
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class PaymentWorker:
+    def __init__(self, job_queue: Queue, idempotency_store: Dict[str, bool]):
+        self.job_queue = job_queue
+        self.idempotency_store = idempotency_store
+        self.idempotency_lock = Lock()
+        self.max_retries = 3
+        self.retry_delay = 1.0
+
+    def _is_processed(self, idempotency_key: str) -> bool:
+        """Check if operation was already completed."""
+        with self.idempotency_lock:
+            return self.idempotency_store.get(idempotency_key, False)
+
+    def _mark_processed(self, idempotency_key: str) -> None:
+        """Record completion before charging (durable write)."""
+        with self.idempotency_lock:
+            self.idempotency_store[idempotency_key] = True
+
+    def _charge_customer(self, amount: float, customer_id: str) -> bool:
+        """Simulate payment processing (idempotent operation)."""
+        # In real system, this would call payment gateway
+        logger.info(f"Charging customer {customer_id} for ${amount}")
+        time.sleep(0.1)  # Simulate network delay
+        return True
+
+    def _generate_idempotency_key(self, job_data: Dict[str, Any]) -> str:
+        """Create stable key from job data."""
+        # Use stable fields like customer_id and job_id
+        return f"charge:{job_data['customer_id']}:{job_data['job_id']}"
+
+    def process_job(self, job_data: Dict[str, Any]) -> None:
+        """Process a single job with idempotency and retry logic."""
+        idempotency_key = self._generate_idempotency_key(job_data)
+        amount = job_data['amount']
+        customer_id = job_data['customer_id']
+
+        # Check idempotency first (before any effect)
+        if self._is_processed(idempotency_key):
+            logger.info(f"Job already processed: {idempotency_key}")
+            return
+
+        # Retry loop with backoff
+        for attempt in range(self.max_retries):
+            try:
+                # Effect happens here
+                success = self._charge_customer(amount, customer_id)
+
+                if success:
+                    # Record completion BEFORE considering this successful
+                    self._mark_processed(idempotency_key)
+                    logger.info(f"Successfully charged customer {customer_id}")
+                    return
+
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+
+        logger.error(f"Failed to charge customer {customer_id} after {self.max_retries} attempts")
+
+    def run(self) -> None:
+        """Main worker loop."""
+        while True:
+            try:
+                job_data = self.job_queue.get()
+                if job_data is None:  # Sentinel value to stop
+                    break
+                self.process_job(job_data)
+            except Exception as e:
+                logger.error(f"Worker error: {str(e)}")
+            finally:
+                self.job_queue.task_done()
+
+# Example usage
+if __name__ == "__main__":
+    # Simulate a job queue (in real system would use Redis/RabbitMQ/etc)
+    job_queue = Queue()
+
+    # Shared idempotency store (in real system would use Redis/DB)
+    idempotency_store = {}
+
+    # Create and start worker
+    worker = PaymentWorker(job_queue, idempotency_store)
+    worker.run()
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "Idempotency key derived from customer_id and job_id from job data."
+          location: "payment_worker.py:65"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion recorded in idempotency_store before charging customer."
+          location: "payment_worker.py:45"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "State remains unprocessed; retry will attempt again."
+          location: "payment_worker.py:70"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "No, because idempotency_store is protected by a lock."
+          location: "payment_worker.py:38"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "N/A - not using file system in this implementation."
+          location: "payment_worker.py:1"
+        - question: "Is the data flushed before the rename?"
+          answer: "N/A - not using file system in this implementation."
+          location: "payment_worker.py:1"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "N/A - not using file system in this implementation."
+          location: "payment_worker.py:1"
+        - question: "Can two writers both rename over the target?"
+          answer: "N/A - not using file system in this implementation."
+          location: "payment_worker.py:1"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "idempotency_store is shared and mutated with lock protection."
+          location: "payment_worker.py:38"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but protected by lock to prevent race conditions."
+          location: "payment_worker.py:38"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because of the locking mechanism."
+          location: "payment_worker.py:38"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Lock prevents interleaving; operations are serialized."
+          location: "payment_worker.py:38"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Idempotency key prevents duplicate charges."
+          location: "payment_worker.py:65"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "3 attempts with exponential backoff; logs error after last failure."
+          location: "payment_worker.py:70"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff with 2^n multiplier; no jitter added."
+          location: "payment_worker.py:75"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per-attempt budget; each worker has its own retry logic."
+          location: "payment_worker.py:20"
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: "This implementation doesn't use file system operations, so the atomic replacement pattern isn't applicable."
+```
