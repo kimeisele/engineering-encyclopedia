@@ -154,3 +154,25 @@ and must be pack nodes, but are not hash-bound.
 Alternative rejected: enforcing version/hash on both dispositions — stricter
 than the brief's own example allows.
 Reversibility: easy
+
+### D10 — Corpus extended from eight to ten nodes (Sections 1 and 4)
+Section: 1, 4
+Brief says: the corpus is "exactly these, no more, no fewer" (eight nodes)
+and "any node beyond the eight specified in Section 4" is a defect.
+Problem: after the Section 8 experiment, the owner instructed two new nodes
+at the Section 3 quality bar, selected by the decision-vs-idiom rule derived
+from the results (`docs/CORPUS_RULE.md`).
+Decision: added `reliability.outbox-pattern` and
+`performance.cache-invalidation`, both decision-type nodes; the node-count
+assertion was raised 8 -> 10 as an intentional corpus change (the test still
+fails on a short corpus). The founding brief remains the historical v1
+specification and is not edited. The experiment evidence — frozen packs,
+treatment prompts and the fixture manifest — is pinned to the eight-node
+corpus it ran against; `test_frozen_experiment_packs_match_corpus` now
+recomposes against that pinned corpus, so edits to the eight experiment
+nodes fail loudly and require conscious regeneration of the experiment
+artifacts.
+Alternative rejected: silently keeping the count assertion at 8 with ten
+files on disk (a weakened test), or regenerating the frozen packs (which
+would erase the hash evidence the recorded runs were made against).
+Reversibility: easy (remove the two nodes and revert the count assertion)

@@ -1,0 +1,85 @@
+id: performance.cache-invalidation
+version: 1
+title: Cache invalidation
+kind: principle
+status: established
+
+summary: >
+  A cache is only correct while its invalidation is correct. The decision is
+  what identifies a cached entry and what changes when the source changes;
+  without an explicit invalidation rule, a cache silently serves the old
+  answer forever.
+
+intent_signals:
+  - a cached value goes stale
+  - the cache key changes when the source changes
+  - invalidate the cache when the source is updated
+  - readers keep seeing an old version
+  - the cache is not cleared after an update
+  - cache stampede when the key expires
+
+applies_when:
+  - a value is cached and the source can change
+  - readers may observe different versions over time
+  - the cache outlives a single request
+
+does_not_apply_when:
+  - the cached value is immutable
+  - the cache is a per-request memo with no sharing
+
+does_not_imply:
+  - that a TTL alone keeps the cache correct
+  - that invalidation is free
+  - that a short TTL fixes a wrong key
+  - that every reader needs the newest value
+
+questions:
+  - What identifies a cached entry, and does it include the source version?
+  - What invalidates the entry, and is that tied to the source change?
+  - What does a reader see between the source change and the invalidation?
+  - What happens when the cache is empty and many readers arrive at once?
+
+techniques:
+  - cache keys that include a source version or fingerprint
+  - explicit invalidation on the write path
+  - TTL as a fallback, not the only mechanism
+  - single-flight or early refresh against stampedes
+
+risks:
+  - keys that do not change when the source changes
+  - invalidation running before the write is durable
+  - unbounded staleness from out-of-band source updates
+  - thundering herd on expiry
+
+tradeoffs:
+  - technique: TTL only
+    benefit: simple, no write-path coupling
+    cost: bounded staleness, possible stampedes
+    choose_when: freshness is approximate and load is low
+  - technique: explicit invalidation on writes
+    benefit: fresh reads after the source changes
+    cost: the write path must know every dependent cache
+    choose_when: stale reads are expensive
+
+relations:
+  related:
+    - python.files.atomic-replacement
+  requires_consideration_of:
+    - concurrency.race-conditions
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, cli, library]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Caches fail when the key does not capture the source version or when
+    invalidation is not tied to the write; the node records those decisions
+    and the stale-read semantics they imply.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [cache invalidation, cache key, staleness, TTL, cache stampede]

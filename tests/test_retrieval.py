@@ -42,12 +42,16 @@ class TestRetrievalBackends(unittest.TestCase):
                 self.assertTrue(results)
                 for node_id, _score in results:
                     self.assertIn(node_id, {n.id for n in nodes})
-                # FTS5 returns only lexically matching rows; token-overlap
+                # FTS5 returns only lexically matching rows (any node whose
+                # indexed text contains the token — e.g. outbox-pattern's
+                # does_not_imply mentions "idempotency"); token-overlap
                 # returns all rows. Both are valid per Section 5.
                 if backend == "fts5":
-                    self.assertEqual(len(index.search("idempotency")), 1)
+                    ids = {nid for nid, _ in index.search("idempotency")}
+                    self.assertIn("reliability.idempotency", ids)
+                    self.assertLess(len(ids), len(nodes))
                 else:
-                    self.assertEqual(len(index.search("idempotency")), 8)
+                    self.assertEqual(len(index.search("idempotency")), len(nodes))
 
     def test_default_backend_is_reported(self):
         index = RetrievalIndex(load_nodes())
