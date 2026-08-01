@@ -1,0 +1,218 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request as it flows through two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured logging
+3. Error propagation between services
+4. Centralized error handling
+
+## Implementation (Python Example)
+
+```python
+import logging
+import uuid
+import json
+from functools import wraps
+from typing import Optional, Dict, Any
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('service_errors.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class RequestTracer:
+    """Handles correlation IDs and request tracing across services"""
+
+    @staticmethod
+    def generate_correlation_id() -> str:
+        """Generate a unique correlation ID for request tracing"""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def get_correlation_id(headers: Optional[Dict[str, str]] = None) -> str:
+        """Extract correlation ID from headers or generate new one"""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return RequestTracer.generate_correlation_id()
+
+    @staticmethod
+    def enrich_logging(correlation_id: str):
+        """Add correlation ID to all log records"""
+        for handler in logger.handlers:
+            handler.setFormatter(
+                logging.Formatter(
+                    '%(asctime)s - %(name)s - %(levelname)s - [CorrelationID: %s] - %(message)s' % correlation_id
+                )
+            )
+
+class ServiceError(Exception):
+    """Base class for service-specific errors with tracing capabilities"""
+
+    def __init__(self, message: str, original_exception: Optional[Exception] = None,
+                 correlation_id: Optional[str] = None, service_name: str = "unknown"):
+        self.message = message
+        self.original_exception = original_exception
+        self.correlation_id = correlation_id or RequestTracer.generate_correlation_id()
+        self.service_name = service_name
+        super().__init__(message)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert error to a dictionary for logging/propagation"""
+        return {
+            'error_type': self.__class__.__name__,
+            'message': self.message,
+            'service': self.service_name,
+            'correlation_id': self.correlation_id,
+            'original_exception': str(self.original_exception) if self.original_exception else None
+        }
+
+def handle_service_errors(service_name: str):
+    """
+    Decorator to handle errors in service methods with tracing capabilities
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                # Extract correlation ID from headers if available
+                headers = kwargs.get('headers', {})
+                correlation_id = RequestTracer.get_correlation_id(headers)
+
+                # Enrich logging with correlation ID
+                RequestTracer.enrich_logging(correlation_id)
+
+                logger.info(f"Starting {func.__name__}", extra={'correlation_id': correlation_id})
+
+                result = func(*args, **kwargs)
+
+                logger.info(f"Completed {func.__name__} successfully", extra={'correlation_id': correlation_id})
+                return result
+
+            except ServiceError as e:
+                # Log the structured error
+                logger.error(
+                    f"Service error in {func.__name__}: {e.message}",
+                    extra={'error': e.to_dict(), 'correlation_id': e.correlation_id}
+                )
+                raise  # Re-raise to let caller handle
+
+            except Exception as e:
+                # Create a service error from unexpected exceptions
+                error = ServiceError(
+                    message=f"Unexpected error in {service_name}.{func.__name__}",
+                    original_exception=e,
+                    correlation_id=RequestTracer.get_correlation_id(kwargs.get('headers', {})),
+                    service_name=service_name
+                )
+                logger.error(
+                    f"Unexpected error in {func.__name__}",
+                    extra={'error': error.to_dict()}
+                )
+                raise error
+
+        return wrapper
+    return decorator
+
+def propagate_error(error: ServiceError, response: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Propagate error information to the next service while preserving correlation ID
+    """
+    response['error'] = error.to_dict()
+    return response
+
+def handle_cross_service_error(error: ServiceError, current_service: str, next_service: str) -> None:
+    """
+    Centralized error handling for cross-service operations
+    """
+    logger.error(
+        f"Cross-service error between {current_service} and {next_service}",
+        extra={
+            'error': error.to_dict(),
+            'current_service': current_service,
+            'next_service': next_service
+        }
+    )
+
+    # Here you could add additional logic like:
+    # - Alerting systems
+    # - Retry logic
+    # - Circuit breaking
+    # - Metrics collection
+```
+
+## Usage Example
+
+```python
+# Service A
+@ServiceA
+def call_service_b(service_a_data: Dict, headers: Optional[Dict] = None) -> Dict:
+    correlation_id = RequestTracer.get_correlation_id(headers)
+
+    try:
+        # Call Service B
+        response = requests.post(
+            "http://service-b/api/process",
+            json=service_a_data,
+            headers={'X-Correlation-ID': correlation_id}
+        )
+        response.raise_for_status()
+        return response.json()
+
+    except requests.exceptions.RequestException as e:
+        error = ServiceError(
+            message="Failed to call Service B",
+            original_exception=e,
+            correlation_id=correlation_id,
+            service_name="ServiceA"
+        )
+        # Propagate error to caller with error details
+        return propagate_error(error, {'status': 'failed'})
+
+# Service B
+@ServiceB
+def process_data(data: Dict, headers: Optional[Dict] = None) -> Dict:
+    correlation_id = RequestTracer.get_correlation_id(headers)
+
+    try:
+        # Business logic here
+        if 'invalid' in data:
+            raise ValueError("Invalid data received")
+
+        return {'status': 'success', 'result': 'processed'}
+
+    except Exception as e:
+        error = ServiceError(
+            message="Data processing failed",
+            original_exception=e,
+            correlation_id=correlation_id,
+            service_name="ServiceB"
+        )
+        logger.error("Processing failed", extra={'error': error.to_dict()})
+        raise error
+```
+
+## Key Features
+
+1. **Correlation IDs**: Each request gets a unique ID that flows through both services
+2. **Structured Logging**: All logs include the correlation ID for easy tracing
+3. **Error Propagation**: Errors include context about where they occurred
+4. **Centralized Handling**: Common error handling patterns are consolidated
+5. **Service-Specific Context**: Errors know which service they originated from
+
+## Operator Instructions
+
+To trace a request across both services:
+
+1. Look for the `X-Correlation-ID` header in either service's logs
+2. Search for that ID in both services' logs to see the complete request flow
+3. Check the `error` field in logs when something goes wrong to see the full error context
+4. Use the `service` field in errors to identify where problems occurred
+
+This implementation provides a robust foundation that can be extended with additional features like distributed tracing systems (Jaeger, Zipkin) or more sophisticated error recovery mechanisms.

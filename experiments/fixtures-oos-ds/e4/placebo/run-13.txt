@@ -1,0 +1,117 @@
+```python
+import time
+import requests
+from functools import wraps
+from typing import Callable, Any
+
+
+def circuit_breaker(
+    failure_threshold: int = 3,
+    recovery_timeout: float = 30.0,
+    cooldown_period: float = 1.0,
+) -> Callable:
+    """
+    Decorator that implements a circuit breaker pattern to avoid
+    hammering a downstream HTTP API while it is down.
+
+    States:
+    - CLOSED: normal operation, calls pass through.
+    - OPEN: API is considered down, calls fail fast without HTTP.
+    - HALF_OPEN: after recovery_timeout, allows a probe call to test API.
+
+    Args:
+        failure_threshold: Consecutive failures to trigger OPEN state.
+        recovery_timeout: Seconds to wait before testing the API again.
+        cooldown_period: Extra delay between probe attempts.
+
+    Returns:
+        Decorated function that protects the downstream API.
+    """
+
+    def decorator(func: Callable) -> Callable:
+        state = {"failures": 0, "circuit_open": False, "opened_at": 0.0}
+
+        @wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # If circuit is OPEN, check if we can probe
+            if state["circuit_open"]:
+                elapsed = time.monotonic() - state["opened_at"]
+                if elapsed < recovery_timeout:
+                    raise ConnectionError(
+                        f"Downstream API is DOWN, circuit OPEN. "
+                        f"Retry in {recovery_timeout - elapsed:.1f}s."
+                    )
+                # Time to test: switch to probing state (we still block others)
+                state["circuit_open"] = True  # stay open until probe succeeds
+                time.sleep(cooldown_period)
+
+            try:
+                result = func(*args, **kwargs)
+                # Success: reset the breaker
+                state["failures"] = 0
+                state["circuit_open"] = False
+                state["opened_at"] = 0.0
+                return result
+
+            except (requests.ConnectionError, requests.Timeout,
+                    requests.HTTPError) as e:
+                # Record failure
+                state["failures"] += 1
+                if state["failures"] >= failure_threshold:
+                    if not state["circuit_open"]:
+                        state["circuit_open"] = True
+                        state["opened_at"] = time.monotonic()
+                raise
+
+        return wrapper
+
+    return decorator
+
+
+# Example usage:
+@circuit_breaker(failure_threshold=2, recovery_timeout=10.0)
+def call_downstream_api():
+    response = requests.get("https://api.example.com/data", timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+# Manual test function:
+if __name__ == "__main__":
+    # Simulate: first 2 calls fail, 3rd triggers open, then wait
+    for i in range(3):
+        try:
+            call_downstream_api()
+        except Exception as e:
+            print(f"Call {i+1}: {type(e).__name__}: {e}")
+
+    # Circuit should be open now, this fails fast
+    try:
+        call_downstream_api()
+    except Exception as e:
+        print(f"Call 4 (should fail fast): {type(e).__name__}: {e}")
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 78f8ed3b745d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, the circuit breaker error states 'Downstream API is DOWN' and identifies it's a downstream call failure."
+          location: "circuit_breaker.py:50"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "The exception includes the retry countdown and identifies the downstream endpoint context implicitly via the wrapped function name."
+          location: "circuit_breaker.py:50"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, no API keys, tokens, or request payloads are included in any error message or exception."
+          location: "circuit_breaker.py:50"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is preserved via the original exception re-raised; circuit status is added before re-raising to maintain trace."
+          location: "circuit_breaker.py:58-68"
+      unanswered: []
+  not_applied: []

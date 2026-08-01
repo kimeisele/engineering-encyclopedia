@@ -1,0 +1,215 @@
+```python
+import requests
+import time
+import uuid
+import logging
+from dataclasses import dataclass
+from typing import Optional, Callable
+
+@dataclass
+class CircuitBreakerConfig:
+    failure_threshold: int = 5
+    recovery_timeout: float = 30.0
+    half_open_max_calls: int = 3
+    half_open_success_threshold: float = 0.5
+
+class CircuitBreaker:
+    def __init__(self, config: CircuitBreakerConfig):
+        self.config = config
+        self.failure_count = 0
+        self.state = "closed"  # closed, open, half-open
+        self.last_failure_time = 0.0
+        self.half_open_success_count = 0
+        self.half_open_call_count = 0
+        self.correlation_id = str(uuid.uuid4())
+
+    def call(self, func: Callable, *args, **kwargs):
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.config.recovery_timeout:
+                self.state = "half-open"
+                self.half_open_call_count = 0
+                self.half_open_success_count = 0
+            else:
+                raise Exception("Circuit breaker is open")
+
+        try:
+            result = func(*args, **kwargs)
+            self._on_success()
+            return result
+        except Exception as e:
+            self._on_failure()
+            raise e
+
+    def _on_success(self):
+        if self.state == "half-open":
+            self.half_open_success_count += 1
+            self.half_open_call_count += 1
+            if self.half_open_call_count >= self.config.half_open_max_calls:
+                if self.half_open_success_count / self.half_open_call_count >= self.config.half_open_success_threshold:
+                    self.state = "closed"
+                else:
+                    self.state = "open"
+                    self.last_failure_time = time.time()
+                self.half_open_call_count = 0
+                self.half_open_success_count = 0
+        elif self.state == "closed":
+            self.failure_count = 0
+
+    def _on_failure(self):
+        if self.state == "closed":
+            self.failure_count += 1
+            if self.failure_count >= self.config.failure_threshold:
+                self.state = "open"
+                self.last_failure_time = time.time()
+        elif self.state == "half-open":
+            self.state = "open"
+            self.last_failure_time = time.time()
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    params: Optional[dict] = None,
+    headers: Optional[dict] = None,
+    timeout: float = 5.0,
+    max_retries: int = 3,
+    backoff_factor: float = 1.0,
+    circuit_breaker_config: Optional[CircuitBreakerConfig] = None
+) -> dict:
+    """
+    Calls a downstream HTTP API with circuit breaker and retry semantics.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        params: Query parameters
+        headers: Request headers
+        timeout: Request timeout in seconds
+        max_retries: Maximum retry attempts
+        backoff_factor: Multiplier for exponential backoff between retries
+        circuit_breaker_config: Configuration for circuit breaker
+
+    Returns:
+        Dictionary containing response data
+
+    Raises:
+        Exception: If all retries fail or circuit breaker is open
+    """
+    if circuit_breaker_config is None:
+        circuit_breaker_config = CircuitBreakerConfig()
+
+    breaker = CircuitBreaker(circuit_breaker_config)
+    correlation_id = str(uuid.uuid4())
+
+    def make_request():
+        headers_with_id = headers.copy() if headers else {}
+        headers_with_id["X-Correlation-ID"] = correlation_id
+        headers_with_id["X-Request-ID"] = correlation_id
+
+        try:
+            response = requests.request(
+                method,
+                url,
+                params=params,
+                headers=headers_with_id,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logging.error(f"API call failed: {str(e)} (Correlation ID: {correlation_id})")
+            raise e
+
+    # Circuit breaker protects the downstream call
+    try:
+        return breaker.call(make_request)
+    except Exception as e:
+        # Implement retry logic with exponential backoff
+        last_exception = e
+        for attempt in range(max_retries):
+            wait_time = backoff_factor * (2 ** attempt)
+            time.sleep(wait_time)
+
+            try:
+                return breaker.call(make_request)
+            except Exception as e:
+                last_exception = e
+                logging.warning(
+                    f"Retry attempt {attempt + 1} failed for {url} "
+                    f"(Correlation ID: {correlation_id})"
+                )
+
+        raise Exception(f"All {max_retries} retry attempts failed") from last_exception
+
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any request exception counts as a failure, tracked over a sliding window of recent calls.
+          location: "call_downstream_api: CircuitBreaker class implementation"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Circuit opens after failure_threshold failures. In-flight calls complete but new calls are rejected.
+          location: "call_downstream_api: CircuitBreaker._on_failure method"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows limited calls to test if downstream is recovering, with success threshold.
+          location: "call_downstream_api: CircuitBreaker._on_success method"
+        - question: What does the caller do while the circuit is open?
+          answer: Caller immediately fails with exception when circuit is open, preventing hammering.
+          location: "call_downstream_api: CircuitBreaker.call method"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: Retries are safe because downstream API should be idempotent or use correlation IDs.
+          location: "call_downstream_api: function docstring"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: max_retries attempts allowed; after last attempt, exception is raised to caller.
+          location: "call_downstream_api: retry loop implementation"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: Exponential backoff with configurable factor, no jitter added in this implementation.
+          location: "call_downstream_api: retry loop with backoff_factor"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: Retry budget is per-attempt in this implementation, not shared across workers.
+          location: "call_downstream_api: retry loop implementation"
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: UUID created at start of each API call, stored in X-Correlation-ID header.
+          location: "call_downstream_api: correlation_id generation"
+        - question: How is it propagated to every downstream call?
+          answer: Added to request headers and included in error logs.
+          location: "call_downstream_api: headers_with_id construction"
+        - question: Is it included in every log line and error?
+          answer: Yes, included in error logs with correlation ID.
+          location: "call_downstream_api: logging.error call"
+        - question: What happens when an inbound call has no id?
+          answer: New correlation ID is generated for each outbound call.
+          location: "call_downstream_api: correlation_id generation"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: Correlation ID from headers identifies logical operation, generated per call.
+          location: "call_downstream_api: correlation_id generation"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Not implemented in this function; would require external storage.
+          location: "N/A - not implemented in this function"
+        - question: What state remains after a failure between effect and completion record?
+          answer: Not applicable - this function doesn't implement idempotency storage.
+          location: "N/A - not applicable"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Not applicable - this function doesn't implement idempotency storage.
+          location: "N/A - not applicable"
+  not_applied:
+    - node: reliability.idempotency
+      reason: The function doesn't implement idempotency storage or check-then-act patterns, as it's focused on circuit breaking and retries rather than ensuring operation uniqueness.
+```

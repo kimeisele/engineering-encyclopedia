@@ -1,0 +1,108 @@
+# HTTP API Call Function with Backoff and Retry Logic
+
+Here's a Python function that calls a downstream HTTP API with proper backoff and retry logic to avoid hammering a downed service:
+
+```python
+import requests
+import time
+import random
+from typing import Optional, Dict, Any, Callable
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    body: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    max_backoff: float = 30.0,
+    backoff_multiplier: float = 2.0,
+    jitter: bool = True,
+    timeout: float = 10.0,
+    retry_on_status: Optional[list] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Calls a downstream HTTP API with exponential backoff and retry logic.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        headers: Optional request headers
+        body: Optional request body
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        max_backoff: Maximum backoff time in seconds
+        backoff_multiplier: Multiplier for exponential backoff
+        jitter: Whether to add random jitter to backoff times
+        timeout: Request timeout in seconds
+        retry_on_status: List of HTTP status codes to retry on (None means retry on all errors)
+
+    Returns:
+        Parsed JSON response if successful, None otherwise
+    """
+    if retry_on_status is None:
+        retry_on_status = [500, 502, 503, 504, 429]  # Common retryable status codes
+
+    headers = headers or {}
+    body = body or {}
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=body if method.upper() in ("POST", "PUT", "PATCH") else None,
+                data=body if method.upper() in ("POST", "PUT", "PATCH") and not isinstance(body, dict) else None,
+                timeout=timeout
+            )
+
+            if response.status_code not in retry_on_status:
+                response.raise_for_status()
+                return response.json()
+
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries:
+                print(f"Max retries ({max_retries}) reached. Last error: {str(e)}")
+                return None
+
+            # Calculate backoff with exponential delay and jitter
+            backoff = min(initial_backoff * (backoff_multiplier ** attempt), max_backoff)
+            if jitter:
+                backoff = backoff * random.uniform(0.5, 1.5)  # Add 50% jitter
+
+            print(f"Attempt {attempt + 1} failed. Retrying in {backoff:.2f} seconds...")
+            time.sleep(backoff)
+
+    return None
+```
+
+## Key Features:
+
+1. **Exponential Backoff**: Waits longer between retries (1s, 2s, 4s, etc.) up to a maximum
+2. **Jitter**: Adds randomness to backoff times to prevent thundering herd problems
+3. **Retry Logic**: Only retries on specific status codes (5xx, 429 by default)
+4. **Timeout Handling**: Prevents hanging on unresponsive servers
+5. **Configurable**: All parameters can be adjusted as needed
+6. **Type Hints**: Includes type annotations for better code clarity
+
+## Example Usage:
+
+```python
+# Simple GET request
+result = call_downstream_api("https://api.example.com/data")
+
+# POST request with custom headers
+headers = {"Authorization": "Bearer token123"}
+body = {"key": "value"}
+result = call_downstream_api(
+    "https://api.example.com/endpoint",
+    method="POST",
+    headers=headers,
+    body=body,
+    max_retries=3,
+    initial_backoff=0.5
+)
+```
+
+This implementation follows best practices for making HTTP calls to unreliable services while being respectful of the downstream API's capacity.

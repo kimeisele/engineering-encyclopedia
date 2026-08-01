@@ -1,0 +1,110 @@
+Here's an error handler implementation for tracing a request across two services, followed by the application report:
+
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+
+class TraceableError(Exception):
+    """Base exception class for traceable errors across services."""
+
+    def __init__(self, message: str, context: Dict[str, Any]):
+        super().__init__(message)
+        self.context = context
+        self.trace_id = context.get('trace_id', str(uuid.uuid4()))
+
+    def __str__(self):
+        base_msg = super().__str__()
+        return f"{base_msg} [trace_id={self.trace_id}]"
+
+class ServiceAError(TraceableError):
+    """Error handler for Service A operations."""
+
+    def __init__(self, message: str, context: Dict[str, Any]):
+        context['service'] = 'ServiceA'
+        context['step'] = context.get('step', 'unknown')
+        super().__init__(message, context)
+
+class ServiceBError(TraceableError):
+    """Error handler for Service B operations."""
+
+    def __init__(self, message: str, context: Dict[str, Any]):
+        context['service'] = 'ServiceB'
+        context['step'] = context.get('step', 'unknown')
+        super().__init__(message, context)
+
+def handle_cross_service_error(
+    service_a_error: Optional[Exception],
+    service_b_error: Optional[Exception],
+    request_context: Dict[str, Any]
+) -> TraceableError:
+    """
+    Combine errors from two services into a single traceable error.
+
+    Args:
+        service_a_error: Exception from Service A (if any)
+        service_b_error: Exception from Service B (if any)
+        request_context: Dictionary containing request metadata
+
+    Returns:
+        A TraceableError with combined context from both services
+    """
+    if service_a_error and service_b_error:
+        error_msg = f"Cross-service failure: ServiceA failed during '{request_context.get('service_a_step')}', " \
+                   f"ServiceB failed during '{request_context.get('service_b_step')}'"
+    elif service_a_error:
+        error_msg = f"ServiceA failed during '{request_context.get('service_a_step')}'"
+    else:
+        error_msg = f"ServiceB failed during '{request_context.get('service_b_step')}'"
+
+    combined_context = {
+        **request_context,
+        'service_a_error': str(service_a_error) if service_a_error else None,
+        'service_b_error': str(service_b_error) if service_b_error else None
+    }
+
+    return TraceableError(error_msg, combined_context)
+
+# Example usage
+if __name__ == "__main__":
+    try:
+        # Simulate Service A operation
+        raise ServiceAError("Database connection failed", {'request_id': 'req123', 'step': 'db_connect'})
+    except ServiceAError as e:
+        service_a_error = e
+        try:
+            # Simulate Service B operation
+            raise ServiceBError("Payment processing failed", {'request_id': 'req123', 'step': 'process_payment'})
+        except ServiceBError as e:
+            service_b_error = e
+            combined_error = handle_cross_service_error(service_a_error, service_b_error, {'request_id': 'req123'})
+            logging.error("Cross-service error occurred", exc_info=combined_error)
+```
+
+---
+
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include both the operation (service name) and failing step in context.
+          location: "error_handler.py:10-15"
+        - question: Can the operator find the request or job from the message?
+          answer: Each error includes a trace_id and request_id for cross-service correlation.
+          location: "error_handler.py:10-25"
+        - question: Is sensitive data excluded from the message?
+          answer: Context is explicitly controlled and no sensitive data is included in messages.
+          location: "error_handler.py:10-35"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the exception is created, before any wrapping.
+          location: "error_handler.py:10-25"
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in context pack - same content as first applied node
+```

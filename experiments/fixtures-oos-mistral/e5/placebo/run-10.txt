@@ -1,0 +1,162 @@
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+import json
+
+# Configure logger
+logger = logging.getLogger("cross_service_tracer")
+logger.setLevel(logging.INFO)
+
+class CrossServiceError(Exception):
+    """Custom exception to carry tracing context across services."""
+
+    def __init__(self, message: str, context: Dict[str, Any], original_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.context = context
+        self.original_exception = original_exception
+
+    def __str__(self):
+        base = super().__str__()
+        return f"{base} | Context: {json.dumps(self.context, default=str)}"
+
+def attach_trace_context(operation: str, request_id: str, step: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Attach tracing context to a request or error handler.
+
+    Args:
+        operation: Name of the operation (e.g., 'payment_processing')
+        request_id: Unique identifier for the request
+        step: Current step in the operation (e.g., 'validate_payment')
+        context: Additional context to preserve
+
+    Returns:
+        Updated context dictionary with tracing info
+    """
+    context.update({
+        "operation": operation,
+        "request_id": request_id,
+        "step": step,
+        "trace_id": str(uuid.uuid4())
+    })
+    return context
+
+def handle_service_error(service_name: str, error: Exception, context: Dict[str, Any]) -> None:
+    """
+    Handle errors from a service while preserving cross-service traceability.
+
+    Args:
+        service_name: Name of the service where error occurred
+        error: The exception that was raised
+        context: Context dictionary with tracing information
+    """
+    # Ensure we have tracing context
+    if "request_id" not in context:
+        context = attach_trace_context(
+            operation=context.get("operation", "unknown"),
+            request_id=str(uuid.uuid4()),
+            step="error_handling",
+            context=context
+        )
+
+    # Create enriched error with context
+    enriched_error = CrossServiceError(
+        message=f"Error in {service_name}: {str(error)}",
+        context=context,
+        original_exception=error
+    )
+
+    # Log with all context preserved
+    logger.error(
+        "Service error occurred",
+        exc_info=enriched_error,
+        extra={
+            "service": service_name,
+            "request_id": context["request_id"],
+            "trace_id": context["trace_id"],
+            "operation": context["operation"],
+            "step": context["step"]
+        }
+    )
+
+    # Re-raise with preserved context
+    raise enriched_error
+
+def trace_request_across_services(operation: str, request_id: str, service1_call: callable, service2_call: callable) -> Any:
+    """
+    Execute a request across two services with unified error handling and tracing.
+
+    Args:
+        operation: Name of the operation being performed
+        request_id: Unique identifier for the request
+        service1_call: Callable that invokes the first service
+        service2_call: Callable that invokes the second service
+
+    Returns:
+        Result from the successful execution
+
+    Raises:
+        CrossServiceError: If either service call fails, with full tracing context
+    """
+    context = {"operation": operation, "request_id": request_id}
+
+    try:
+        # Call first service
+        context = attach_trace_context(
+            operation=operation,
+            request_id=request_id,
+            step="service1_call",
+            context=context
+        )
+        result1 = service1_call(context)
+
+        # Call second service
+        context = attach_trace_context(
+            operation=operation,
+            request_id=request_id,
+            step="service2_call",
+            context=context
+        )
+        result2 = service2_call(context)
+
+        return result2
+
+    except Exception as e:
+        # Handle error from either service with full context
+        handle_service_error(
+            service_name="service1" if "service1" in context.get("step", "") else "service2",
+            error=e,
+            context=context
+        )
+---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, messages include operation name, request_id, and failing step in context."
+          location: "cross_service_tracer.py:40-45"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, each message includes request_id and trace_id for correlation."
+          location: "cross_service_tracer.py:40-45"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Context is controlled by caller; implementation doesn't log secrets."
+          location: "cross_service_tracer.py:40-45"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached before wrapping in CrossServiceError."
+          location: "cross_service_tracer.py:15-25"
+      unanswered:
+        - question: "Does the message replace a stack trace?"
+          reason: "Stack traces are preserved via exc_info in logging."
+  not_applied:
+    - node: observability.error-context
+      reason: "Duplicate node in pack - already applied above."
+    - node: observability.error-context
+      reason: "Duplicate node in pack - already applied above."
+    - node: observability.error-context
+      reason: "Duplicate node in pack - already applied above."
+```

@@ -1,0 +1,312 @@
+Here's a robust solution that implements circuit breaker pattern with exponential backoff:
+
+```python
+import time
+import random
+import threading
+from typing import Callable, Optional, Any
+from enum import Enum
+from functools import wraps
+import logging
+
+class CircuitState(Enum):
+    CLOSED = "CLOSED"  # Normal operation, calls allowed
+    OPEN = "OPEN"      # Circuit is open, calls rejected
+    HALF_OPEN = "HALF_OPEN"  # Testing if service is back
+
+class CircuitBreaker:
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 1,
+        success_threshold: int = 2,
+        backoff_factor: float = 2.0,
+        max_backoff: float = 300.0,
+        logger: Optional[logging.Logger] = None
+    ):
+        """
+        Circuit breaker with exponential backoff.
+        
+        Args:
+            failure_threshold: Number of consecutive failures before opening circuit
+            recovery_timeout: Seconds to wait before testing service again
+            half_open_max_calls: Max calls allowed in half-open state
+            success_threshold: Number of successful calls to close circuit
+            backoff_factor: Multiplier for exponential backoff
+            max_backoff: Maximum backoff time in seconds
+            logger: Optional logger instance
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        self.success_threshold = success_threshold
+        self.backoff_factor = backoff_factor
+        self.max_backoff = max_backoff
+        
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = 0
+        self.half_open_calls = 0
+        
+        self._lock = threading.Lock()
+        self.logger = logger or logging.getLogger(__name__)
+    
+    def _reset(self):
+        """Reset circuit breaker to CLOSED state"""
+        with self._lock:
+            self.state = CircuitState.CLOSED
+            self.failure_count = 0
+            self.success_count = 0
+            self.half_open_calls = 0
+    
+    def _open_circuit(self):
+        """Open the circuit"""
+        with self._lock:
+            self.state = CircuitState.OPEN
+            self.last_failure_time = time.time()
+            self.logger.warning(f"Circuit opened after {self.failure_count} failures")
+    
+    def _half_open(self):
+        """Move to half-open state"""
+        with self._lock:
+            self.state = CircuitState.HALF_OPEN
+            self.half_open_calls = 0
+            self.logger.info("Circuit half-open, testing service")
+    
+    def _get_backoff_time(self) -> float:
+        """Calculate exponential backoff time"""
+        backoff = min(
+            self.recovery_timeout * (self.backoff_factor ** self.failure_count),
+            self.max_backoff
+        )
+        # Add some jitter to prevent thundering herd
+        jitter = random.uniform(0, 0.1 * backoff)
+        return backoff + jitter
+    
+    def can_proceed(self) -> bool:
+        """Check if we can call the downstream service"""
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+            
+            elif self.state == CircuitState.OPEN:
+                # Check if recovery timeout has elapsed
+                if time.time() - self.last_failure_time >= self._get_backoff_time():
+                    self._half_open()
+                    return True
+                return False
+            
+            elif self.state == CircuitState.HALF_OPEN:
+                # Only allow limited calls in half-open state
+                if self.half_open_calls < self.half_open_max_calls:
+                    self.half_open_calls += 1
+                    return True
+                return False
+            
+            return False
+    
+    def record_success(self):
+        """Record a successful call"""
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    self._reset()
+                    self.logger.info("Circuit closed after successful recovery")
+            else:
+                # Reset failure count on any success
+                self.failure_count = 0
+    
+    def record_failure(self, exception: Optional[Exception] = None):
+        """Record a failed call"""
+        with self._lock:
+            self.failure_count += 1
+            
+            if self.state == CircuitState.HALF_OPEN:
+                # Any failure in half-open state reopens circuit
+                self._open_circuit()
+                self.logger.error(f"Circuit reopened after failure in half-open state: {exception}")
+            elif self.state == CircuitState.CLOSED:
+                if self.failure_count >= self.failure_threshold:
+                    self._open_circuit()
+                    self.logger.error(f"Circuit opened after {self.failure_count} consecutive failures")
+            # In OPEN state, just keep counting but don't change state
+    
+    def __call__(self, func: Callable) -> Callable:
+        """Decorator to apply circuit breaker to any function"""
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            if not self.can_proceed():
+                raise CircuitBreakerOpenError(
+                    f"Circuit is {self.state.value}, service likely unavailable. "
+                    f"Retry in {self._get_backoff_time():.1f} seconds"
+                )
+            
+            try:
+                result = func(*args, **kwargs)
+                self.record_success()
+                return result
+            except Exception as e:
+                self.record_failure(e)
+                raise
+        
+        return wrapper
+
+class CircuitBreakerOpenError(Exception):
+    """Exception raised when circuit is open"""
+    pass
+
+# Example usage with HTTP API
+import requests
+
+def create_circuit_breaker(http_service):
+    """Create a circuit breaker with configuration for HTTP service"""
+    return CircuitBreaker(
+        failure_threshold=3,      # Open after 3 consecutive failures
+        recovery_timeout=10,      # Initial timeout 10 seconds
+        half_open_max_calls=1,    # Test with 1 call
+        success_threshold=2,      # Close after 2 successes
+        backoff_factor=2.0,       # Double timeout each retry
+        max_backoff=60.0,         # Max timeout 60 seconds
+        logger=logging.getLogger("http_circuit_breaker")
+    )
+
+# Example 1: Using as decorator
+def call_downstream_api():
+    """Replace with actual HTTP call"""
+    response = requests.get("https://api.example.com/data")
+    response.raise_for_status()  # Raise for HTTP errors
+    return response.json()
+
+circuit_breaker = create_circuit_breaker(call_downstream_api)
+
+@circuit_breaker
+def safe_api_call():
+    return call_downstream_api()
+
+# Example 2: Manual usage
+class ResilientHTTPClient:
+    def __init__(self, base_url):
+        self.base_url = base_url
+        self.circuit_breaker = create_circuit_breaker(self)
+    
+    def get(self, path, **kwargs):
+        try:
+            if not self.circuit_breaker.can_proceed():
+                raise CircuitBreakerOpenError("Circuit is open")
+            
+            response = requests.get(f"{self.base_url}{path}", **kwargs)
+            response.raise_for_status()
+            self.circuit_breaker.record_success()
+            return response.json()
+        
+        except CircuitBreakerOpenError:
+            # Circuit is open, take fallback action
+            return self._get_cached_data(path)
+        
+        except Exception as e:
+            self.circuit_breaker.record_failure(e)
+            # Handle error or provide fallback
+            return self._get_cached_data(path)
+    
+    def _get_cached_data(self, path):
+        # Implement caching or fallback logic
+        return {"cached": True, "path": path}
+
+# Example with retry and backoff
+class BackoffRetryClient:
+    def __init__(self, max_retries=3, base_delay=1.0, max_delay=60.0):
+        self.circuit = create_circuit_breaker(self)
+        self.max_retries = max_retries
+        self.base_delay = base_delay
+        self.max_delay = max_delay
+    
+    def call_api(self, endpoint):
+        attempts = 0
+        while True:
+            try:
+                if not self.circuit.can_proceed():
+                    raise CircuitBreakerOpenError("Circuit is open")
+                
+                response = requests.get(endpoint)
+                response.raise_for_status()
+                self.circuit.record_success()
+                return response.json()
+                
+            except CircuitBreakerOpenError:
+                # Circuit is open, wait and retry
+                if attempts >= self.max_retries:
+                    raise
+                
+                delay = min(
+                    self.base_delay * (2 ** attempts) + random.uniform(0, 0.5),
+                    self.max_delay
+                )
+                time.sleep(delay)
+                attempts += 1
+                
+            except requests.RequestException as e:
+                self.circuit.record_failure(e)
+                
+                # Check if circuit just opened
+                if self.circuit.state == CircuitState.OPEN:
+                    print(f"Service is down, waiting {self.circuit._get_backoff_time():.1f}s")
+                
+                if attempts >= self.max_retries:
+                    raise
+                
+                attempts += 1
+                time.sleep(self.get_backoff_delay(attempts))
+    
+    def get_backoff_delay(self, attempts):
+        """Calculate exponential backoff with jitter"""
+        delay = min(
+            self.base_delay * (2 ** attempts),
+            self.max_delay
+        )
+        # Add jitter to prevent thundering herd
+        return delay + random.uniform(0, delay * 0.1)
+
+# Usage
+if __name__ == "__main__":
+    # Setup logging
+    logging.basicConfig(level=logging.INFO)
+    
+    # Method 1: Decorator style
+    try:
+        result = safe_api_call()
+        print(f"API response: {result}")
+    except CircuitBreakerOpenError as e:
+        print(f"Service unavailable: {e}")
+    
+    # Method 2: Manual client
+    client = ResilientHTTPClient("https://api.example.com")
+    result = client.get("/data", timeout=5)
+    
+    # Method 3: With retry
+    client = BackoffRetryClient(max_retries=5)
+    try:
+        result = client.call_api("https://api.example.com/data")
+    except CircuitBreakerOpenError:
+        print("Service is permanently unavailable")
+```
+
+Key features of this implementation:
+
+1. **Circuit Breaker Pattern**: Three states (CLOSED, OPEN, HALF-OPEN)
+2. **Exponential Backoff**: Increasing timeout between retries
+3. **Jitter**: Random delay addition to prevent thundering herd
+4. **Thread-safe**: Uses locks for concurrent access
+5. **Configurable**: All parameters can be tuned
+6. **Flexible**: Can be used as decorator or manual client
+7. **Logging**: Informative logs for debugging
+8. **Graceful degradation**: Falls back gracefully when service is down
+
+The solution prevents hammering by:
+- Opening the circuit after consecutive failures
+- Rejecting calls immediately when open
+- Testing with limited calls in half-open state
+- Using exponential backoff with jitter
+- Allowing automatic recovery when service comes back

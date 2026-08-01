@@ -1,0 +1,425 @@
+Here's a comprehensive error handler for tracing requests across two services:
+
+## 1. Core Correlation ID Generator
+
+```python
+# correlation.py
+import uuid
+import hashlib
+import time
+import random
+
+class CorrelationIDGenerator:
+    """Generates and manages correlation IDs for cross-service tracing"""
+    
+    @staticmethod
+    def generate():
+        """Generate a unique correlation ID for a request"""
+        # Combine timestamp with UUID for uniqueness
+        timestamp = int(time.time() * 1000)
+        unique_part = uuid.uuid4().hex[:8]
+        return f"corr-{timestamp}-{unique_part}"
+    
+    @staticmethod
+    def create_span_id(parent_correlation_id, service_name):
+        """Create a span ID for specific service within the request"""
+        # Combine parent ID with service name for traceability
+        hash_input = f"{parent_correlation_id}:{service_name}:{uuid.uuid4().hex[:4]}"
+        return hashlib.md5(hash_input.encode()).hexdigest()[:12]
+```
+
+## 2. Unified Error Handler Class
+
+```python
+# unified_error_handler.py
+import json
+import logging
+import traceback
+import sys
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+from correlation import CorrelationIDGenerator
+
+class TraceableError(Exception):
+    """Custom exception that carries context across services"""
+    
+    def __init__(self, message: str, service: str, correlation_id: str, 
+                 span_id: str, error_code: str, context: Dict = None):
+        super().__init__(message)
+        self.message = message
+        self.service = service
+        self.correlation_id = correlation_id
+        self.span_id = span_id
+        self.error_code = error_code
+        self.context = context or {}
+        self.timestamp = datetime.utcnow().isoformat()
+
+class UnifiedErrorHandler:
+    """Unified error handler for tracing requests across two services"""
+    
+    def __init__(self, service_name: str, log_file: str = None):
+        self.service_name = service_name
+        self.setup_logging(log_file)
+        self.trace_storage = {}
+        
+    def setup_logging(self, log_file=None):
+        """Configure logging with structured format"""
+        log_format = logging.Formatter(
+            '%(asctime)s | %(levelname)s | %(correlation_id)s | '
+            '%(span_id)s | %(service)s | %(message)s'
+        )
+        
+        self.logger = logging.getLogger(f"trace_{self.service_name}")
+        self.logger.setLevel(logging.INFO)
+        
+        # Console handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(log_format)
+        self.logger.addHandler(console_handler)
+        
+        # File handler if specified
+        if log_file:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(log_format)
+            self.logger.addHandler(file_handler)
+    
+    def start_trace(self, correlation_id: str = None) -> Dict:
+        """Initialize a new trace context"""
+        if not correlation_id:
+            correlation_id = CorrelationIDGenerator.generate()
+        
+        span_id = CorrelationIDGenerator.create_span_id(correlation_id, self.service_name)
+        trace_context = {
+            'correlation_id': correlation_id,
+            'span_id': span_id,
+            'service': self.service_name,
+            'start_time': datetime.utcnow().isoformat(),
+            'events': []
+        }
+        
+        # Store trace context
+        self.trace_storage[span_id] = trace_context
+        
+        self.logger.info(
+            f"Starting trace for request",
+            extra={'correlation_id': correlation_id, 'span_id': span_id, 'service': self.service_name}
+        )
+        
+        return trace_context
+    
+    def log_trace_event(self, trace_context: Dict, message: str, 
+                        event_type: str = "info", **kwargs):
+        """Log an event within the trace"""
+        event = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'type': event_type,
+            'message': message,
+            'data': kwargs
+        }
+        trace_context['events'].append(event)
+        
+        log_method = getattr(self.logger, event_type if event_type in ['info', 'warning', 'error', 'critical'] else 'info')
+        log_method(
+            message,
+            extra={**kwargs, 'correlation_id': trace_context['correlation_id'], 
+                   'span_id': trace_context['span_id'], 'service': self.service_name}
+        )
+    
+    def capture_error(self, exception: Exception, trace_context: Dict, 
+                     service_context: Dict = None) -> Dict:
+        """Capture and format error with full trace context"""
+        error_data = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'correlation_id': trace_context['correlation_id'],
+            'span_id': trace_context['span_id'],
+            'service': self.service_name,
+            'error_type': type(exception).__name__,
+            'error_message': str(exception),
+            'stack_trace': traceback.format_exc(),
+            'context': service_context or {},
+            'request_path': trace_context.get('request_path'),
+            'trace_events': trace_context['events']
+        }
+        
+        # Log the error with full context
+        self.logger.error(
+            f"Error occurred: {str(exception)}",
+            extra={'correlation_id': trace_context['correlation_id'],
+                   'span_id': trace_context['span_id'],
+                   'service': self.service_name}
+        )
+        
+        # Store error data for retrieval
+        trace_context['error'] = error_data
+        
+        return error_data
+    
+    def propagate_to_other_service(self, error_data: Dict, 
+                                  target_service: str) -> Dict:
+        """Prepare error data for propagation to other service"""
+        # Create span for the other service
+        other_span_id = CorrelationIDGenerator.create_span_id(
+            error_data['correlation_id'], target_service
+        )
+        
+        propagated = {
+            'correlation_id': error_data['correlation_id'],
+            'source_service': self.service_name,
+            'target_service': target_service,
+            'span_id': other_span_id,
+            'error_data': error_data,
+            'propagation_timestamp': datetime.utcnow().isoformat(),
+            'error_code': error_data.get('error_code', 'UNKNOWN_ERROR')
+        }
+        
+        self.logger.warning(
+            f"Propagating error to {target_service}",
+            extra={'correlation_id': error_data['correlation_id'],
+                   'span_id': self.service_name,
+                   'service': self.service_name}
+        )
+        
+        return propagated
+    
+    def get_trace_summary(self, correlation_id: str) -> Dict:
+        """Retrieve and summarize trace data for an operator"""
+        summary = {
+            'correlation_id': correlation_id,
+            'services_involved': [],
+            'total_duration': 0,
+            'error_count': 0,
+            'event_count': 0,
+            'all_events': [],
+            'errors': []
+        }
+        
+        # Search all trace contexts for this correlation ID
+        for span_id, trace in self.trace_storage.items():
+            if trace['correlation_id'] == correlation_id:
+                summary['services_involved'].append(trace['service'])
+                summary['event_count'] += len(trace['events'])
+                
+                if 'error' in trace:
+                    summary['error_count'] += 1
+                    summary['errors'].append(trace['error'])
+                
+                # Calculate total duration
+                start = datetime.fromisoformat(trace['start_time'])
+                end = datetime.fromisoformat(trace.get('end_time', datetime.utcnow().isoformat()))
+                summary['total_duration'] += (end - start).total_seconds()
+                
+                # Collect all events
+                summary['all_events'].extend(trace['events'])
+        
+        return summary
+    
+    def complete_trace(self, trace_context: Dict, status: str = "completed"):
+        """Mark a trace as complete"""
+        trace_context['status'] = status
+        trace_context['end_time'] = datetime.utcnow().isoformat()
+        
+        self.logger.info(
+            f"Trace completed with status: {status}",
+            extra={'correlation_id': trace_context['correlation_id'],
+                   'span_id': trace_context['span_id'],
+                   'service': self.service_name}
+        )
+
+class TwoServiceRequestTracer:
+    """Middleware to handle tracing across two services"""
+    
+    def __init__(self, service_a_name: str, service_b_name: str):
+        self.service_a = UnifiedErrorHandler(service_a_name)
+        self.service_b = UnifiedErrorHandler(service_b_name)
+    
+    def process_request(self, service: str, request_data: Dict, 
+                       business_logic_func) -> Dict:
+        """Process a request with full error tracing"""
+        
+        # Get correlation ID from incoming request or generate new
+        correlation_id = request_data.get('correlation_id') or CorrelationIDGenerator.generate()
+        
+        # Select appropriate handler
+        handler = self.service_a if service == 'A' else self.service_b
+        
+        # Start trace
+        trace_context = handler.start_trace(correlation_id)
+        trace_context['request_path'] = request_data.get('path', '')
+        
+        try:
+            # Log the request
+            handler.log_trace_event(
+                trace_context, 
+                f"Received request for {service}",
+                "info",
+                request_data=request_data
+            )
+            
+            # Execute business logic
+            result = business_logic_func(request_data, trace_context)
+            
+            # Log successful completion
+            handler.log_trace_event(
+                trace_context, 
+                f"Request processed successfully for {service}",
+                "info",
+                result=result
+            )
+            
+            handler.complete_trace(trace_context, "completed")
+            return {'status': 'success', 'data': result, 'correlation_id': correlation_id}
+            
+        except TraceableError as e:
+            # Capture the error
+            error_data = handler.capture_error(e, trace_context)
+            
+            # Propagate to other service if needed
+            if service == 'A':
+                propagated_data = handler.propagate_to_other_service(error_data, self.service_b.service_name)
+                self.service_b.logger.error(
+                    f"Received error from service A: {e.message}",
+                    extra={'correlation_id': correlation_id, 'span_id': propagated_data['span_id'], 
+                           'service': self.service_b.service_name}
+                )
+            
+            handler.complete_trace(trace_context, "error")
+            return {'status': 'error', 'error_data': error_data, 'correlation_id': correlation_id}
+            
+        except Exception as e:
+            # Handle unexpected errors
+            error_data = handler.capture_error(e, trace_context)
+            handler.complete_trace(trace_context, "error")
+            return {'status': 'error', 'error_data': error_data, 'correlation_id': correlation_id}
+    
+    def get_full_trace(self, correlation_id: str) -> Dict:
+        """Get complete trace information for operator review"""
+        trace_data = {
+            'correlation_id': correlation_id,
+            'service_a': self.service_a.get_trace_summary(correlation_id),
+            'service_b': self.service_b.get_trace_summary(correlation_id)
+        }
+        
+        # Combine and analyze
+        all_events = []
+        all_errors = []
+        for service in ['service_a', 'service_b']:
+            service_data = trace_data[service]
+            all_events.extend(service_data['all_events'])
+            all_errors.extend(service_data['errors'])
+        
+        trace_data['combined_events'] = sorted(all_events, key=lambda x: x['timestamp'])
+        trace_data['combined_errors'] = all_errors
+        trace_data['total_services_called'] = 2
+        
+        return trace_data
+```
+
+## 3. Usage Example
+
+```python
+# example_usage.py
+from unified_error_handler import TwoServiceRequestTracer, TraceableError, CorrelationIDGenerator
+import time
+
+# Initialize tracer
+tracer = TwoServiceRequestTracer("PaymentService", "NotificationService")
+
+# Service A (Payment Service) business logic
+def payment_process(request_data, trace_context):
+    tracer.service_a.log_trace_event(trace_context, "Processing payment", "info", 
+                                    amount=request_data.get('amount'))
+    
+    # Simulate some processing
+    time.sleep(0.1)
+    
+    # Simulate an error condition
+    if request_data.get('amount', 0) > 10000:
+        raise TraceableError(
+            "Transaction exceeds limit",
+            service="PaymentService",
+            correlation_id=trace_context['correlation_id'],
+            span_id=trace_context['span_id'],
+            error_code="LIMIT_EXCEEDED",
+            context={'amount': request_data.get('amount')}
+        )
+    
+    # Success - call service B
+    notification_result = tracer.service_b.start_trace(trace_context['correlation_id'])
+    tracer.service_b.log_trace_event(notification_result, "Sending notification", "info")
+    
+    return {"payment_id": "PAY-123456", "status": "completed"}
+
+# Service B (Notification Service) business logic
+def notification_process(request_data, trace_context):
+    tracer.service_b.log_trace_event(trace_context, "Sending notification", "info",
+                                   notification_type=request_data.get('type'))
+    time.sleep(0.05)
+    return {"notification_id": "NOTIF-789", "sent": True}
+
+# Process a request
+request = {
+    'correlation_id': None,  # Will be generated if not provided
+    'amount': 15000,
+    'type': 'email',
+    'path': '/api/payment'
+}
+
+result = tracer.process_request('A', request, payment_process)
+
+# If error propagated, check other service
+if result['status'] == 'error':
+    print("\n=== FULL TRACE FOR OPERATOR ===")
+    trace = tracer.get_full_trace(result['correlation_id'])
+    print(json.dumps(trace, indent=2, default=str))
+```
+
+## 4. Integration Example with Web Framework
+
+```python
+# flask_integration.py
+from flask import Flask, request, jsonify
+from unified_error_handler import TwoServiceRequestTracer
+
+app = Flask(__name__)
+tracer = TwoServiceRequestTracer("API Gateway", "Payment Service")
+
+@app.route('/api/payment', methods=['POST'])
+def handle_payment():
+    data = request.get_json()
+    
+    # Get correlation ID from headers if provided
+    data['correlation_id'] = request.headers.get('X-Correlation-ID')
+    
+    result = tracer.process_request('A', data, payment_process)
+    
+    # Set correlation ID in response header for client tracing
+    response = jsonify(result)
+    response.headers['X-Correlation-ID'] = result.get('correlation_id')
+    
+    return response
+
+@app.route('/api/trace/<correlation_id>', methods=['GET'])
+def get_trace(correlation_id):
+    """Endpoint for operators to retrieve trace information"""
+    trace = tracer.get_full_trace(correlation_id)
+    return jsonify(trace)
+```
+
+## 5. Log Format for Operator
+
+The error handler generates logs in a structured format that operators can grep:
+
+```
+2024-01-15 10:30:25 | INFO | corr-1705314625327 | PaymentService | a1b2c3d4e5f6 | $ Starting trace for request
+2024-01-15 10:30:25 | INFO | corr-1705314625327 | PaymentService | a1b2c3d4e5f6 | Processing payment amount=15000
+2024-01-15 10:30:25 | ERROR | corr-1705314625327 | PaymentService | a1b2c3d4e5f6 | Error occurred: Transaction exceeds limit
+2024-01-15 10:30:25 | WARNING | corr-1705314625327 | PaymentService | a1b2c3d4e5f6 | Propagating error to NotificationService
+```
+
+This error handler provides:
+- **Correlation IDs** to track a single request across both services
+- **Span IDs** for individual service operations
+- **Full trace context** including all events and errors
+- **Structured logging** that can be easily filtered and searched
+- **Trace summarization** for operators to quickly understand issues
+- **Propagation mechanism** to trace errors as they move between services

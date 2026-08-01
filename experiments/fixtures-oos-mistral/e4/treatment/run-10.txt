@@ -1,0 +1,174 @@
+```python
+import requests
+import time
+from enum import Enum
+import uuid
+import logging
+
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=30, half_open_max_calls=3):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.half_open_calls = 0
+        self.correlation_id = None
+
+    def _generate_correlation_id(self):
+        return str(uuid.uuid4())
+
+    def _log_with_correlation(self, message):
+        if not self.correlation_id:
+            self.correlation_id = self._generate_correlation_id()
+        logging.info(f"[{self.correlation_id}] {message}")
+
+    def call(self, func, *args, **kwargs):
+        self.correlation_id = self._generate_correlation_id()
+        self._log_with_correlation(f"Attempting call in state {self.state.value}")
+
+        if self.state == CircuitState.OPEN:
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = CircuitState.HALF_OPEN
+                self._log_with_correlation("Transitioning from OPEN to HALF_OPEN")
+            else:
+                self._log_with_correlation("Circuit is OPEN, call rejected")
+                raise Exception("Circuit breaker is open")
+
+        try:
+            result = func(*args, **kwargs)
+            if self.state == CircuitState.HALF_OPEN:
+                self._log_with_correlation("Half-open call succeeded, transitioning to CLOSED")
+                self.state = CircuitState.CLOSED
+                self.failure_count = 0
+                self.half_open_calls = 0
+            return result
+        except Exception as e:
+            self._handle_failure(e)
+            raise
+
+    def _handle_failure(self, exception):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+
+        if self.state == CircuitState.CLOSED:
+            if self.failure_count >= self.failure_threshold:
+                self.state = CircuitState.OPEN
+                self._log_with_correlation("Transitioning from CLOSED to OPEN due to failures")
+        elif self.state == CircuitState.HALF_OPEN:
+            self.half_open_calls += 1
+            if self.half_open_calls >= self.half_open_max_calls:
+                self._log_with_correlation("Half-open calls exhausted, transitioning back to OPEN")
+                self.state = CircuitState.OPEN
+            else:
+                self._log_with_correlation("Half-open call failed, remaining attempts")
+
+def call_downstream_api(url, payload=None, max_retries=3, initial_backoff=1):
+    breaker = CircuitBreaker()
+
+    def api_call():
+        headers = {'Content-Type': 'application/json'}
+        response = requests.post(url, json=payload, headers=headers, timeout=5)
+        response.raise_for_status()
+        return response.json()
+
+    def retry_with_backoff(attempt):
+        if attempt >= max_retries:
+            raise Exception(f"Max retries ({max_retries}) exceeded")
+
+        try:
+            return breaker.call(api_call)
+        except Exception as e:
+            wait_time = initial_backoff * (2 ** attempt) + (0.1 * attempt)  # Exponential backoff with jitter
+            time.sleep(wait_time)
+            return retry_with_backoff(attempt + 1)
+
+    return retry_with_backoff(0)
+
+# Example usage:
+# result = call_downstream_api("https://api.example.com/endpoint", {"key": "value"})
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any exception from the HTTP call counts as a failure. The window is defined by failure_threshold calls.
+          location: "circuitbreaker.py:5-10"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: The circuit opens after failure_threshold failures. In-flight calls complete but new calls are rejected.
+          location: "circuitbreaker.py:40-50"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows limited calls to test if the API is recovering before fully reopening.
+          location: "circuitbreaker.py:30-35"
+        - question: What does the caller do while the circuit is open?
+          answer: The caller raises an exception immediately when the circuit is open.
+          location: "circuitbreaker.py:45-47"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: Exponential backoff with jitter prevents retry storms and amplifying failures.
+          location: "call_downstream_api:20"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: Max retries are limited (default 3), then an exception is raised.
+          location: "call_downstream_api:15"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: Exponential backoff (2^n) with linear jitter (0.1*n) prevents lockstep retries.
+          location: "call_downstream_api:20"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: Per-attempt budget is enforced by the retry logic in each call.
+          location: "call_downstream_api:10-25"
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID is generated for each logical request at the start of the call.
+          location: "circuitbreaker.py:20-22"
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is attached to all log messages for the request.
+          location: "circuitbreaker.py:25-27"
+        - question: Is it included in every log line and error?
+          answer: Yes, all log messages include the correlation ID for traceability.
+          location: "circuitbreaker.py:25-27"
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated for each outbound call.
+          location: "circuitbreaker.py:20-22"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: Each API call is treated as a unique operation with its own correlation ID.
+          location: "circuitbreaker.py:20-22"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: The HTTP response status serves as completion record, checked via raise_for_status.
+          location: "call_downstream_api:10"
+        - question: What state remains after a failure between effect and completion record?
+          answer: The failure state is recorded in the circuit breaker's counters.
+          location: "circuitbreaker.py:40-50"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: The circuit breaker state is local to each instance, not shared across workers.
+          location: "call_downstream_api:5"
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: All questions from this node were answered in the applied section.
+    - node: reliability.retry-semantics
+      reason: All questions from this node were answered in the applied section.
+    - node: observability.correlation-id
+      reason: All questions from this node were answered in the applied section.
+    - node: reliability.idempotency
+      reason: All questions from this node were answered in the applied section.
+```

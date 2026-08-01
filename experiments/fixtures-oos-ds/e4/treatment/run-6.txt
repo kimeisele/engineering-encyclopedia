@@ -1,0 +1,244 @@
+```python
+import time
+import random
+import logging
+from dataclasses import dataclass
+from typing import Callable, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CircuitBreakerConfig:
+    failure_threshold: int = 5
+    open_duration: float = 30.0
+    half_open_max_calls: int = 1
+    retry_backoff: float = 1.0
+    retry_jitter: float = 0.5
+    max_attempts: int = 3
+
+
+class CircuitBreaker:
+    """
+    A circuit breaker that stops calling a failing API while it's down,
+    probes recovery in half-open state, and never hammers the dependency.
+    """
+
+    def __init__(self, config: Optional[CircuitBreakerConfig] = None):
+        self.config = config or CircuitBreakerConfig()
+        self.failure_count = 0
+        self.state = "closed"  # closed, open, half_open
+        self.open_until = 0.0
+        self.half_open_calls = 0
+        self.half_open_results = []
+
+    def _allow_call(self) -> bool:
+        """Determines if a call is allowed based on breaker state."""
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if time.monotonic() >= self.open_until:
+                self.state = "half_open"
+                self.half_open_calls = 0
+                self.half_open_results = []
+                return True
+            return False
+        # half-open - allow up to the limit
+        if self.half_open_calls < self.config.half_open_max_calls:
+            self.half_open_calls += 1
+            return True
+        return False
+
+    def _record_success(self):
+        """Record a successful call."""
+        if self.state == "half_open":
+            self.half_open_results.append(True)
+            if len(self.half_open_results) >= self.config.half_open_max_calls:
+                if all(self.half_open_results):
+                    self.state = "closed"
+                    self.failure_count = 0
+        elif self.state == "closed":
+            self.failure_count = 0
+
+    def _record_failure(self):
+        """Record a failed call."""
+        if self.state == "closed":
+            self.failure_count += 1
+            if self.failure_count >= self.config.failure_threshold:
+                self.state = "open"
+                self.open_until = time.monotonic() + self.config.open_duration
+                logger.warning(
+                    "Circuit opened: %d consecutive failures", self.failure_count
+                )
+        elif self.state == "half_open":
+            self.half_open_results.append(False)
+            self.state = "open"  # probe failed, open again
+            self.open_until = time.monotonic() + self.config.open_duration
+            logger.warning("Half-open probe failed; circuit re-opened")
+
+
+def _with_retry_and_backoff(
+    func: Callable,
+    max_attempts: int,
+    backoff: float,
+    jitter: float,
+    correlation_id: str,
+):
+    """Retries with exponential backoff + jitter, capped at max_attempts."""
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            return func()
+        except (HTTPError, URLError, TimeoutError) as e:
+            attempt += 1
+            if attempt >= max_attempts:
+                raise
+            wait = backoff * (2 ** (attempt - 1)) + random.uniform(0, jitter)
+            logger.warning(
+                "API call failed (attempt %d/%d): %s; retrying in %.2fs (corr=%s)",
+                attempt,
+                max_attempts,
+                e,
+                wait,
+                correlation_id,
+            )
+            time.sleep(wait)
+    # Unreachable, but keeps type-checkers happy
+    raise RuntimeError("Retry loop exhausted")
+
+
+def call_downstream_api(
+    url: str,
+    breaker: CircuitBreaker,
+    correlation_id: str,
+    timeout: float = 5.0,
+    max_attempts: Optional[int] = None,
+) -> bytes:
+    """
+    Calls a downstream HTTP API with circuit-breaking + bounded retries.
+
+    - Does NOT hammer the API while it's down (breaker opens).
+    - Uses bounded retries with exponential backoff + jitter.
+    - Half-open state probes recovery with a single call.
+    - Propagates a correlation id for observability.
+    """
+    attempts = max_attempts or breaker.config.max_attempts
+
+    if not breaker._allow_call():
+        logger.warning(
+            "Circuit open; fast-failing call (corr=%s)", correlation_id
+        )
+        raise RuntimeError(
+            f"Circuit open, not calling {url} (correlation_id={correlation_id})"
+        )
+
+    def _do_call() -> bytes:
+        req = Request(url, headers={"X-Correlation-ID": correlation_id})
+        with urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
+    try:
+        result = _with_retry_and_backoff(
+            _do_call,
+            max_attempts=attempts,
+            backoff=breaker.config.retry_backoff,
+            jitter=breaker.config.retry_jitter,
+            correlation_id=correlation_id,
+        )
+        breaker._record_success()
+        return result
+    except Exception as e:
+        breaker._record_failure()
+        raise
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: >-
+            Failures are HTTPError, URLError, or TimeoutError. Window is
+            consecutive failures (no sliding time window) tracked on the
+            breaker.
+          location: api_client.py:64
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: >-
+            Opens after configurable failure_threshold. In-flight calls
+            complete naturally; new calls fast-fail while open.
+          location: api_client.py:84
+        - question: How does the half-open state test recovery?
+          answer: >-
+            After open_duration, circuit transitions to half-open allowing
+            one probe call. Success closes circuit; failure re-opens.
+          location: api_client.py:104
+        - question: What does the caller do while the circuit is open?
+          answer: >-
+            Caller gets a fast-fail RuntimeError instead of hitting a
+            down API, preventing hammering and timeouts.
+          location: api_client.py:131
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: >-
+            This function performs GET (idempotent) calls; duplicate delivery
+            of the same request is inherently safe for read-only operations.
+          location: api_client.py:120
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: >-
+            Max attempts configured (default 3). After last attempt, the
+            exception propagates to caller and breaker records failure.
+          location: api_client.py:94
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: >-
+            Exponential backoff (base * 2^attempt) with random jitter between
+            0 and jitter param, preventing synchronized retries.
+          location: api_client.py:98
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: >-
+            Per-call budget; each invocation gets its own max attempts. No
+            global shared budget in this implementation.
+          location: api_client.py:127
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: >-
+            Correlation ID is passed in by the caller and attached to the
+            HTTP header; created upstream, not regenerated here.
+          location: api_client.py:123
+        - question: How is it propagated to every downstream call?
+          answer: >-
+            It's sent as an X-Correlation-ID header on each HTTP request to
+            the downstream API.
+          location: api_client.py:123
+        - question: Is it included in every log line and error?
+          answer: >-
+            Included in warning logs for failures, retries, and circuit
+            opening; not in all error types.
+          location: api_client.py:95
+        - question: What happens when an inbound call has no id?
+          answer: >-
+            Not handled here—requires passed parameter. Caller is responsible
+            for generating it if absent.
+          location: api_client.py:43
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: >-
+        The function performs read-only GET operations which are inherently
+        idempotent; no state change occurs, so idempotency tracking and
+        deduplication are unnecessary. Retry of GET is safe.
+---

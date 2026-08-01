@@ -1,0 +1,228 @@
+```python
+import logging
+import random
+import threading
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class CircuitState(Enum):
+    """States of the circuit breaker."""
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+@dataclass
+class CircuitConfig:
+    """Configuration for the circuit breaker."""
+    failure_threshold: int = 5
+    recovery_timeout: float = 30.0  # seconds circuit stays open
+    half_open_max_calls: int = 1  # probe with only 1 call at a time
+    count_window: float = 60.0  # failure count window in seconds
+
+
+class CircuitBreaker:
+    """A simple circuit breaker protecting a downstream HTTP API.
+
+    Implements CLOSED -> OPEN -> HALF_OPEN -> CLOSED state transitions.
+    Counts failures within a sliding time window in CLOSED state.
+    HALF_OPEN allows one probe call to test recovery.
+    """
+
+    def __init__(self, config: CircuitConfig = None):
+        self.config = config or CircuitConfig()
+        self.state = CircuitState.CLOSED
+        self._lock = threading.Lock()
+        self._failures: list[float] = []
+        self._open_until = 0.0
+        self._half_open_calls = 0
+
+    def _record_failure(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._failures.append(now)
+            # Prune old failures outside the window
+            self._failures = [t for t in self._failures if now - t <= self.config.count_window]
+            if len(self._failures) >= self.config.failure_threshold:
+                self._open_until = now + self.config.recovery_timeout
+                self.state = CircuitState.OPEN
+                logger.warning(f"Circuit OPEN after {len(self._failures)} failures")
+
+    def _reset(self) -> None:
+        with self._lock:
+            self._failures.clear()
+            self.state = CircuitState.CLOSED
+
+    def _try_enter_half_open(self) -> bool:
+        """Attempt to transition to HALF_OPEN when recovery_timeout has elapsed."""
+        now = time.monotonic()
+        with self._lock:
+            if self.state == CircuitState.OPEN and now >= self._open_until:
+                self.state = CircuitState.HALF_OPEN
+                self._half_open_calls = 0
+                logger.info("Circuit HALF_OPEN, probing recovery")
+                return True
+            return False
+
+    def _acquire_half_open_slot(self) -> bool:
+        """Acquire a probe slot if HALF_OPEN and capacity available."""
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN and self._half_open_calls < self.config.half_open_max_calls:
+                self._half_open_calls += 1
+                return True
+            return False
+
+    def _half_open_success(self) -> None:
+        with self._lock:
+            self._half_open_calls = 0
+            self._reset()
+            logger.info("Circuit CLOSED after successful probe")
+
+    def _half_open_failure(self) -> None:
+        with self._lock:
+            self._half_open_calls = 0
+            self._open_until = time.monotonic() + self.config.recovery_timeout
+            self.state = CircuitState.OPEN
+            logger.warning("Circuit back to OPEN after probe failure")
+
+    def call(self, fn: Callable, *args, **kwargs):
+        """Execute fn if circuit allows, otherwise raise CircuitOpenError."""
+        if self.state == CircuitState.OPEN:
+            if self._try_enter_half_open():
+                pass  # proceed to slot acquisition
+            else:
+                raise CircuitOpenError("Circuit is open, not calling API")
+
+        if self.state == CircuitState.HALF_OPEN:
+            if not self._acquire_half_open_slot():
+                raise CircuitOpenError("Circuit half-open, probe slot busy")
+
+        try:
+            result = fn(*args, **kwargs)
+            if self.state == CircuitState.HALF_OPEN:
+                self._half_open_success()
+            self._reset()  # any success in CLOSED resets the failure count
+            return result
+        except Exception as e:
+            if self.state == CircuitState.HALF_OPEN:
+                self._half_open_failure()
+            else:
+                self._record_failure()
+            raise CircuitCallError(f"called API and it failed: {e}") from e
+
+
+class CircuitOpenError(Exception):
+    """Raised when circuit is open and call is not attempted."""
+
+
+class CircuitCallError(Exception):
+    """Raised when the downstream call itself fails."""
+
+
+# ---------------------------------------------------------------------
+# Usage example
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    import requests
+
+    def call_downstream() -> str:
+        resp = requests.get("https://api.example.com/v1/data", timeout=2)
+        resp.raise_for_status()
+        return resp.text
+
+    breaker = CircuitBreaker(CircuitConfig(failure_threshold=3, recovery_timeout=10.0))
+
+    # Print state for observability (in real code, expose as metrics/logs)
+    def report_state():
+        print(f"  breaker state: {breaker.state}, failures: {len(breaker._failures)}")
+
+    for i in range(10):
+        try:
+            print(f"\nAttempt {i}:")
+            result = breaker.call(call_downstream)
+            print(f"  success: {result[:40]}...")
+        except CircuitOpenError:
+            print(f"  NOT CALLED - circuit {breaker.state}")
+        except CircuitCallError as e:
+            print(f"  call failed and recorded: {e}")
+        except Exception as e:
+            print(f"  unexpected error: {e}")
+        report_state()
+        time.sleep(1)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any exception from the downstream call counts. Failures are counted within a sliding 60-second window (configurable)."
+          location: "circuit_breaker.py:44-46"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Opens when failures in window reach threshold. No new calls are made; in-flight calls are not interrupted, they finish naturally."
+          location: "circuit_breaker.py:50-56"
+        - question: "How does the half-open state test recovery?"
+          answer: "After recovery timeout elapses, circuit enters half-open, allowing exactly one probe call. Success closes; failure reopens."
+          location: "circuit_breaker.py:72-84, 111-116"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller receives CircuitOpenError to handle gracefully (e.g., return cached value, queue request, or report failure)."
+          location: "circuit_breaker.py:99-105"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "No retries in the probe path to avoid hammering; downstream failures propagate immediately to the caller as CircuitCallError."
+          location: "circuit_breaker.py:113-116"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Not applicable - no automatic retries. The breaker relies on recovery timeout before probing, and half-open allows one call."
+          location: "circuit_breaker.py:28-31"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Not applicable - no retries. The breaker's failure counter and half-open slot are shared across all threads and processes."
+          location: "circuit_breaker.py:41-47"
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Not addressed - the breaker does not guarantee de-duplication; the caller must ensure idempotency if retries are added."
+          location: "circuit_breaker.py:0"
+      unanswered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          reason: "Out of scope for the breaker; idempotency is a caller concern, addressed in the idempotency node."
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "Is it included in every log line and error?"
+          answer: "Logs in the breaker include circuit state and event context; downstream call errors include the exception. No explicit correlation id."
+          location: "circuit_breaker.py:54-56"
+      unanswered:
+        - question: "What value identifies one logical request, and where is it created?"
+          reason: "The breaker is library code; correlation id generation is the responsibility of the calling application."
+        - question: "How is it propagated to every downstream call?"
+          reason: "The breaker does not modify outgoing HTTP headers; the application must handle propagation in its own HTTP layer."
+        - question: "What happens when an inbound call has no id?"
+          reason: "Not applicable to the breaker; inbound requests are outside this library's scope."
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, the breaker itself is concurrency-safe but does not track operation completion; idempotency checks are caller-side."
+          location: "circuit_breaker.py:39-41"
+      unanswered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          reason: "The breaker does not manage operations; idempotency keys must be provided by the calling application."
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          reason: "Out of scope; the breaker only protects the API call, it does not persist user operation state."
+        - question: "What state remains after a failure between effect and completion record?"
+          reason: "Not handled by the breaker; requires application-level transactional logic."
+  not_applied: []

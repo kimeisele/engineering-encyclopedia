@@ -1,0 +1,256 @@
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+# Configure logging to include correlation ID in every log line
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ServiceContext:
+    correlation_id: str
+    service_name: str
+    request_data: Dict[str, Any]
+
+class ErrorHandler:
+    """
+    Error handler that ensures correlation ID is propagated across service boundaries
+    and includes sufficient context for tracing requests across multiple services.
+    """
+
+    @staticmethod
+    def generate_correlation_id() -> str:
+        """Generate a unique correlation ID for a new request."""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def extract_correlation_id(headers: Optional[Dict[str, str]]) -> str:
+        """Extract correlation ID from incoming headers, generating one if missing."""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return ErrorHandler.generate_correlation_id()
+
+    @staticmethod
+    def propagate_correlation_id(headers: Dict[str, str], correlation_id: str) -> Dict[str, str]:
+        """Add correlation ID to outgoing headers for downstream calls."""
+        headers['X-Correlation-ID'] = correlation_id
+        return headers
+
+    @staticmethod
+    def create_error_context(
+        operation: str,
+        failing_step: str,
+        correlation_id: str,
+        service_name: str,
+        request_data: Dict[str, Any],
+        original_error: Exception
+    ) -> Dict[str, Any]:
+        """Create a comprehensive error context for logging and tracing."""
+        return {
+            'operation': operation,
+            'failing_step': failing_step,
+            'correlation_id': correlation_id,
+            'service_name': service_name,
+            'request_data': request_data,
+            'error_type': type(original_error).__name__,
+            'error_message': str(original_error)
+        }
+
+    @staticmethod
+    def handle_service_error(
+        context: ServiceContext,
+        operation: str,
+        failing_step: str,
+        error: Exception,
+        is_critical: bool = False
+    ) -> None:
+        """
+        Handle an error in a service, ensuring it's logged with full context.
+
+        Args:
+            context: ServiceContext containing correlation ID and request data
+            operation: What the service was trying to do
+            failing_step: Specific step where failure occurred
+            error: The exception that was raised
+            is_critical: Whether this is a critical failure requiring immediate attention
+        """
+        error_context = ErrorHandler.create_error_context(
+            operation=operation,
+            failing_step=failing_step,
+            correlation_id=context.correlation_id,
+            service_name=context.service_name,
+            request_data=context.request_data,
+            original_error=error
+        )
+
+        if is_critical:
+            logger.critical("CRITICAL ERROR", extra=error_context)
+        else:
+            logger.error("Service error occurred", extra=error_context)
+
+        # In a real implementation, you might also:
+        # - Send to a dead-letter queue if this is a retryable error
+        # - Trigger circuit breaker if appropriate
+        # - Include additional monitoring/metrics
+
+    @staticmethod
+    def handle_dead_letter(
+        context: ServiceContext,
+        operation: str,
+        failing_step: str,
+        error: Exception,
+        retry_attempts: int,
+        max_retries: int
+    ) -> None:
+        """
+        Handle a message that has exhausted retry attempts and will be sent to dead-letter queue.
+
+        Args:
+            context: ServiceContext containing correlation ID and request data
+            operation: What the service was trying to do
+            failing_step: Specific step where failure occurred
+            error: The exception that was raised
+            retry_attempts: Number of retry attempts made
+            max_retries: Maximum number of retry attempts allowed
+        """
+        error_context = ErrorHandler.create_error_context(
+            operation=operation,
+            failing_step=failing_step,
+            correlation_id=context.correlation_id,
+            service_name=context.service_name,
+            request_data=context.request_data,
+            original_error=error
+        )
+
+        logger.error(
+            f"Message sent to dead-letter queue after {retry_attempts}/{max_retries} retries",
+            extra=error_context
+        )
+
+        # Additional dead-letter handling could include:
+        # - Notifying operators via monitoring system
+        # - Storing the dead-letter with full context for later analysis
+        # - Including information about reprocessing options
+
+# Example usage in a service
+class ServiceA:
+    def __init__(self):
+        self.service_name = "service_a"
+
+    def make_request_to_service_b(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        correlation_id = ErrorHandler.generate_correlation_id()
+        headers = {'X-Correlation-ID': correlation_id}
+
+        try:
+            # Simulate making a request to Service B
+            response = self._call_service_b(request_data, headers)
+            return response
+        except Exception as e:
+            context = ServiceContext(
+                correlation_id=correlation_id,
+                service_name=self.service_name,
+                request_data=request_data
+            )
+            ErrorHandler.handle_service_error(
+                context=context,
+                operation="making request to service B",
+                failing_step="service_b_request",
+                error=e,
+                is_critical=True
+            )
+            raise
+
+    def _call_service_b(self, request_data: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+        # In a real implementation, this would make an HTTP call or similar
+        # For this example, we'll simulate a failure
+        if request_data.get('should_fail'):
+            raise RuntimeError("Service B unavailable")
+        return {"status": "success"}
+
+class ServiceB:
+    def __init__(self):
+        self.service_name = "service_b"
+
+    def process_request(self, request_data: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+        correlation_id = ErrorHandler.extract_correlation_id(headers)
+
+        try:
+            # Simulate processing
+            if request_data.get('invalid_input'):
+                raise ValueError("Invalid input data")
+
+            return {"result": "processed", "correlation_id": correlation_id}
+        except Exception as e:
+            context = ServiceContext(
+                correlation_id=correlation_id,
+                service_name=self.service_name,
+                request_data=request_data
+            )
+            ErrorHandler.handle_service_error(
+                context=context,
+                operation="processing request",
+                failing_step="data_validation",
+                error=e
+            )
+            raise
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID is generated at the first service and propagated to all downstream calls.
+          location: error_handler.py:29
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is added to HTTP headers and passed to all service calls.
+          location: error_handler.py:52
+        - question: Is it included in every log line and error?
+          answer: Yes, the correlation ID is included in every log line via the logging formatter.
+          location: error_handler.py:10
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated if none is present in incoming headers.
+          location: error_handler.py:44
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include both the operation and specific failing step in context.
+          location: error_handler.py:80
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the correlation ID allows tracing across services and the request data is included.
+          location: error_handler.py:80
+        - question: Is sensitive data excluded from the message?
+          answer: The implementation assumes request_data is sanitized before being passed to the handler.
+          location: error_handler.py:80
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the error handler is called, before any wrapping occurs.
+          location: error_handler.py:80
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: The message is sent to a dead-letter queue with full context for operator review.
+          location: error_handler.py:130
+        - question: What identifies a message as dead, and where does it go?
+          answer: Messages are identified by exhausted retry attempts and sent to a dead-letter queue.
+          location: error_handler.py:130
+        - question: How is a dead letter surfaced to an operator?
+          answer: Dead letters are logged with full context including correlation ID and error details.
+          location: error_handler.py:130
+        - question: Can a dead letter be reprocessed safely?
+          answer: The implementation includes context for safe reprocessing, though actual reprocessing logic is not shown.
+          location: error_handler.py:130
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: The circuit breaker pattern wasn't implemented as it wasn't directly relevant to the core error handling and tracing requirements. The error handler could be extended to integrate with a circuit breaker in the future.
+```

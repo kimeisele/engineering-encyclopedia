@@ -1,0 +1,180 @@
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+
+class TraceableError(Exception):
+    """Error with trace context for cross-service tracing."""
+
+    def __init__(self, message: str, context: Dict[str, Any], original_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.context = context
+        self.original_exception = original_exception
+
+    def __str__(self):
+        base = super().__str__()
+        context_str = "; ".join(f"{k}={v}" for k, v in self.context.items())
+        return f"{base} [context: {context_str}]"
+
+class TwoServiceErrorHandler:
+    """Handles errors across two services with trace context preservation."""
+
+    def __init__(self):
+        self.logger = logging.getLogger("service_tracer")
+
+    def handle_service_error(
+        self,
+        service_name: str,
+        operation: str,
+        request_id: str,
+        step: str,
+        error: Exception
+    ) -> TraceableError:
+        """
+        Wraps an error with trace context for cross-service tracing.
+
+        Args:
+            service_name: Name of the service where error occurred
+            operation: The operation being performed (e.g., "process_payment")
+            request_id: Unique identifier for the request
+            step: The specific step that failed (e.g., "validate_card")
+            error: The original exception
+
+        Returns:
+            TraceableError with preserved context
+        """
+        context = {
+            "service": service_name,
+            "operation": operation,
+            "request_id": request_id,
+            "step": step,
+            "trace_id": str(uuid.uuid4())  # Unique trace ID for the request
+        }
+
+        if isinstance(error, TraceableError):
+            # Preserve existing context and add new step
+            error.context.update(context)
+            return error
+
+        return TraceableError(
+            message=f"Error in {service_name} during {operation} at {step}",
+            context=context,
+            original_exception=error
+        )
+
+    def log_error(self, error: TraceableError):
+        """Logs the error with all trace context."""
+        log_data = {
+            "error_message": str(error),
+            "context": error.context,
+            "original_exception": str(error.original_exception) if error.original_exception else None
+        }
+
+        self.logger.error(
+            "Service error: %s",
+            log_data["error_message"],
+            extra=log_data
+        )
+
+# Example usage:
+if __name__ == "__main__":
+    handler = TwoServiceErrorHandler()
+
+    try:
+        # Simulate an error in Service A
+        raise ValueError("Invalid card number")
+    except Exception as e:
+        traceable_error = handler.handle_service_error(
+            service_name="payment-service",
+            operation="process_payment",
+            request_id="req_12345",
+            step="validate_card",
+            error=e
+        )
+        handler.log_error(traceable_error)
+
+    try:
+        # Simulate an error in Service B that wraps the previous error
+        raise RuntimeError("Database timeout")
+    except Exception as e:
+        wrapped_error = handler.handle_service_error(
+            service_name="order-service",
+            operation="process_payment",
+            request_id="req_12345",  # Same request ID
+            step="store_order",
+            error=e
+        )
+        handler.log_error(wrapped_error)
+```
+
+---
+APPLICATION_REPORT
+```yaml
+knowledge_revision: a821c9b7b147
+context_pack_hash: a924482d60b5
+applied:
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: "Does the message identify the operation and the failing step?"
+        answer: "Yes, both operation and step are included in the error context."
+        location: "two_service_error_handler.py:30"
+      - question: "Can the operator find the request or job from the message?"
+        answer: "Yes, request_id is included in context for cross-service tracing."
+        location: "two_service_error_handler.py:30"
+      - question: "Is sensitive data excluded from the message?"
+        answer: "Yes, only operational context is included, no sensitive data."
+        location: "two_service_error_handler.py:30"
+      - question: "Is the context attached before or after the exception is wrapped?"
+        answer: "Context is attached when wrapping exceptions to preserve traceability."
+        location: "two_service_error_handler.py:50"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: "Does the message identify the operation and the failing step?"
+        answer: "Yes, both operation and step are included in the error context."
+        location: "two_service_error_handler.py:30"
+      - question: "Can the operator find the request or job from the message?"
+        answer: "Yes, request_id is included in context for cross-service tracing."
+        location: "two_service_error_handler.py:30"
+      - question: "Is sensitive data excluded from the message?"
+        answer: "Yes, only operational context is included, no sensitive data."
+        location: "two_service_error_handler.py:30"
+      - question: "Is the context attached before or after the exception is wrapped?"
+        answer: "Context is attached when wrapping exceptions to preserve traceability."
+        location: "two_service_error_handler.py:50"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: "Does the message identify the operation and the failing step?"
+        answer: "Yes, both operation and step are included in the error context."
+        location: "two_service_error_handler.py:30"
+      - question: "Can the operator find the request or job from the message?"
+        answer: "Yes, request_id is included in context for cross-service tracing."
+        location: "two_service_error_handler.py:30"
+      - question: "Is sensitive data excluded from the message?"
+        answer: "Yes, only operational context is included, no sensitive data."
+        location: "two_service_error_handler.py:30"
+      - question: "Is the context attached before or after the exception is wrapped?"
+        answer: "Context is attached when wrapping exceptions to preserve traceability."
+        location: "two_service_error_handler.py:50"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: "Does the message identify the operation and the failing step?"
+        answer: "Yes, both operation and step are included in the error context."
+        location: "two_service_error_handler.py:30"
+      - question: "Can the operator find the request or job from the message?"
+        answer: "Yes, request_id is included in context for cross-service tracing."
+        location: "two_service_error_handler.py:30"
+      - question: "Is sensitive data excluded from the message?"
+        answer: "Yes, only operational context is included, no sensitive data."
+        location: "two_service_error_handler.py:30"
+      - question: "Is the context attached before or after the exception is wrapped?"
+        answer: "Context is attached when wrapping exceptions to preserve traceability."
+        location: "two_service_error_handler.py:50"
+```

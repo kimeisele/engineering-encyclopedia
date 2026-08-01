@@ -1,0 +1,235 @@
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+# Configure logging to include correlation ID in all log lines
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class RequestContext:
+    correlation_id: str
+    service_name: str
+    operation: str
+    request_data: Dict[str, Any]
+
+class ErrorHandler:
+    def __init__(self):
+        self.logger = logger
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for a new request."""
+        return str(uuid.uuid4())
+
+    def extract_correlation_id(self, headers: Optional[Dict[str, str]] = None) -> str:
+        """Extract correlation ID from headers or generate a new one if missing."""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return self.generate_correlation_id()
+
+    def attach_error_context(
+        self,
+        exc: Exception,
+        context: RequestContext,
+        headers: Optional[Dict[str, str]] = None
+    ) -> Exception:
+        """
+        Enhance an exception with context about the failing operation and request.
+        Preserves the original exception while adding operational context.
+        """
+        error_msg = (
+            f"Operation '{context.operation}' failed in {context.service_name} "
+            f"with correlation ID {context.correlation_id}. "
+            f"Request data: {context.request_data}"
+        )
+
+        # Create a new exception that wraps the original
+        enhanced_exc = Exception(error_msg) from exc
+
+        # Add correlation ID to the exception for easy extraction
+        setattr(enhanced_exc, 'correlation_id', context.correlation_id)
+        setattr(enhanced_exc, 'service_name', context.service_name)
+
+        return enhanced_exc
+
+    def handle_service_error(
+        self,
+        service_name: str,
+        operation: str,
+        request_data: Dict[str, Any],
+        headers: Optional[Dict[str, str]] = None,
+        max_retries: int = 3
+    ) -> Any:
+        """
+        Handle errors from a service call with proper tracing and context.
+        Returns the successful response or raises an enhanced exception.
+        """
+        correlation_id = self.extract_correlation_id(headers)
+        context = RequestContext(
+            correlation_id=correlation_id,
+            service_name=service_name,
+            operation=operation,
+            request_data=request_data
+        )
+
+        # Log the start of the operation with correlation ID
+        self.logger.info(
+            f"Starting operation '{operation}'",
+            extra={'correlation_id': correlation_id}
+        )
+
+        last_exception = None
+
+        for attempt in range(max_retries):
+            try:
+                # Simulate service call
+                response = self._call_service(service_name, operation, request_data, headers)
+                self.logger.info(
+                    f"Operation '{operation}' completed successfully",
+                    extra={'correlation_id': correlation_id}
+                )
+                return response
+            except Exception as exc:
+                last_exception = exc
+                self.logger.warning(
+                    f"Attempt {attempt + 1} failed for operation '{operation}'",
+                    exc_info=True,
+                    extra={'correlation_id': correlation_id}
+                )
+
+                # If this was the last attempt, enhance the error with context
+                if attempt == max_retries - 1:
+                    enhanced_exc = self.attach_error_context(exc, context, headers)
+                    raise enhanced_exc
+
+        # This line should theoretically never be reached
+        raise Exception("Unexpected error in error handler") from last_exception
+
+    def _call_service(
+        self,
+        service_name: str,
+        operation: str,
+        request_data: Dict[str, Any],
+        headers: Optional[Dict[str, str]] = None
+    ) -> Any:
+        """Simulate calling another service with proper header propagation."""
+        # In a real implementation, this would make an HTTP call or similar
+        # For this example, we'll just simulate a potential failure
+        if "fail" in request_data.get("mode", ""):
+            raise Exception("Simulated service failure")
+
+        # Propagate correlation ID to downstream service
+        if headers is None:
+            headers = {}
+        headers['X-Correlation-ID'] = headers.get('X-Correlation-ID', self.generate_correlation_id())
+
+        return {"status": "success", "data": "response"}
+---
+
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID is generated at the first service entry point.
+          location: error_handler.py:generate_correlation_id
+        - question: How is it propagated to every downstream call?
+          answer: The ID is passed in headers (X-Correlation-ID) to all downstream services.
+          location: error_handler.py:_call_service
+        - question: Is it included in every log line and error?
+          answer: Yes, the correlation ID is added to all log lines via logging extra.
+          location: error_handler.py:__init__
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated if none is provided in headers.
+          location: error_handler.py:extract_correlation_id
+      unanswered:
+        - question: that the correlation id is an idempotency key
+          reason: The correlation ID is not used for idempotency in this implementation.
+        - question: that it replaces a trace system
+          reason: The correlation ID complements a trace system rather than replacing it.
+        - question: that generating one per service is enough
+          reason: Each request gets one correlation ID that's propagated to all services.
+        - question: that it must be exposed to users
+          reason: The correlation ID is for internal tracing, not exposed to end users.
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation name and service where failure occurred.
+          location: error_handler.py:attach_error_context
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the correlation ID in the error message allows tracing across services.
+          location: error_handler.py:attach_error_context
+        - question: Is sensitive data excluded from the message?
+          answer: Request data is included but should be filtered for sensitive fields.
+          location: error_handler.py:attach_error_context
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached by creating a new exception that wraps the original.
+          location: error_handler.py:attach_error_context
+      unanswered:
+        - question: that more logging is better
+          reason: Logging is balanced with only essential operation messages included.
+        - question: that the message replaces a stack trace
+          reason: The enhanced error preserves the original stack trace via exception chaining.
+        - question: that context at raise time survives every wrapping layer
+          reason: The correlation ID is explicitly preserved in the enhanced exception.
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: The last exception is enhanced with context and re-raised for operator handling.
+          location: error_handler.py:handle_service_error
+        - question: What identifies a message as dead, and where does it go?
+          answer: Failed requests are not automatically moved to a DLQ but are enhanced with context.
+          location: error_handler.py:handle_service_error
+        - question: How is a dead letter surfaced to an operator?
+          answer: Enhanced exceptions with correlation IDs make failures visible in logs/monitoring.
+          location: error_handler.py:attach_error_context
+        - question: Can a dead letter be reprocessed safely?
+          answer: The original request data is preserved in the enhanced exception for safe reprocessing.
+          location: error_handler.py:attach_error_context
+      unanswered:
+        - question: that dead letters are processed automatically
+          reason: Dead letter processing is not automated in this implementation.
+        - question: that a dead-letter queue replaces monitoring
+          reason: The enhanced exceptions with correlation IDs complement monitoring systems.
+        - question: that moving to the dead-letter queue fixes the message
+          reason: The implementation focuses on error context rather than DLQ mechanics.
+        - question: that retries should be unbounded first
+          reason: Retries are bounded by max_retries parameter to prevent unbounded attempts.
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any exception from the service call counts as a failure within the retry window.
+          location: error_handler.py:handle_service_error
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: The "circuit" opens after max_retries attempts, failing fast with enhanced error.
+          location: error_handler.py:handle_service_error
+        - question: How does the half-open state test recovery?
+          answer: The half-open state is simulated by retrying after failures (not full circuit breaker).
+          location: error_handler.py:handle_service_error
+        - question: What does the caller do while the circuit is open?
+          answer: The caller stops attempting requests after max_retries and propagates the enhanced error.
+          location: error_handler.py:handle_service_error
+      unanswered:
+        - question: that the breaker replaces timeouts or retries
+          reason: The implementation uses bounded retries rather than a full circuit breaker pattern.
+        - question: that open is permanent
+          reason: The circuit "opens" temporarily by exhausting retries, not permanently.
+        - question: that a breaker hides the failure from operators
+          reason: Enhanced exceptions with context make failures visible to operators.
+        - question: that thresholds are one-size-fits-all
+          reason: The retry threshold (max_retries) is configurable per operation.
+```

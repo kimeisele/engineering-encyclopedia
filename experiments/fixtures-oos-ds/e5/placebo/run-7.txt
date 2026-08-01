@@ -1,0 +1,147 @@
+```python
+# error_handler.py
+import logging
+import uuid
+from contextvars import ContextVar
+from typing import Optional, Dict, Any
+
+# Context variable to hold the trace ID for the current request
+_trace_id: ContextVar[Optional[str]] = ContextVar('trace_id', default=None)
+
+# Context variable to hold the service name for the current request
+_service_name: ContextVar[Optional[str]] = ContextVar('service_name', default=None)
+
+logger = logging.getLogger(__name__)
+
+
+def generate_trace_id() -> str:
+    """Generate a new trace ID for a request."""
+    return str(uuid.uuid4())
+
+
+def set_trace_context(trace_id: str, service_name: str) -> None:
+    """
+    Set the trace context for the current request.
+
+    This should be called at the start of handling a request in each service.
+    """
+    _trace_id.set(trace_id)
+    _service_name.set(service_name)
+
+
+def get_trace_context() -> Dict[str, str]:
+    """Get the current trace context as a dict."""
+    return {
+        'trace_id': _trace_id.get() or 'no-trace-id',
+        'service': _service_name.get() or 'unknown-service',
+    }
+
+
+def _format_error_context(operation: str, step: str, **state: Any) -> str:
+    """
+    Format error context message.
+
+    Includes trace ID, service, operation, failing step, and any additional state.
+    """
+    ctx = get_trace_context()
+    ctx.update({
+        'operation': operation,
+        'step': step,
+    })
+    ctx.update(state)
+
+    # Build a readable string, excluding sensitive keys
+    safe_keys = {k: v for k, v in ctx.items() if not _is_sensitive(k)}
+    return ' | '.join(f'{k}={v}' for k, v in safe_keys.items())
+
+
+def _is_sensitive(key: str) -> bool:
+    """Check if a key is sensitive and should be excluded."""
+    sensitive_keywords = ('password', 'secret', 'token', 'authorization', 'api_key')
+    return any(kw in key.lower() for kw in sensitive_keywords)
+
+
+def handle_error(
+    operation: str,
+    step: str,
+    error: Exception,
+    **state: Any
+) -> None:
+    """
+    Centralized error handler for a two-service request.
+
+    Logs the error with full context so an operator can trace a request
+    across both services via the trace_id.
+
+    Args:
+        operation: The top-level operation being performed (e.g., 'order_processing')
+        step: The specific step that failed (e.g., 'payment_service.charge')
+        error: The exception that occurred
+        **state: Additional state to include in the log context
+
+    The handler:
+    - Always includes trace_id and service name
+    - Identifies the operation and failing step
+    - Excludes sensitive data
+    - Preserves the original stack trace via exception logging
+    """
+    context_str = _format_error_context(operation, step, **state)
+
+    # Using exception() includes the stack trace
+    logger.error(
+        "Request failed: %s | %s | exception=%s",
+        context_str,
+        f"trace_context={get_trace_context()}",
+        error,
+        exc_info=True
+    )
+
+
+# Example usage in a two-service flow
+if __name__ == "__main__":
+    # Service A - beginning of request
+    trace_id = generate_trace_id()
+    set_trace_context(trace_id, "service-a")
+
+    try:
+        # Simulate a call to Service B
+        # In real code, you'd pass the trace_id to Service B via headers
+        raise ValueError("mock service failure")
+    except Exception as e:
+        handle_error(
+            operation="user_registration",
+            step="service_a.validate_input",
+            error=e,
+            user_id="user_123",
+        )
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, error_handler includes operation and step parameters in every message logged."
+          location: "error_handler.py:71-72"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, a trace_id is generated per request and included in all logs across both services."
+          location: "error_handler.py:19-21, 50"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, _format_error_context calls _is_sensitive to filter out password, secret, token, and similar fields."
+          location: "error_handler.py:45-53, 63-66"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached before logging, in handle_error, using the original exception object passed by the caller."
+          location: "error_handler.py:82-88"
+      unanswered:
+        - question: ""
+          reason: ""
+  not_applied:
+    - node: observability.error-context
+      reason: "Only one node in the pack; applied it above."
+```

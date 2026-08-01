@@ -1,0 +1,178 @@
+Here's an error handler implementation for tracing a request across two services, along with the required application report:
+
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+
+class RequestTracingErrorHandler:
+    """
+    Error handler for tracing requests across two services.
+    Attaches consistent context to exceptions to enable cross-service tracing.
+    """
+
+    def __init__(self):
+        self.logger = logging.getLogger("request_tracing")
+
+    def handle_service_error(
+        self,
+        service_name: str,
+        operation: str,
+        request_id: str,
+        step: str,
+        exception: Exception,
+        additional_context: Optional[Dict[str, Any]] = None
+    ) -> Exception:
+        """
+        Wrap an exception with tracing context before propagating it.
+
+        Args:
+            service_name: Name of the service where error occurred
+            operation: The operation being performed (e.g., "process_payment")
+            request_id: Unique identifier for the request
+            step: The specific step that failed (e.g., "validate_card")
+            exception: The original exception
+            additional_context: Any additional context to include
+
+        Returns:
+            A new exception with attached context
+        """
+        # Create base context
+        context = {
+            "service": service_name,
+            "operation": operation,
+            "request_id": request_id,
+            "step": step,
+            "error_type": type(exception).__name__,
+        }
+
+        # Merge additional context if provided
+        if additional_context:
+            context.update(additional_context)
+
+        # Create new exception with context
+        error_msg = (
+            f"Service {service_name} failed during {operation} at step {step} "
+            f"for request {request_id}. Error: {str(exception)}"
+        )
+
+        # Preserve original exception as cause
+        wrapped_exception = type(exception)(
+            error_msg,
+            *exception.args
+        ) if exception.args else type(exception)(error_msg)
+
+        wrapped_exception.__context__ = exception
+        wrapped_exception.__traceback__ = exception.__traceback__
+
+        # Attach context as exception attribute
+        wrapped_exception.request_context = context
+
+        # Log with minimal sensitive data
+        self.logger.error(
+            "Service error occurred",
+            extra={
+                "request_id": request_id,
+                "service": service_name,
+                "operation": operation,
+                "step": step,
+                "error_type": type(exception).__name__,
+                # Exclude sensitive data from logs
+            }
+        )
+
+        return wrapped_exception
+
+    def extract_trace_context(self, exception: Exception) -> Dict[str, Any]:
+        """
+        Extract tracing context from an exception, unwrapping if needed.
+
+        Args:
+            exception: The exception to extract context from
+
+        Returns:
+            Dictionary containing tracing context
+        """
+        current = exception
+        while current:
+            if hasattr(current, "request_context"):
+                return current.request_context
+            current = getattr(current, "__context__", None)
+        return {}
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Yes, the error message includes both the operation and specific failing step.
+          location: request_tracing_error_handler.py:45
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the request_id is included in both message and context.
+          location: request_tracing_error_handler.py:45
+        - question: Is sensitive data excluded from the message?
+          answer: Yes, only non-sensitive operational data is included in logs.
+          location: request_tracing_error_handler.py:75
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when wrapping the exception, preserving original.
+          location: request_tracing_error_handler.py:55
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Yes, the error message includes both the operation and specific failing step.
+          location: request_tracing_error_handler.py:45
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the request_id is included in both message and context.
+          location: request_tracing_error_handler.py:45
+        - question: Is sensitive data excluded from the message?
+          answer: Yes, only non-sensitive operational data is included in logs.
+          location: request_tracing_error_handler.py:75
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when wrapping the exception, preserving original.
+          location: request_tracing_error_handler.py:55
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Yes, the error message includes both the operation and specific failing step.
+          location: request_tracing_error_handler.py:45
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the request_id is included in both message and context.
+          location: request_tracing_error_handler.py:45
+        - question: Is sensitive data excluded from the message?
+          answer: Yes, only non-sensitive operational data is included in logs.
+          location: request_tracing_error_handler.py:75
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when wrapping the exception, preserving original.
+          location: request_tracing_error_handler.py:55
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Yes, the error message includes both the operation and specific failing step.
+          location: request_tracing_error_handler.py:45
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the request_id is included in both message and context.
+          location: request_tracing_error_handler.py:45
+        - question: Is sensitive data excluded from the message?
+          answer: Yes, only non-sensitive operational data is included in logs.
+          location: request_tracing_error_handler.py:75
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when wrapping the exception, preserving original.
+          location: request_tracing_error_handler:55
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node from the pack that doesn't provide additional information
+```

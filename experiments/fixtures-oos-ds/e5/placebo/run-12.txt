@@ -1,0 +1,154 @@
+```python
+# error_handler.py
+import logging
+import uuid
+import json
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RequestContext:
+    """Tracks correlation ID and step information across two services."""
+    correlation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    service: str = ""
+    step: str = ""
+    downstream_service: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+class ServiceError(Exception):
+    """Exception carrying rich context for tracing."""
+
+    def __init__(self, message: str, ctx: RequestContext, cause: Optional[Exception] = None):
+        self.context = ctx
+        self.cause = cause
+        super().__init__(message)
+
+
+def capture_context(correlation_id: str = None) -> RequestContext:
+    """Create a new context, optionally reusing an existing correlation ID."""
+    return RequestContext(correlation_id=correlation_id or str(uuid.uuid4()))
+
+
+def trace_step(ctx: RequestContext, service: str, step: str, **extra):
+    """Update context with current service and step."""
+    ctx.service = service
+    ctx.step = step
+    ctx.extra.update(extra)
+    return ctx
+
+
+def error_handler(func):
+    """Decorator: wraps request handlers, builds structured error logs."""
+    import functools
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        ctx = kwargs.get("ctx") or capture_context()
+        try:
+            return func(*args, ctx=ctx, **kwargs)
+        except ServiceError as e:
+            # Already enriched - log with full context
+            _log_error(e.context, e.args[0], e.cause)
+            raise
+        except Exception as e:
+            # Raw exception - attach context at failure point
+            _log_error(ctx, f"Unhandled error in {ctx.service}:{ctx.step}", e)
+            raise ServiceError(
+                f"Operation failed at {ctx.service}:{ctx.step}",
+                ctx=ctx,
+                cause=e
+            )
+    return wrapper
+
+
+def _log_error(ctx: RequestContext, message: str, cause: Optional[Exception] = None):
+    """Structured log with correlation ID for operator tracing."""
+    log_payload = {
+        "correlation_id": ctx.correlation_id,
+        "service": ctx.service,
+        "step": ctx.step,
+        "message": message,
+        "error_type": type(cause).__name__ if cause else "None",
+        # Exclude sensitive data - only include configured extra fields
+        "metadata": {k: v for k, v in ctx.extra.items() if not _is_sensitive(k)},
+    }
+    # Stack trace goes to exception section, not message - context preserved
+    logger.error(
+        "request_trace | correlation_id=%s | service=%s | step=%s | %s",
+        ctx.correlation_id,
+        ctx.service,
+        ctx.step,
+        message,
+        exc_info=cause,
+        extra={"trace_data": log_payload}
+    )
+
+
+def _is_sensitive(key: str) -> bool:
+    """Basic sensitive-key detection - never log secrets."""
+    return any(s in key.lower() for s in ("pass", "secret", "token", "key", "auth"))
+
+
+# Helper for service-to-service propagation
+@contextmanager
+def propagate_context(ctx: RequestContext, downstream_service: str):
+    """Pass correlation ID downstream; enrich with downstream info on return."""
+    ctx.downstream_service = downstream_service
+    downstream_ctx = RequestContext(
+        correlation_id=ctx.correlation_id,  # Same ID - traceable across both
+        service=downstream_service,
+        step="entry"
+    )
+    yield downstream_ctx
+    # After downstream returns, link back original context
+    ctx.downstream_service = None
+    if downstream_ctx.step != "entry":
+        ctx.step = f"downstream:{downstream_ctx.step}"
+
+
+# Example usage pattern:
+#
+# # Service A
+# @error_handler
+# def service_a_handler(request, ctx):
+#     ctx = trace_step(ctx, "service_a", "parse_request")
+#     upstream = ctx.correlation_id
+#     with propagate_context(ctx, "service_b") as downstream_ctx:
+#         try:
+#             # call service_b with downstream_ctx
+#             response = call_downstream(downstream_ctx)
+#         except Exception as e:
+#             # error_handler will wrap with ctx from service_a,
+#             # correlation_id still matches
+#             raise
+#     ctx = trace_step(ctx, "service_a", "format_response")
+#     return response
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, error_handler logs service and step from RequestContext, and the message includes both service:step."
+          location: "error_handler.py:95"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, correlation_id propagates across both services via propagate_context, and is logged in every error."
+          location: "error_handler.py:58"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, _is_sensitive filters keys matching password/secret/token/auth from metadata before logging."
+          location: "error_handler.py:110"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is captured at entry, updated at each step, and attached before wrapping in ServiceError."
+          location: "error_handler.py:71"
+      unanswered: []
+  not_applied: []

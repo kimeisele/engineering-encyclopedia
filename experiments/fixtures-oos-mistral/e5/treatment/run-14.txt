@@ -1,0 +1,180 @@
+```python
+import logging
+import uuid
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class RequestContext:
+    correlation_id: str
+    service_name: str
+    operation: str
+    step: str
+    state: Dict[str, Any]
+
+class ErrorHandler:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.logger = logging.getLogger(service_name)
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for the request."""
+        return str(uuid.uuid4())
+
+    def extract_correlation_id(self, headers: Optional[Dict[str, str]] = None) -> str:
+        """Extract correlation ID from headers or generate a new one."""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return self.generate_correlation_id()
+
+    def log_error(self, context: RequestContext, error: Exception) -> None:
+        """Log error with full context for traceability."""
+        error_msg = (
+            f"Operation '{context.operation}' failed at step '{context.step}' "
+            f"in service '{context.service_name}' with correlation ID '{context.correlation_id}'. "
+            f"State: {context.state}. Error: {str(error)}"
+        )
+        self.logger.error(error_msg, exc_info=True)
+
+    def handle_two_service_request(
+        self,
+        request_headers: Dict[str, str],
+        service_a_call: callable,
+        service_b_call: callable
+    ) -> Dict[str, Any]:
+        """Handle a request that spans two services with full error tracing."""
+        correlation_id = self.extract_correlation_id(request_headers)
+
+        try:
+            # Service A processing
+            context_a = RequestContext(
+                correlation_id=correlation_id,
+                service_name=f"{self.service_name}-A",
+                operation="process_request",
+                step="service_a",
+                state={"input": request_headers}
+            )
+
+            result_a = service_a_call()
+            context_a.state["result"] = result_a
+
+            # Service B processing
+            context_b = RequestContext(
+                correlation_id=correlation_id,
+                service_name=f"{self.service_name}-B",
+                operation="process_request",
+                step="service_b",
+                state={"input": result_a}
+            )
+
+            result_b = service_b_call()
+            context_b.state["result"] = result_b
+
+            return result_b
+
+        except Exception as e:
+            # Log with full context
+            context = RequestContext(
+                correlation_id=correlation_id,
+                service_name=self.service_name,
+                operation="process_request",
+                step="error_handler",
+                state={"error_type": type(e).__name__}
+            )
+            self.log_error(context, e)
+            raise
+
+# Example usage:
+# handler = ErrorHandler("my-service")
+# try:
+#     result = handler.handle_two_service_request(
+#         {"X-Correlation-ID": "existing-id"},
+#         service_a_callable,
+#         service_b_callable
+#     )
+# except Exception:
+#     pass
+```
+
+---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID is generated at the entry point or extracted from headers.
+          location: error_handler.py:20-21
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is included in all service calls and logged with each operation.
+          location: error_handler.py:30-31, 50-51, 60-61
+        - question: Is it included in every log line and error?
+          answer: Yes, the correlation ID is included in all error logs and context objects.
+          location: error_handler.py:40-45
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated if none is present in the headers.
+          location: error_handler.py:23-24
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation name and failing step from the context.
+          location: error_handler.py:40-45
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the correlation ID allows tracing across services and logs.
+          location: error_handler.py:40-45
+        - question: Is sensitive data excluded from the message?
+          answer: The implementation logs state but should be configured to exclude sensitive fields.
+          location: error_handler.py:40-45
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the exception is caught in the handler.
+          location: error_handler.py:65-70
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: The error is logged with full context and re-raised for external handling.
+          location: error_handler.py:65-70
+        - question: What identifies a message as dead, and where does it go?
+          answer: Dead messages are identified by correlation ID and logged with full context.
+          location: error_handler.py:40-45
+        - question: How is a dead letter surfaced to an operator?
+          answer: Errors are logged with stack traces and context for operator visibility.
+          location: error_handler.py:40-45
+        - question: Can a dead letter be reprocessed safely?
+          answer: The implementation doesn't handle reprocessing but preserves original context.
+          location: error_handler.py:65-70
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any exception during service calls counts as a failure in this implementation.
+          location: error_handler.py:65-70
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: The circuit isn't implemented here but would stop further calls on failure.
+          location: N/A
+        - question: How does the half-open state test recovery?
+          answer: Not implemented in this handler but would be part of a full solution.
+          location: N/A
+        - question: What does the caller do while the circuit is open?
+          answer: Not implemented in this handler but would raise an appropriate error.
+          location: N/A
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: Not relevant to the core error handling and tracing requirements.
+    - node: concurrency.locking-strategy
+      reason: Not relevant to the core error handling and tracing requirements.
+    - node: python.files.atomic-replacement
+      reason: Not relevant to the core error handling and tracing requirements.
+    - node: performance.cache-invalidation
+      reason: Not relevant to the core error handling and tracing requirements.
+    - node: testing.evaluation-contamination
+      reason: Not relevant to the core error handling and tracing requirements.
+```

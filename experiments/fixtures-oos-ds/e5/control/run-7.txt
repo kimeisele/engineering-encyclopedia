@@ -1,0 +1,570 @@
+Here's a comprehensive error handler implementation for tracing a request across two services:
+
+## Core Implementation
+
+```python
+import uuid
+import logging
+import json
+from datetime import datetime
+from typing import Dict, Any, Optional
+from functools import wraps
+import traceback
+
+# Configuration
+class TraceConfig:
+    TRACE_ID_HEADER = 'X-Trace-ID'
+    SERVICE_A_NAME = 'service-a'
+    SERVICE_B_NAME = 'service-b'
+    LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+# Logger setup
+def setup_logger(name: str):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(TraceConfig.LOG_FORMAT))
+    logger.addHandler(handler)
+    return logger
+
+logger_a = setup_logger(TraceConfig.SERVICE_A_NAME)
+logger_b = setup_logger(TraceConfig.SERVICE_B_NAME)
+
+class TraceContext:
+    """Holds trace information for a single request flow"""
+    
+    def __init__(self, trace_id: str = None):
+        self.trace_id = trace_id or str(uuid.uuid4())
+        self.span_id = None
+        self.timestamps = []
+        self.service_calls = []
+        self.context = {}
+    
+    def start_span(self, service_name: str, operation: str, metadata: Dict[str, Any] = None):
+        """Start a new span for a service call"""
+        self.span_id = str(uuid.uuid4())
+        self.timestamps.append({
+            'span_id': self.span_id,
+            'service': service_name,
+            'operation': operation,
+            'trace_id': self.trace_id,
+            'timestamp': datetime.utcnow().isoformat(),
+            'type': 'START',
+            'metadata': metadata or {}
+        })
+        
+        # Log the span start
+        logger_info = logging.getLogger(service_name)
+        logger_info.info(
+            json.dumps({
+                'type': 'SPAN_START',
+                'trace_id': self.trace_id,
+                'span_id': self.span_id,
+                'service': service_name,
+                'operation': operation,
+                'metadata': metadata or {},
+                'timestamp': self.timestamps[-1]['timestamp']
+            })
+        )
+        
+        return self.span_id
+    
+    def end_span(self, span_id: str, status: str = 'SUCCESS', error: Dict[str, Any] = None):
+        """End a span with status"""
+        self.timestamps.append({
+            'span_id': span_id,
+            'trace_id': self.trace_id,
+            'timestamp': datetime.utcnow().isoformat(),
+            'type': 'END',
+            'status': status,
+            'error': error
+        })
+        
+        # Log span end
+        logger_info = logging.getLogger('root')
+        logger_info.info(
+            json.dumps({
+                'type': 'SPAN_END',
+                'trace_id': self.trace_id,
+                'span_id': span_id,
+                'status': status,
+                'error': error,
+                'timestamp': self.timestamps[-1]['timestamp']
+            })
+        )
+    
+    def record_service_call(self, service_from: str, service_to: str, operation: str, 
+                            request_data: Dict[str, Any], response_data: Optional[Dict[str, Any]] = None):
+        """Record a service-to-service call"""
+        call_record = {
+            'from_service': service_from,
+            'to_service': service_to,
+            'operation': operation,
+            'request': request_data,
+            'response': response_data,
+            'timestamp': datetime.utcnow().isoformat(),
+            'trace_id': self.trace_id
+        }
+        self.service_calls.append(call_record)
+        
+        # Log inter-service call
+        logger_info = logging.getLogger('root')
+        logger_info.info(
+            json.dumps({
+                'type': 'SERVICE_CALL',
+                **call_record
+            })
+        )
+    
+    def set_context(self, key: str, value: Any):
+        """Set context information"""
+        self.context[key] = value
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize trace context to dictionary"""
+        return {
+            'trace_id': self.trace_id,
+            'spans': self.timestamps,
+            'service_calls': self.service_calls,
+            'context': self.context,
+            'final_status': self._determine_final_status()
+        }
+    
+    def _determine_final_status(self) -> str:
+        """Determine overall status based on spans"""
+        has_error = any(span.get('status') == 'ERROR' for span in self.timestamps if 'status' in span)
+        if has_error:
+            return 'FAILED'
+        return 'COMPLETED'
+
+class TraceManager:
+    """Manages trace contexts for the entire request flow"""
+    
+    def __init__(self):
+        self.active_traces = {}
+    
+    def get_or_create_trace(self, trace_id: str = None) -> TraceContext:
+        """Get existing trace or create new one"""
+        if trace_id and trace_id in self.active_traces:
+            return self.active_traces[trace_id]
+        
+        trace = TraceContext(trace_id=trace_id)
+        self.active_traces[trace.trace_id] = trace
+        return trace
+    
+    def get_trace(self, trace_id: str) -> Optional[TraceContext]:
+        """Get trace by ID"""
+        return self.active_traces.get(trace_id)
+
+# Global trace manager instance
+trace_manager = TraceManager()
+
+class CustomError(Exception):
+    """Custom exception with trace information"""
+    
+    def __init__(self, message: str, trace_id: str = None, 
+                 service: str = None, error_code: str = None, 
+                 details: Dict[str, Any] = None):
+        self.message = message
+        self.trace_id = trace_id or str(uuid.uuid4())
+        self.service = service
+        self.error_code = error_code
+        self.details = details or {}
+        super().__init__(self.message)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'error': {
+                'message': self.message,
+                'trace_id': self.trace_id,
+                'service': self.service,
+                'error_code': self.error_code,
+                'details': self.details
+            }
+        }
+
+# Decorator for request/response handlers
+def trace_request_handler(service_name: str):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract trace ID from headers or create new
+            request = kwargs.get('request', args[0] if args else None)
+            headers = getattr(request, 'headers', {})
+            trace_id = headers.get(TraceConfig.TRACE_ID_HEADER)
+            
+            # Get or create trace context
+            trace = trace_manager.get_or_create_trace(trace_id)
+            
+            # Start span for this handler
+            span_id = trace.start_span(
+                service_name=service_name,
+                operation=func.__name__,
+                metadata={'method': getattr(request, 'method', 'UNKNOWN')}
+            )
+            
+            try:
+                # Execute handler
+                result = func(*args, **kwargs)
+                trace.end_span(span_id, status='SUCCESS')
+                return result
+            except CustomError as e:
+                # Handle custom errors
+                e.trace_id = trace.trace_id
+                trace.end_span(span_id, status='ERROR', error=e.to_dict())
+                raise
+            except Exception as e:
+                # Handle generic exceptions
+                error_info = {
+                    'type': 'GENERIC_ERROR',
+                    'message': str(e),
+                    'traceback': traceback.format_exc()
+                }
+                trace.end_span(span_id, status='ERROR', error=error_info)
+                # Re-raise as CustomError
+                custom_error = CustomError(
+                    message="Unexpected error in {}".format(service_name),
+                    trace_id=trace.trace_id,
+                    service=service_name,
+                    error_code='INTERNAL_ERROR',
+                    details=error_info
+                )
+                raise custom_error
+        
+        return wrapper
+    return decorator
+
+# Inter-service client with tracing
+class TracedServiceClient:
+    """Client for making traced service-to-service calls"""
+    
+    def __init__(self, client_service: str, target_service: str):
+        self.client_service = client_service
+        self.target_service = target_service
+    
+    def make_request(self, operation: str, request_data: Dict[str, Any], 
+                     trace_id: str) -> Dict[str, Any]:
+        """
+        Make traced request to another service.
+        In real implementation, this would be actual HTTP call.
+        """
+        trace = trace_manager.get_trace(trace_id)
+        
+        # Record the call
+        trace.record_service_call(
+            service_from=self.client_service,
+            service_to=self.target_service,
+            operation=operation,
+            request_data=request_data
+        )
+        
+        # Start span for this call
+        span_id = trace.start_span(
+            self.target_service,
+            operation,
+            metadata={'from_service': self.client_service}
+        )
+        
+        try:
+            # Simulate service call (in real implementation, send actual HTTP request)
+            # Pass trace ID in headers of the request
+            service_b_trace = trace_manager.get_or_create_trace(trace_id)
+            
+            # Simulate response from Service B
+            response = {
+                'status': 'success',
+                'data': f"Response from {self.target_service} for {operation}",
+                'trace_id': trace_id
+            }
+            
+            # Record response
+            trace.service_calls[-1]['response'] = response
+            trace.end_span(span_id, status='SUCCESS')
+            
+            return response
+            
+        except Exception as e:
+            error_info = {
+                'type': 'SERVICE_CALL_ERROR',
+                'message': str(e),
+                'from_service': self.client_service,
+                'to_service': self.target_service
+            }
+            trace.end_span(span_id, status='ERROR', error=error_info)
+            trace.service_calls[-1]['error'] = error_info
+            raise CustomError(
+                message=f"Failed to call {self.target_service}",
+                trace_id=trace_id,
+                service=self.client_service,
+                error_code='SERVICE_CALL_FAILED',
+                details=error_info
+            )
+
+# Example usage
+# Service A endpoint
+@trace_request_handler(TraceConfig.SERVICE_A_NAME)
+def service_a_endpoint(request):
+    """Main entry point that orchestrates Service A and B"""
+    
+    trace_id = request.headers.get(TraceConfig.TRACE_ID_HEADER)
+    trace = trace_manager.get_trace(trace_id)
+    
+    trace.set_context('request_id', request.id if hasattr(request, 'id') else None)
+    trace.set_context('request_path', request.path)
+    
+    # Simulate Service A processing
+    service_b_client = TracedServiceClient(
+        client_service=TraceConfig.SERVICE_A_NAME,
+        target_service=TraceConfig.SERVICE_B_NAME
+    )
+    
+    # Call Service B
+    response_b = service_b_client.make_request(
+        operation='process_data',
+        request_data={'input': request.data.get('input')},
+        trace_id=trace_id
+    )
+    
+    # Process response from Service B
+    result = {
+        'status': 'success',
+        'data': response_b['data'],
+        'processed_by': 'service-a'
+    }
+    
+    trace.set_context('result', result)
+    
+    return result
+
+# Service B endpoint
+@trace_request_handler(TraceConfig.SERVICE_B_NAME)
+def service_b_endpoint(request):
+    """Service B handler that processes data"""
+    
+    # Extract trace ID from incoming request
+    trace_id = request.headers.get(TraceConfig.TRACE_ID_HEADER)
+    trace = trace_manager.get_trace(trace_id)
+    
+    trace.set_context('service_b_processing', True)
+    
+    # Simulate processing
+    result = {
+        'status': 'processed',
+        'data': f"Processed data: {request.data.get('input')}"
+    }
+    
+    return result
+
+# Error reporting/monitoring service
+def log_trace_summary(trace: TraceContext):
+    """Log comprehensive trace summary for operator review"""
+    
+    logger_root = logging.getLogger('root')
+    
+    summary = {
+        'type': 'TRACE_SUMMARY',
+        'trace_id': trace.trace_id,
+        'total_spans': len(trace.timestamps) // 2,  # Each span has START and END
+        'service_calls': len(trace.service_calls),
+        'final_status': trace.to_dict()['final_status'],
+        'timeline': trace.timestamps,
+        'context': trace.context,
+        'generated_at': datetime.utcnow().isoformat()
+    }
+    
+    error_spans = [span for span in trace.timestamps if span.get('type') == 'END' and span.get('status') == 'ERROR']
+    if error_spans:
+        summary['errors'] = error_spans
+        
+    logger_root.info(json.dumps(summary, indent=2))
+    
+    # In real implementation, send to monitoring service (e.g., Datadog, Grafana)
+    return summary
+
+# Middleware/Intercept for capturing all requests
+class TraceMiddleware:
+    """Middleware to capture and log all incoming requests"""
+    
+    def __init__(self, get_response):
+        self.get_response = get_response
+    
+    def __call__(self, request):
+        # Ensure trace ID exists in request
+        trace_id = request.headers.get(TraceConfig.TRACE_ID_HEADER)
+        if not trace_id:
+            trace_id = str(uuid.uuid4())
+            request.headers[TraceConfig.TRACE_ID_HEADER] = trace_id
+        
+        trace = trace_manager.get_or_create_trace(trace_id)
+        
+        # Log request entry
+        trace.set_context('request_ts', datetime.utcnow().isoformat())
+        
+        response = self.get_response(request)
+        
+        # Log response
+        trace.set_context('response_ts', datetime.utcnow().isoformat())
+        
+        # Add trace ID to response headers
+        response.headers[TraceConfig.TRACE_ID_HEADER] = trace_id
+        
+        # Log trace summary for operators
+        log_trace_summary(trace)
+        
+        return response
+
+# Example error handling for operators
+def handle_operator_error(trace_id: str, error: CustomError):
+    """Handle errors for operator view"""
+    
+    trace = trace_manager.get_trace(trace_id)
+    error_report = {
+        'type': 'OPERATOR_ERROR_REPORT',
+        'trace_id': trace_id,
+        'error': error.to_dict(),
+        'trace_timeline': trace.timestamps if trace else [],
+        'service_calls': trace.service_calls if trace else [],
+        'timestamp': datetime.utcnow().isoformat(),
+        'operator_actions': {
+            'recommended': [
+                'Check Service B logs with the trace ID',
+                'Verify if the issue is transient by retrying the request',
+                'Contact on-call specialist if persistent'
+            ]
+        }
+    }
+    
+    logger_ops = logging.getLogger('operator')
+    logger_ops.error(json.dumps(error_report, indent=2))
+    
+    return error_report
+
+# Example usage demonstration
+if __name__ == "__main__":
+    # Simulate a complete request flow for operator testing
+    from types import SimpleNamespace
+    
+    # Create a mock request
+    class MockRequest:
+        def __init__(self, trace_id=None):
+            self.headers = {}
+            if trace_id:
+                self.headers[TraceConfig.TRACE_ID_HEADER] = trace_id
+            self.method = 'POST'
+            self.path = '/api/process'
+            self.data = {'input': 'test-data'}
+            self.id = 'req-123'
+    
+    # Simulate request flow
+    print("=== Test Request with Trace ID ===")
+    trace_id = str(uuid.uuid4())
+    test_request = MockRequest(trace_id=trace_id)
+    
+    try:
+        result = service_a_endpoint(test_request)
+        print(f"Request processed: {result}")
+        
+        # Retrieve trace summary
+        trace = trace_manager.get_trace(trace_id)
+        print("\n=== TRACE SUMMARY ===")
+        print(json.dumps(trace.to_dict(), indent=2))
+    
+    except CustomError as e:
+        print(f"\n=== ERROR OCCURRED ===")
+        print(f"Error: {e.to_dict()}")
+        handle_operator_error(e.trace_id, e)
+    
+    # Test error scenario
+    print("\n=== Test Request with Error ===")
+    error_trace_id = str(uuid.uuid4())
+    error_request = MockRequest(trace_id=error_trace_id)
+    
+    try:
+        # Simulate error in Service B
+        error_client = TracedServiceClient('test', 'service-b')
+        error_client.make_request(
+            operation='fail_call',
+            request_data={'cause_error': True},
+            trace_id=error_trace_id
+        )
+    except CustomError as e:
+        handle_operator_error(e.trace_id, e)
+```
+
+## Key Features
+
+### 1. **Trace ID Propagation**
+- Unique trace ID generated or propagated between services
+- Passed via HTTP headers (`X-Trace-ID`)
+- Maintained through decorators and middleware
+
+### 2. **Span Management**
+- Each operation creates a span with start/end timestamps
+- Nested spans for service calls
+- Status tracking (SUCCESS/ERROR)
+
+### 3. **Service Call Tracking**
+- Records inter-service calls with request/response data
+- Tracks latency and failures
+- Maintains parent-child relationships
+
+### 4. **Error Handling**
+- Custom `CustomError` with trace context
+- Structured error reporting
+- Automatic error propagation across services
+
+### 5. **Operator Interface**
+- Comprehensive trace summaries
+- Detailed timeline of operations
+- Error analysis for troubleshooting
+- Recommended actions
+
+### 6. **Logging**
+- Structured JSON logging
+- Service-specific loggers
+- Correlation via trace/span IDs
+
+## Usage Patterns
+
+**For Operators:**
+```python
+# Query trace by ID
+trace = trace_manager.get_trace(trace_id)
+summary = trace.to_dict()
+
+# View error report
+error_report = handle_operator_error(trace_id, error)
+```
+
+**For Services:**
+```python
+# Service A - entry point
+@trace_request_handler('service-a')
+def api_endpoint(request):
+    # Your logic here
+    pass
+
+# Service B - downstream
+@trace_request_handler('service-b')
+def service_b_handler(request):
+    # Your logic here
+    pass
+
+# Making service calls
+client = TracedServiceClient('service-a', 'service-b')
+response = client.make_request('operation', data, trace_id)
+```
+
+**For Monitoring:**
+```python
+# Export to APM tools
+trace_data = trace.to_dict()
+# Send to Datadog, Grafana, etc.
+```
+
+This implementation provides a complete tracing solution that enables operators to:
+- Track a single request across both services
+- Identify bottlenecks and failures
+- Correlate logs and events
+- Diagnose issues quickly
+- Get actionable insights from error reports

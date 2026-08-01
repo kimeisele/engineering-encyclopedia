@@ -1,0 +1,296 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request across two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured error logging
+3. Context propagation between services
+4. Centralized error handling
+5. Traceability across service boundaries
+
+## Implementation (Node.js Example)
+
+```javascript
+const { v4: uuidv4 } = require('uuid');
+const winston = require('winston');
+
+// Configure logger with correlation ID support
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.Console(),
+    new winston.transports.File({ filename: 'error-trace.log' })
+  ]
+});
+
+// Middleware to generate/propagate correlation ID
+const correlationIdMiddleware = (req, res, next) => {
+  // Get correlation ID from header or generate new one
+  const correlationId = req.headers['x-correlation-id'] || uuidv4();
+
+  // Attach to request and response
+  req.correlationId = correlationId;
+  res.setHeader('X-Correlation-ID', correlationId);
+
+  // Log the start of the request
+  logger.info({
+    message: 'Request started',
+    correlationId,
+    method: req.method,
+    path: req.path,
+    service: 'Service1' // Change to Service2 where appropriate
+  });
+
+  next();
+};
+
+// Error handler for Service 1
+const errorHandlerService1 = (err, req, res, next) => {
+  const correlationId = req.correlationId;
+
+  // Log the error with context
+  logger.error({
+    message: 'Error in Service 1',
+    correlationId,
+    error: {
+      message: err.message,
+      stack: err.stack,
+      name: err.name
+    },
+    request: {
+      method: req.method,
+      path: req.path,
+      headers: req.headers,
+      body: req.body
+    },
+    service: 'Service1'
+  });
+
+  // Add service-specific error context
+  err.serviceContext = {
+    service: 'Service1',
+    timestamp: new Date().toISOString(),
+    correlationId
+  };
+
+  // Pass to centralized error handler
+  centralizedErrorHandler(err, req, res);
+};
+
+// Error handler for Service 2
+const errorHandlerService2 = (err, req, res, next) => {
+  const correlationId = req.correlationId;
+
+  // Log the error with context
+  logger.error({
+    message: 'Error in Service 2',
+    correlationId,
+    error: {
+      message: err.message,
+      stack: err.stack,
+      name: err.name
+    },
+    request: {
+      method: req.method,
+      path: req.path,
+      headers: req.headers,
+      body: req.body
+    },
+    service: 'Service2'
+  });
+
+  // Add service-specific error context
+  err.serviceContext = {
+    service: 'Service2',
+    timestamp: new Date().toISOString(),
+    correlationId
+  };
+
+  // Pass to centralized error handler
+  centralizedErrorHandler(err, req, res);
+};
+
+// Centralized error handler that can be called from either service
+const centralizedErrorHandler = (err, req, res) => {
+  const correlationId = req.correlationId;
+
+  // Determine the appropriate response based on error type
+  let statusCode = 500;
+  let errorResponse = {
+    error: 'Internal Server Error',
+    correlationId,
+    timestamp: new Date().toISOString()
+  };
+
+  if (err.name === 'ValidationError') {
+    statusCode = 400;
+    errorResponse = {
+      ...errorResponse,
+      error: 'Validation Failed',
+      details: err.details
+    };
+  } else if (err.name === 'NotFoundError') {
+    statusCode = 404;
+    errorResponse.error = 'Resource Not Found';
+  } else if (err.name === 'UnauthorizedError') {
+    statusCode = 401;
+    errorResponse.error = 'Unauthorized';
+  }
+
+  // Log the final error state
+  logger.error({
+    message: 'Final error response',
+    correlationId,
+    statusCode,
+    errorResponse,
+    serviceContext: err.serviceContext || {}
+  });
+
+  // Send response
+  res.status(statusCode).json(errorResponse);
+};
+
+// Example usage in Express app for Service 1
+const express = require('express');
+const app1 = express();
+
+app1.use(express.json());
+app1.use(correlationIdMiddleware);
+
+// Example route that calls Service 2
+app1.get('/api/data', async (req, res, next) => {
+  try {
+    const service2Response = await callService2(req.correlationId);
+    res.json(service2Response);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Error handling middleware
+app1.use(errorHandlerService1);
+
+// Example function to call Service 2
+async function callService2(correlationId) {
+  // In a real implementation, this would be an HTTP call
+  // For this example, we'll simulate a potential error
+
+  if (Math.random() > 0.7) { // 30% chance of error for demo
+    const err = new Error('Service 2 failed to process request');
+    err.name = 'Service2Error';
+    err.serviceContext = { service: 'Service1', calledService: 'Service2' };
+    throw err;
+  }
+
+  return { data: 'Processed by Service 2' };
+}
+
+// Example usage in Express app for Service 2
+const app2 = express();
+
+app2.use(express.json());
+app2.use(correlationIdMiddleware);
+
+// Example route in Service 2
+app2.post('/api/process', (req, res, next) => {
+  try {
+    // Process request
+    if (!req.body.valid) {
+      const err = new Error('Invalid request data');
+      err.name = 'ValidationError';
+      err.details = req.body.errors;
+      throw err;
+    }
+
+    res.json({ result: 'success' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Error handling middleware
+app2.use(errorHandlerService2);
+
+// Start both services (in real implementation they would run separately)
+const PORT1 = 3001;
+const PORT2 = 3002;
+
+app1.listen(PORT1, () => {
+  console.log(`Service 1 running on port ${PORT1}`);
+});
+
+app2.listen(PORT2, () => {
+  console.log(`Service 2 running on port ${PORT2}`);
+});
+```
+
+## Key Features
+
+1. **Correlation ID Propagation**:
+   - Each request gets a unique ID that flows through both services
+   - The ID is passed in headers between services
+
+2. **Structured Logging**:
+   - All logs include the correlation ID for easy tracing
+   - Logs contain both error details and request context
+
+3. **Service-Specific Error Context**:
+   - Each service adds its own context to errors
+   - Centralized handler ensures consistent error responses
+
+4. **Error Classification**:
+   - Different error types get appropriate HTTP status codes
+   - Error details are included in responses
+
+5. **Traceability**:
+   - Operators can search logs for the correlation ID to see the full request flow
+   - The log file contains all interactions with timestamps
+
+## How to Use for Tracing
+
+1. **When an error occurs**:
+   - Note the correlation ID from the response headers or logs
+   - Search the log file for that correlation ID
+
+2. **Example log search**:
+   ```bash
+   grep "correlationId": "a1b2c3d4-5678-90ef-ghij-klmnopqrstuv" error-trace.log
+   ```
+
+3. **Expected output**:
+   - You'll see entries from both services showing:
+     - Request start in Service 1
+     - Call to Service 2
+     - Any errors in either service
+     - Final error response
+
+## Deployment Considerations
+
+1. **Header Propagation**:
+   - Ensure your HTTP client propagates the `X-Correlation-ID` header
+   - Example with Axios:
+     ```javascript
+     axios.get('http://service2/api', {
+       headers: {
+         'X-Correlation-ID': req.correlationId
+       }
+     });
+     ```
+
+2. **Log Aggregation**:
+   - In production, consider using a log aggregation system (ELK, Splunk, etc.)
+   - Configure it to index by correlation ID
+
+3. **Monitoring**:
+   - Set up alerts for high error rates with correlation IDs
+   - Create dashboards showing error rates by service
+
+4. **Error Tracking Services**:
+   - Consider integrating with services like Sentry, Rollbar, or Datadog
+   - These can automatically group errors by correlation ID
+
+This implementation provides a solid foundation for tracing requests across service boundaries while maintaining good error handling practices.

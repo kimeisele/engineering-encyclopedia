@@ -1,0 +1,107 @@
+```python
+import time
+import threading
+from typing import Callable, Any
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern to avoid hammering a downstream HTTP API while it is down.
+    
+    States:
+        CLOSED: normal operation, requests pass through
+        OPEN: API is down, fail fast without calling
+        HALF_OPEN: probing with limited requests to test recovery
+    """
+    
+    def __init__(
+        self,
+        call_api: Callable[..., Any],
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        half_open_max_calls: int = 1
+    ):
+        self.call_api = call_api
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        
+        self._failure_count = 0
+        self._last_failure_time = None
+        self._state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self._half_open_calls = 0
+        self._lock = threading.Lock()
+    
+    def __call__(self, *args, **kwargs) -> Any:
+        with self._lock:
+            if self._state == "OPEN":
+                if time.time() - self._last_failure_time >= self.recovery_timeout:
+                    self._state = "HALF_OPEN"
+                    self._half_open_calls = 0
+                else:
+                    raise CircuitBreakerOpenError("API is unavailable, circuit is open")
+            
+            if self._state == "HALF_OPEN":
+                if self._half_open_calls >= self.half_open_max_calls:
+                    raise CircuitBreakerOpenError("API is probing recovery, try later")
+                self._half_open_calls += 1
+        
+        try:
+            result = self.call_api(*args, **kwargs)
+            with self._lock:
+                self._failure_count = 0
+                if self._state == "HALF_OPEN":
+                    self._state = "CLOSED"
+                return result
+        except Exception as e:
+            with self._lock:
+                self._failure_count += 1
+                self._last_failure_time = time.time()
+                if self._failure_count >= self.failure_threshold or self._state == "HALF_OPEN":
+                    self._state = "OPEN"
+            raise
+
+class CircuitBreakerOpenError(Exception):
+    """Raised when circuit is open and request is rejected without calling API."""
+
+# Usage example
+def call_downstream_api():
+    # This would be an HTTP call
+    response = requests.get("https://api.example.com/data", timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+protected_call = CircuitBreaker(call_downstream_api, failure_threshold=3, recovery_timeout=10)
+
+# In your main code:
+def handle_request():
+    try:
+        data = protected_call()
+        return data
+    except CircuitBreakerOpenError:
+        # Fail fast, or use fallback
+        return None
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 78f8ed3b745d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "CircuitBreakerOpenError says 'API is unavailable' and 'probing recovery', identifying the failing stage clearly."
+          location: "circuit_breaker.py:40,43"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, the error can be correlated via the caller's own request context when caught and logged."
+          location: "circuit_breaker.py:50"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, errors do not contain URLs, headers, payloads, or authentication details - only state information."
+          location: "circuit_breaker.py:40-43"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached when raising the breaker error, before any wrapping by the caller."
+          location: "circuit_breaker.py:40,43"
+      unanswered: []
+  not_applied: []

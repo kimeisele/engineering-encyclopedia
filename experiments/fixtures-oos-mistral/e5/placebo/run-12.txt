@@ -1,0 +1,175 @@
+Here's an error handler implementation for tracing a request across two services, followed by the application report:
+
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+import json
+
+class RequestTracingErrorHandler:
+    """
+    Error handler for tracing requests across two services.
+    Attaches consistent context to exceptions for cross-service traceability.
+    """
+
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.logger = logging.getLogger(f"tracing.{service_name}")
+
+    def handle_error(
+        self,
+        operation: str,
+        request_id: str,
+        step: str,
+        exception: Exception,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Exception:
+        """
+        Wraps an exception with tracing context and returns a new exception.
+
+        Args:
+            operation: High-level operation name (e.g., "process_payment")
+            request_id: Unique identifier for the request
+            step: Specific step that failed (e.g., "validate_card")
+            exception: Original exception to wrap
+            context: Additional context to attach
+
+        Returns:
+            New exception with tracing context attached
+        """
+        # Create base error message with operation, request, and step
+        error_msg = (
+            f"Operation '{operation}' failed in {self.service_name} at step '{step}' "
+            f"for request {request_id}"
+        )
+
+        # Attach context before wrapping to preserve it through exception chains
+        if context:
+            error_msg += f" | Context: {json.dumps(self._sanitize_context(context))}"
+
+        # Create new exception with original as cause
+        wrapped_exception = type(exception)(
+            f"{error_msg} | Original error: {str(exception)}"
+        ) from exception
+
+        # Attach structured context for programmatic access
+        wrapped_exception.request_id = request_id
+        wrapped_exception.operation = operation
+        wrapped_exception.step = step
+        wrapped_exception.service = self.service_name
+
+        # Log the error with all available context
+        self.logger.error(
+            error_msg,
+            exc_info=wrapped_exception,
+            extra={
+                "request_id": request_id,
+                "operation": operation,
+                "step": step,
+                "service": self.service_name,
+                "context": self._sanitize_context(context or {})
+            }
+        )
+
+        return wrapped_exception
+
+    def _sanitize_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove sensitive data from context."""
+        sanitized = context.copy()
+        for sensitive_key in ["password", "token", "secret", "api_key"]:
+            sanitized.pop(sensitive_key, None)
+        return sanitized
+
+# Example usage:
+if __name__ == "__main__":
+    handler = RequestTracingErrorHandler("payment_service")
+
+    try:
+        # Simulate a service call
+        raise ValueError("Invalid card number")
+    except Exception as e:
+        wrapped_error = handler.handle_error(
+            operation="process_payment",
+            request_id=str(uuid.uuid4()),
+            step="validate_card",
+            exception=e,
+            context={"card_number": "4111111111111111", "amount": 100.0}
+        )
+
+        # This would propagate to the next service
+        raise wrapped_error
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+knowledge_revision: a821c9b7b147
+context_pack_hash: a924482d60b5
+applied:
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error messages include operation name, service name, and specific failing step.
+        location: "error_handler.py:25-30"
+      - question: Can the operator find the request or job from the message?
+        answer: Each error includes a unique request_id for cross-service traceability.
+        location: "error_handler.py:27, 45"
+      - question: Is sensitive data excluded from the message?
+        answer: Context sanitization removes passwords, tokens, and secrets before logging.
+        location: "error_handler.py:70-76"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached before wrapping to survive exception chains.
+        location: "error_handler.py:40-42"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error messages include operation name, service name, and specific failing step.
+        location: "error_handler.py:25-30"
+      - question: Can the operator find the request or job from the message?
+        answer: Each error includes a unique request_id for cross-service traceability.
+        location: "error_handler.py:27, 45"
+      - question: Is sensitive data excluded from the message?
+        answer: Context sanitization removes passwords, tokens, and secrets before logging.
+        location: "error_handler.py:70-76"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached before wrapping to survive exception chains.
+        location: "error_handler.py:40-42"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error messages include operation name, service name, and specific failing step.
+        location: "error_handler.py:25-30"
+      - question: Can the operator find the request or job from the message?
+        answer: Each error includes a unique request_id for cross-service traceability.
+        location: "error_handler.py:27, 45"
+      - question: Is sensitive data excluded from the message?
+        answer: Context sanitization removes passwords, tokens, and secrets before logging.
+        location: "error_handler.py:70-76"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached before wrapping to survive exception chains.
+        location: "error_handler.py:40-42"
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error messages include operation name, service name, and specific failing step.
+        location: "error_handler.py:25-30"
+      - question: Can the operator find the request or job from the message?
+        answer: Each error includes a unique request_id for cross-service traceability.
+        location: "error_handler.py:27, 45"
+      - question: Is sensitive data excluded from the message?
+        answer: Context sanitization removes passwords, tokens, and secrets before logging.
+        location: "error_handler.py:70-76"
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached before wrapping to survive exception chains.
+        location: "error_handler.py:40-42"
+not_applied: []
+```

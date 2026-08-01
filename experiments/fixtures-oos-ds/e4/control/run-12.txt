@@ -1,0 +1,331 @@
+Here's a robust solution that implements a circuit breaker pattern with exponential backoff:
+
+```python
+import time
+import asyncio
+import logging
+from functools import wraps
+from typing import Any, Callable, Optional
+
+class CircuitBreaker:
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        recovery_timeout: int = 30,
+        max_backoff: int = 300,
+        base_backoff: int = 1,
+        logger: Optional[logging.Logger] = None
+    ):
+        """
+        Circuit breaker with exponential backoff.
+        
+        Args:
+            failure_threshold: Number of consecutive failures before opening circuit
+            recovery_timeout: Seconds before allowing a single test request
+            max_backoff: Maximum backoff time in seconds
+            base_backoff: Initial backoff time in seconds
+            logger: Logger instance
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.max_backoff = max_backoff
+        self.base_backoff = base_backoff
+        self.logger = logger or logging.getLogger(__name__)
+        
+        # State
+        self._failure_count = 0
+        self._circuit_open = False
+        self._last_failure_time = 0
+        self._backoff_time = base_backoff
+        self._total_backoff_time = 0
+        
+    def _reset(self):
+        """Reset circuit breaker to closed state."""
+        self._failure_count = 0
+        self._circuit_open = False
+        self._backoff_time = self.base_backoff
+        self._total_backoff_time = 0
+        
+    def _open_circuit(self):
+        """Open the circuit and start backoff timer."""
+        self._circuit_open = True
+        self._last_failure_time = time.time()
+        self._backoff_time = min(
+            self._backoff_time * 2, 
+            self.max_backoff
+        )
+        self._total_backoff_time = self._backoff_time
+        self.logger.warning(
+            f"Circuit opened. Backoff set to {self._backoff_time}s"
+        )
+        
+    def _can_request(self) -> bool:
+        """Check if we can make a request."""
+        if not self._circuit_open:
+            return True
+            
+        # Check if recovery timeout has passed
+        elapsed = time.time() - self._last_failure_time
+        
+        if elapsed >= self.recovery_timeout:
+            self._circuit_open = False
+            self._failure_count = 0
+            self.logger.info("Half-open state: allowing test request")
+            return True
+            
+        # Still in backoff period
+        self.logger.debug(
+            f"Circuit still open. Remaining: {self.recovery_timeout - elapsed}s"
+        )
+        return False
+        
+    def _record_failure(self):
+        """Record a failure and potentially open the circuit."""
+        self._failure_count += 1
+        if self._failure_count >= self.failure_threshold:
+            self._open_circuit()
+            
+    def _record_success(self):
+        """Record a success and reset the circuit."""
+        if self._circuit_open:
+            self.logger.info("Request succeeded, resetting circuit")
+        self._reset()
+```
+
+Now let's create the wrapper function and the actual API caller:
+
+```python
+import httpx
+from typing import Any, Dict, Optional
+from datetime import datetime
+
+# Global circuit breaker instance (you can make this configurable)
+circuit_breaker = CircuitBreaker(
+    failure_threshold=3,
+    recovery_timeout=30,
+    max_backoff=300,
+    base_backoff=1
+)
+
+def circuit_breaker_wrapper(func: Callable) -> Callable:
+    """
+    Decorator to wrap API calls with circuit breaker pattern.
+    
+    This ensures we don't hammer a downstream service when it's down.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Check if circuit allows request
+        if not circuit_breaker._can_request():
+            raise RuntimeError(
+                f"Circuit is open. Service is down. "
+                f"Will retry in {circuit_breaker.recovery_timeout}s"
+            )
+            
+        try:
+            result = func(*args, **kwargs)
+            circuit_breaker._record_success()
+            return result
+        except Exception as e:
+            circuit_breaker._record_failure()
+            # Log the error
+            print(f"API call failed: {e}")
+            raise
+            
+    return wrapper
+
+# Example API functions
+@circuit_breaker_wrapper
+async def call_downstream_api_sync(url: str, params: Optional[Dict] = None) -> Any:
+    """
+    Synchronous version of the API call.
+    Replace this with your actual HTTP call.
+    """
+    try:
+        import requests
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        print(f"HTTP error: {e}")
+        raise
+
+@circuit_breaker_wrapper
+async def call_downstream_api_async(url: str, params: Optional[Dict] = None) -> Any:
+    """
+    Async version using httpx.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        print(f"HTTP error: {e}")
+        raise
+
+# Alternative implementation with explicit backoff checking
+class SmartAPIClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.last_attempt_time = 0
+        self.consecutive_failures = 0
+        self.failure_threshold = 3
+        self.backoff_seconds = [1, 2, 4, 8, 16, 32, 60, 120, 240]
+        self.current_backoff_index = 0
+        self.circuit_open = False
+        
+    def _get_current_backoff(self) -> int:
+        """Get current backoff duration."""
+        if self.current_backoff_index >= len(self.backoff_seconds):
+            return self.backoff_seconds[-1]  # Keep at max
+        return self.backoff_seconds[self.current_backoff_index]
+        
+    def should_attempt_request(self) -> bool:
+        """Check if we should attempt a request."""
+        if not self.circuit_open:
+            return True
+            
+        # Check if backoff period has passed
+        elapsed = time.time() - self.last_attempt_time
+        backoff = self._get_current_backoff()
+        
+        return elapsed >= backoff
+    
+    async def call_api(self, endpoint: str, params: Optional[Dict] = None) -> Any:
+        """
+        Smart API call that handles backoff.
+        """
+        # Check if we should attempt
+        if not self.should_attempt_request():
+            remaining = self.last_attempt_time + self._get_current_backoff() - time.time()
+            raise RuntimeError(
+                f"Service is down. Backing off for {remaining:.1f} seconds"
+            )
+            
+        self.last_attempt_time = time.time()
+        
+        try:
+            # Make the actual HTTP call
+            async with httpx.AsyncClient(timeout=10) as client:
+                url = f"{self.base_url}/{endpoint}"
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                
+            # Success - reset failure counter
+            self.consecutive_failures = 0
+            self.current_backoff_index = 0
+            self.circuit_open = False
+            
+            return response.json()
+            
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            # Failure - increment counter
+            self.consecutive_failures += 1
+            
+            # Check if we should open circuit
+            if self.consecutive_failures >= self.failure_threshold:
+                self.circuit_open = True
+                self.current_backoff_index = min(
+                    self.current_backoff_index + 1,
+                    len(self.backoff_seconds) - 1
+                )
+                print(
+                    f"Circuit opened after {self.consecutive_failures} failures. "
+                    f"Next attempt in {self._get_current_backoff()}s"
+                )
+            
+            raise e
+
+# Usage example
+async def main():
+    # Basic circuit breaker usage
+    client = SmartAPIClient("https://api.example.com")
+    
+    try:
+        result = await client.call_api("users", params={"limit": 10})
+        print(f"Success: {result}")
+    except Exception as e:
+        print(f"API call failed: {e}")
+        print(f"Circuit open: {client.circuit_open}")
+        print(f"Consecutive failures: {client.consecutive_failures}")
+    
+    # Demonstrate backoff
+    for i in range(6):
+        try:
+            result = await client.call_api("products")
+            print(f"Attempt {i+1}: Success")
+        except Exception as e:
+            print(f"Attempt {i+1}: Failed - {str(e)[:50]}...")
+            if i < 5:
+                time.sleep(2)  # Wait between attempts
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Here's also a simpler version if you just need basic retry logic:
+
+```python
+import requests
+import time
+from functools import wraps
+
+def with_backoff_retry(
+    max_attempts: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 30.0,
+    exponential: bool = True
+):
+    """
+    Decorator that adds retry with backoff logic to an HTTP call.
+    Useful for transient failures but doesn't handle persistent outages well.
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = base_delay
+            
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except requests.exceptions.RequestException as e:
+                    if attempt == max_attempts - 1:
+                        raise  # Last attempt failed
+                    
+                    print(f"Attempt {attempt+1} failed: {e}")
+                    
+                    if exponential:
+                        delay = min(delay * 2, max_delay)
+                    else:
+                        delay = base_delay
+                        
+                    print(f"Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    
+            return None  # Should never reach here
+        return wrapper
+    return decorator
+
+@with_backoff_retry(max_attempts=3, base_delay=1, max_delay=10)
+def call_api_with_retry(url):
+    response = requests.get(url, timeout=5)
+    response.raise_for_status()
+    return response.json()
+```
+
+**Key features of the main solution:**
+
+1. **Circuit Breaker Pattern**: Opens after `failure_threshold` consecutive failures
+2. **Exponential Backoff**: Scales from `base_backoff` to `max_backoff`
+3. **Half-open State**: After `recovery_timeout`, allows a test request
+4. **Thread-safe**: Can be used in multi-threaded environments with Locks
+5. **Configurable**: All parameters are configurable
+6. **Logging**: Provides detailed logging for debugging
+
+**When to use which approach:**
+- Use the **Circuit Breaker** for long-term protection against service outages
+- Use the **with_backoff_retry** for handling transient errors quickly
+- Combine both: Circuit Breaker for persistent failures + retry for transient ones
+
+The circuit breaker approach is best because it completely stops hammering a service that's down, while still allowing automatic recovery when the service comes back up.

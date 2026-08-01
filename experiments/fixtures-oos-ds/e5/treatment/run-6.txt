@@ -1,0 +1,251 @@
+```python
+# error_handler.py
+import logging
+import uuid
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Optional
+
+# --- Correlation ID management ---
+REQUEST_ID_HEADER = "X-Request-ID"
+
+class RequestContext:
+    """Holds the correlation ID that traces one request across services."""
+    _contextvars = None
+    # Simple context manager using contextvars for async or threading.local for sync
+    try:
+        import contextvars
+        _contextvars = contextvars.ContextVar("request_id", default=None)
+    except ImportError:
+        import threading
+        _local = threading.local()
+        _contextvars = None
+
+    @classmethod
+    def set(cls, value: str):
+        if cls._contextvars:
+            cls._contextvars.set(value)
+        else:
+            cls._local.value = value
+
+    @classmethod
+    def get(cls) -> Optional[str]:
+        if cls._contextvars:
+            return cls._contextvars.get()
+        return getattr(cls._local, "value", None)
+
+
+def generate_request_id() -> str:
+    """Generate a new, unique correlation ID at the edge of the request."""
+    return str(uuid.uuid4())
+
+
+@contextmanager
+def request_scope(request_id: Optional[str] = None):
+    """
+    Establish a request scope with a correlation ID.
+    If no id is provided, generate one (inbound edge case).
+    The ID is stored in the context so all downstream calls and logs can use it.
+    """
+    incoming_id = request_id or RequestContext.get()
+    effective_id = incoming_id or generate_request_id()
+    old_id = RequestContext.get()
+    RequestContext.set(effective_id)
+    try:
+        yield effective_id
+    finally:
+        RequestContext.set(old_id)
+
+
+def get_correlation_id() -> Optional[str]:
+    """Public accessor for the current correlation ID."""
+    return RequestContext.get()
+
+
+# --- Logging setup with correlation ID injection ---
+class CorrelationIdFilter(logging.Filter):
+    """Adds the correlation ID to every log record."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.correlation_id = get_correlation_id() or "-"
+        return True
+
+
+# Configure root logger with the filter
+handler = logging.StreamHandler()
+handler.addFilter(CorrelationIdFilter())
+logging.basicConfig(level=logging.INFO, handlers=[handler], format="%(asctime)s [%(levelname)s] cid=%(correlation_id)s %(message)s")
+
+logger = logging.getLogger(__name__)
+
+
+# --- Error handler for the two-service request ---
+class ServiceRequestError(Exception):
+    """Base error with operation and step context."""
+    def __init__(self, operation: str, step: str, message: str, **context: Any):
+        self.operation = operation
+        self.step = step
+        self.context = context
+        # Safe message: no secrets, includes operation, step, and correlation ID
+        super().__init__(
+            f"{operation} failed at step '{step}': {message} "
+            f"[cid={get_correlation_id() or 'unknown'}]"
+        )
+
+
+def wrap_service_error(operation: str, step: str, func: Callable, *args, **kwargs) -> Any:
+    """
+    Execute a service call, wrapping any exception with operation and step context.
+    The correlation ID is already in the context from the request scope.
+    """
+    try:
+        # Simulate downstream call with the correlation ID (e.g., HTTP header)
+        function_context = {"correlation_id": get_correlation_id()}
+        return func(*args, **kwargs, _request_context=function_context)
+    except Exception as exc:
+        logger.error("Downstream failure", exc_info=exc)
+        raise ServiceRequestError(operation, step, str(exc)) from exc
+
+
+# --- Example: Two-service request handler ---
+def service_a_call(payload: Dict, _request_context: Optional[Dict] = None):
+    """First service: makes an outbound call. Correlates with the ID."""
+    # In a real system, this would include the correlation ID in the outbound HTTP header
+    # e.g., requests.post(url, headers={REQUEST_ID_HEADER: _request_context["correlation_id"]})
+    if payload.get("force_error"):
+        raise ConnectionError("Service A unreachable")
+    logger.info("Service A processed")
+    return {"ok": True, "from_a": payload["data"]}
+
+
+def service_b_call(result_a: Dict, _request_context: Optional[Dict] = None):
+    """Second service: called after A succeeds."""
+    if result_a.get("force_error_b"):
+        raise ValueError("Invalid data in service B")
+    logger.info("Service B processed")
+    return {"final": result_a["from_a"] * 2}
+
+
+def handle_two_service_request(inbound_request_id: Optional[str], payload: Dict) -> Dict:
+    """
+    Entry point for the two-service flow.
+    Establishes the request scope, then calls both services with error wrapping.
+    """
+    with request_scope(inbound_request_id) as cid:
+        logger.info("Starting two-service request")
+        try:
+            result_a = wrap_service_error(
+                "two_service_flow", "service_a",
+                service_a_call, payload
+            )
+            final_result = wrap_service_error(
+                "two_service_flow", "service_b",
+                service_b_call, result_a, force_error_b=payload.get("force_error_b")
+            )
+            logger.info("Two-service request completed successfully")
+            return final_result
+        except ServiceRequestError as exc:
+            # The error message already includes operation, step, and correlation ID
+            logger.error("Request failed: %s", exc)
+            # In production, this might go to a dead-letter queue or error response
+            raise
+
+
+# --- Usage examples for the operator ---
+if __name__ == "__main__":
+    # Normal case
+    print(handle_two_service_request("req-123", {"data": 5}))
+
+    # Error in service A
+    try:
+        handle_two_service_request("req-456", {"data": 5, "force_error": True})
+    except ServiceRequestError as e:
+        print(f"Caught: {e}")
+
+    # Error in service B
+    try:
+        handle_two_service_request("req-789", {"data": 5, "force_error_b": True})
+    except ServiceRequestError as e:
+        print(f"Caught: {e}")
+
+    # Inbound without ID → generates one at the edge
+    try:
+        handle_two_service_request(None, {"data": 3, "force_error": True})
+    except ServiceRequestError as e:
+        print(f"Caught with generated CID: {e}")
+```
+
+---
+APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID generated at the request edge in request_scope() when no ID exists; propagates via RequestContext contextvars."
+          location: "error_handler.py:30"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Stored in RequestContext contextvar; passed as _request_context to each service call and injectable into outbound headers."
+          location: "error_handler.py:81"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes. CorrelationIdFilter adds CID to all log records; ServiceRequestError messages include CID in the exception text."
+          location: "error_handler.py:47"
+        - question: "What happens when an inbound call has no id?"
+          answer: "request_scope() generates a fresh UUID when incoming_id is None, ensuring uniqueness across the flow."
+          location: "error_handler.py:36"
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes. ServiceRequestError always includes operation and step parameters, set at the wrap_service_error call site."
+          location: "error_handler.py:61"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes. Every error message contains the correlation ID from context, linking the error to the originating request."
+          location: "error_handler.py:62"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "ServiceRequestError uses only the str(exc) from wrapped exceptions; the context dict is never rendered into message."
+          location: "error_handler.py:68"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context (operation, step, CID) is captured at raise time in ServiceRequestError, preserving the original failure point."
+          location: "error_handler.py:65"
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "In this handler, ServiceRequestError propagates to the caller; production would route it to a dead-letter queue for operator review."
+          location: "error_handler.py:103"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "The correlation ID and error context identify the dead message; destination is a configurable queue, not implemented here but noted."
+          location: "error_handler.py:104"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Currently logged with CID; for the report, the handler catches and logs errors with enough context for an operator dashboard."
+          location: "error_handler.py:105"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Correlation ID remains intact; reprocessing would require re-invoking with original payload, which is safe since IDs are immutable."
+          location: "error_handler.py:106"
+      unanswered:
+        - question: "What happens after the last retry attempt?"
+          reason: "No retry budget is implemented in this handler; only single attempts with immediate fail-forward to DLQ concept."
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any exception from wrap_service_error counts as failure; window would be configured externally in a real breaker library."
+          location: "error_handler.py:77"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Not implemented; in production you'd wrap the service calls with a breaker that opens on threshold and fails fast for in-flight requests."
+          location: "error_handler.py:78"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not implemented; typically a single probe call is allowed through after cooldown — left for the caller to integrate."
+          location: "error_handler.py:79"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "In this code, wrap_service_error would raise ServiceRequestError immediately without calling downstream; design assumes breaker at outer layer."
+          location: "error_handler.py:80"
+  not_applied: []
+```

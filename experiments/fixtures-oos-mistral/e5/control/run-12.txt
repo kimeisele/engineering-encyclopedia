@@ -1,0 +1,324 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request across two services. This implementation includes:
+
+1. Correlation IDs for request tracing
+2. Structured logging
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection
+
+## Implementation (Python Example)
+
+```python
+import logging
+import uuid
+import time
+import json
+from functools import wraps
+from typing import Dict, Any, Optional
+import requests
+from requests.exceptions import RequestException
+
+# Configure structured logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class ServiceError(Exception):
+    """Base class for service-specific errors"""
+    def __init__(self, message: str, original_exception: Optional[Exception] = None):
+        self.message = message
+        self.original_exception = original_exception
+        super().__init__(message)
+
+class ServiceAError(ServiceError):
+    """Errors specific to Service A"""
+    pass
+
+class ServiceBError(ServiceError):
+    """Errors specific to Service B"""
+    pass
+
+class RequestTracer:
+    """Handles correlation IDs and request tracing across services"""
+
+    @staticmethod
+    def generate_correlation_id() -> str:
+        """Generate a unique correlation ID for tracing"""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def get_correlation_id(headers: Optional[Dict[str, str]] = None) -> str:
+        """Extract correlation ID from headers or generate new one"""
+        if headers and 'X-Correlation-ID' in headers:
+            return headers['X-Correlation-ID']
+        return RequestTracer.generate_correlation_id()
+
+    @staticmethod
+    def inject_correlation_id(headers: Dict[str, str], correlation_id: str) -> Dict[str, str]:
+        """Inject correlation ID into headers"""
+        headers['X-Correlation-ID'] = correlation_id
+        return headers
+
+class ServiceAClient:
+    """Client for Service A with error handling and tracing"""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+
+    def call_service_a(self, payload: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Make a request to Service A with error handling"""
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Correlation-ID': correlation_id,
+            'X-Request-Start-Time': str(time.time())
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/v1/process",
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+
+            # Log successful response
+            logger.info(
+                "Service A response received",
+                extra={
+                    'correlation_id': correlation_id,
+                    'service': 'ServiceA',
+                    'status_code': response.status_code,
+                    'response_time': time.time() - float(response.headers.get('X-Request-Start-Time', 0)),
+                    'response_size': len(response.content)
+                }
+            )
+
+            return response.json()
+
+        except RequestException as e:
+            error_msg = f"Service A request failed: {str(e)}"
+            logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'service': 'ServiceA',
+                    'error_type': type(e).__name__,
+                    'original_exception': str(e)
+                },
+                exc_info=True
+            )
+            raise ServiceAError(error_msg, e)
+
+class ServiceBClient:
+    """Client for Service B with error handling and tracing"""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+
+    def call_service_b(self, payload: Dict[str, Any], correlation_id: str) -> Dict[str, Any]:
+        """Make a request to Service B with error handling"""
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Correlation-ID': correlation_id,
+            'X-Request-Start-Time': str(time.time())
+        }
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/v1/validate",
+                json=payload,
+                headers=headers,
+                timeout=15
+            )
+            response.raise_for_status()
+
+            # Log successful response
+            logger.info(
+                "Service B response received",
+                extra={
+                    'correlation_id': correlation_id,
+                    'service': 'ServiceB',
+                    'status_code': response.status_code,
+                    'response_time': time.time() - float(response.headers.get('X-Request-Start-Time', 0)),
+                    'response_size': len(response.content)
+                }
+            )
+
+            return response.json()
+
+        except RequestException as e:
+            error_msg = f"Service B request failed: {str(e)}"
+            logger.error(
+                error_msg,
+                extra={
+                    'correlation_id': correlation_id,
+                    'service': 'ServiceB',
+                    'error_type': type(e).__name__,
+                    'original_exception': str(e)
+                },
+                exc_info=True
+            )
+            raise ServiceBError(error_msg, e)
+
+def handle_cross_service_errors(func):
+    """Decorator to handle errors across both services with consistent tracing"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            # Extract correlation ID from incoming request or generate new one
+            correlation_id = RequestTracer.get_correlation_id(
+                kwargs.get('headers', {})
+            )
+
+            # Inject correlation ID into all outgoing requests
+            if 'headers' in kwargs:
+                kwargs['headers'] = RequestTracer.inject_correlation_id(
+                    kwargs['headers'], correlation_id
+                )
+
+            # Execute the function
+            result = func(*args, **kwargs)
+
+            # Log successful completion
+            logger.info(
+                "Request completed successfully",
+                extra={
+                    'correlation_id': correlation_id,
+                    'status': 'success'
+                }
+            )
+
+            return result
+
+        except ServiceAError as e:
+            logger.error(
+                "Request failed in Service A",
+                extra={
+                    'correlation_id': correlation_id,
+                    'service': 'ServiceA',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e),
+                    'original_exception': str(e.original_exception) if e.original_exception else None
+                },
+                exc_info=True
+            )
+            raise
+
+        except ServiceBError as e:
+            logger.error(
+                "Request failed in Service B",
+                extra={
+                    'correlation_id': correlation_id,
+                    'service': 'ServiceB',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e),
+                    'original_exception': str(e.original_exception) if e.original_exception else None
+                },
+                exc_info=True
+            )
+            raise
+
+        except Exception as e:
+            logger.error(
+                "Unexpected error in cross-service request",
+                extra={
+                    'correlation_id': correlation_id,
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                },
+                exc_info=True
+            )
+            raise ServiceError(f"Unexpected error: {str(e)}", e)
+
+    return wrapper
+
+# Example usage
+@handle_cross_service_errors
+def process_request(data: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Main function that calls both services"""
+    correlation_id = RequestTracer.get_correlation_id(headers)
+
+    # Call Service A
+    service_a_client = ServiceAClient("http://service-a.example.com")
+    service_a_response = service_a_client.call_service_a(data, correlation_id)
+
+    # Call Service B with response from Service A
+    service_b_client = ServiceBClient("http://service-b.example.com")
+    service_b_response = service_b_client.call_service_b(service_a_response, correlation_id)
+
+    return {
+        'service_a_response': service_a_response,
+        'service_b_response': service_b_response,
+        'correlation_id': correlation_id
+    }
+```
+
+## Key Features
+
+1. **Correlation ID Tracking**:
+   - Unique ID generated for each request
+   - Propagated through all service calls
+   - Included in all logs and error messages
+
+2. **Structured Logging**:
+   - Consistent log format across services
+   - Includes correlation ID, service name, timestamps, and error details
+   - Timing information for performance monitoring
+
+3. **Error Classification**:
+   - Service-specific error classes (ServiceAError, ServiceBError)
+   - Original exception preservation
+   - Clear error messages with context
+
+4. **Decorator for Cross-Service Handling**:
+   - Centralized error handling
+   - Automatic correlation ID management
+   - Consistent logging format
+
+5. **Metrics Collection**:
+   - Response times
+   - Payload sizes
+   - Error rates per service
+
+## Operator Instructions
+
+To trace a request across both services:
+
+1. **Find the Correlation ID**:
+   - Look for `X-Correlation-ID` in any log entry
+   - Or search logs for the correlation ID pattern (UUID)
+
+2. **Search Across Services**:
+   - Use the correlation ID to search logs in both Service A and Service B
+   - Example search: `correlation_id: "123e4567-e89b-12d3-a456-426614174000"`
+
+3. **Analyze the Flow**:
+   - Request start time in Service A
+   - Response from Service A
+   - Request to Service B
+   - Response from Service B
+   - Any errors with full stack traces
+
+4. **Performance Metrics**:
+   - Calculate total request time
+   - Identify slowest service
+   - Compare response sizes
+
+## Deployment Considerations
+
+1. **Log Aggregation**:
+   - Ensure logs from both services are aggregated in one place (ELK, Splunk, etc.)
+   - Configure correlation ID as a searchable field
+
+2. **Monitoring**:
+   - Set up alerts for high error rates
+   - Monitor request latencies
+   - Track correlation ID propagation
+
+3. **Testing**:
+   - Verify correlation IDs are properly propagated in all scenarios
+   - Test error scenarios to ensure proper logging
+
+This implementation provides a robust foundation for tracing requests across service boundaries while maintaining clear separation of concerns between the services.

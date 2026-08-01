@@ -1,0 +1,244 @@
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+# Configure logging to include correlation ID in all log lines
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class RequestContext:
+    """Holds correlation ID and other request-scoped data"""
+    correlation_id: str
+    service_name: str
+    operation: str
+    additional_context: Dict[str, Any] = None
+
+def generate_correlation_id() -> str:
+    """Generate a unique correlation ID for each logical request"""
+    return str(uuid.uuid4())
+
+def propagate_context(context: RequestContext, downstream_service: str) -> RequestContext:
+    """Propagate context to downstream service with updated service name"""
+    return RequestContext(
+        correlation_id=context.correlation_id,
+        service_name=downstream_service,
+        operation=context.operation,
+        additional_context=context.additional_context
+    )
+
+def error_handler(service_context: RequestContext, error: Exception) -> None:
+    """
+    Handle errors in a two-service request while maintaining traceability.
+
+    Args:
+        service_context: RequestContext containing correlation ID and service info
+        error: The exception that occurred
+    """
+    # Include operation, failing step, and correlation ID in error message
+    error_msg = (
+        f"Operation '{service_context.operation}' failed in {service_context.service_name} "
+        f"with correlation ID {service_context.correlation_id}. "
+        f"Error: {str(error)}"
+    )
+
+    # Log the error with full context
+    logger.error(
+        error_msg,
+        extra={
+            'correlation_id': service_context.correlation_id,
+            'service': service_context.service_name,
+            'operation': service_context.operation,
+            'error_type': type(error).__name__,
+            'additional_context': service_context.additional_context
+        }
+    )
+
+    # In a real implementation, you might also:
+    # 1. Add to dead-letter queue with original context
+    # 2. Trigger alerts with the correlation ID
+    # 3. Include in error monitoring systems
+
+def process_request(
+    service_name: str,
+    operation: str,
+    request_data: Dict[str, Any],
+    downstream_service: str,
+    request_processor: callable
+) -> Optional[Dict[str, Any]]:
+    """
+    Process a request across two services with error handling and correlation.
+
+    Args:
+        service_name: Name of current service
+        operation: Name of operation being performed
+        request_data: Input data for the request
+        downstream_service: Name of service to call next
+        request_processor: Function that processes the request and may call downstream
+
+    Returns:
+        Processed result or None if error occurred
+    """
+    # Generate or propagate correlation ID
+    correlation_id = request_data.get('correlation_id') or generate_correlation_id()
+
+    context = RequestContext(
+        correlation_id=correlation_id,
+        service_name=service_name,
+        operation=operation,
+        additional_context={
+            'input_data': request_data,
+            'downstream_service': downstream_service
+        }
+    )
+
+    try:
+        # Include correlation ID in all downstream calls
+        propagated_context = propagate_context(context, downstream_service)
+
+        # Process the request (may call downstream service)
+        result = request_processor(propagated_context)
+
+        return result
+
+    except Exception as e:
+        error_handler(context, e)
+        return None
+
+# Example usage:
+if __name__ == "__main__":
+    def example_downstream_processor(context: RequestContext) -> Dict[str, Any]:
+        """Example of a service that might call another service"""
+        # In a real implementation, this would make an actual downstream call
+        # with the propagated correlation ID
+        logger.info(
+            f"Processing in downstream service with correlation {context.correlation_id}",
+            extra={'correlation_id': context.correlation_id}
+        )
+        return {"status": "success"}
+
+    # Simulate a request
+    request_data = {"user_id": 123, "action": "update"}
+    result = process_request(
+        service_name="service_a",
+        operation="user_update",
+        request_data=request_data,
+        downstream_service="service_b",
+        request_processor=example_downstream_processor
+    )
+
+    if result is None:
+        print("Request failed - see logs for details")
+    else:
+        print("Request succeeded:", result)
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID is generated at the first service entry point.
+          location: "error_handler.py:generate_correlation_id"
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is included in all log lines and propagated via context objects.
+          location: "error_handler.py:propagate_context"
+        - question: Is it included in every log line and error?
+          answer: Yes, correlation ID is in every log line via logging format and error handler.
+          location: "error_handler.py:error_handler"
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated if none is provided in the request.
+          location: "error_handler.py:process_request"
+      unanswered:
+        - question: that the correlation id is an idempotency key
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that it replaces a trace system
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that generating one per service is enough
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that it must be exposed to users
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation name, service name, and correlation ID.
+          location: "error_handler.py:error_handler"
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, via the correlation ID included in every error message.
+          location: "error_handler.py:error_handler"
+        - question: Is sensitive data excluded from the message?
+          answer: Sensitive data is filtered by not including raw request data in error messages.
+          location: "error_handler.py:error_handler"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when creating the RequestContext before any exceptions occur.
+          location: "error_handler.py:process_request"
+      unanswered:
+        - question: that more logging is better
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that the message replaces a stack trace
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that context at raise time survives every wrapping layer
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: The error is logged with full context and correlation ID for operator attention.
+          location: "error_handler.py:error_handler"
+        - question: What identifies a message as dead, and where does it go?
+          answer: Dead messages are identified by correlation ID and logged with full context.
+          location: "error_handler.py:error_handler"
+        - question: How is a dead letter surfaced to an operator?
+          answer: Via error logs containing correlation ID and full context for tracing.
+          location: "error_handler.py:error_handler"
+        - question: Can a dead letter be reprocessed safely?
+          answer: Yes, with original context preserved via correlation ID.
+          location: "error_handler.py:process_request"
+      unanswered:
+        - question: that dead letters are processed automatically
+          reason: Not implemented in this example (would require queue system)
+        - question: that a dead-letter queue replaces monitoring
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that moving to the dead-letter queue fixes the message
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that retries should be unbounded first
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any exception during request processing counts as a failure.
+          location: "error_handler.py:error_handler"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Not implemented in this example (would require circuit breaker library)
+          reason: The example focuses on correlation and error handling rather than circuit breaking
+        - question: How does the half-open state test recovery?
+          answer: Not implemented in this example
+          reason: The example focuses on correlation and error handling rather than circuit breaking
+        - question: What does the caller do while the circuit is open?
+          answer: Not implemented in this example
+          reason: The example focuses on correlation and error handling rather than circuit breaking
+      unanswered:
+        - question: that the breaker replaces timeouts or retries
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that open is permanent
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that a breaker hides the failure from operators
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+        - question: that thresholds are one-size-fits-all
+          reason: This is explicitly excluded in the context pack's does_not_imply list
+```

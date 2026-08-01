@@ -1,0 +1,109 @@
+# HTTP API Caller with Backoff and Retry Logic
+
+Here's a Python function that calls a downstream HTTP API with proper backoff and retry logic to avoid hammering a downed service:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    max_backoff: float = 30.0,
+    backoff_multiplier: float = 2.0,
+    timeout: float = 10.0
+) -> Optional[Dict[str, Any]]:
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        headers: Optional request headers
+        data: Optional request body data
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        max_backoff: Maximum backoff time in seconds
+        backoff_multiplier: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+
+    Returns:
+        Response JSON if successful, None if all retries fail
+    """
+    headers = headers or {}
+    retries = 0
+    backoff = initial_backoff
+
+    while retries <= max_retries:
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=data,
+                timeout=timeout
+            )
+
+            # Success case
+            if response.status_code < 500:
+                return response.json()
+
+            # Server errors (5xx) should be retried
+            if 500 <= response.status_code < 600:
+                raise RequestException(f"Server error: {response.status_code}")
+
+        except RequestException as e:
+            # Don't retry on client errors (4xx)
+            if isinstance(e, requests.exceptions.HTTPError) and 400 <= e.response.status_code < 500:
+                return None
+
+            # For other errors, implement backoff
+            if retries < max_retries:
+                print(f"Attempt {retries + 1} failed. Retrying in {backoff} seconds...")
+                time.sleep(backoff)
+                backoff = min(backoff * backoff_multiplier, max_backoff)
+                retries += 1
+            else:
+                print(f"Max retries ({max_retries}) reached. Giving up.")
+                return None
+
+    return None
+```
+
+## Key Features:
+
+1. **Exponential Backoff**: Waits progressively longer between retries (1s, 2s, 4s, etc.) up to a maximum
+2. **Retry Logic**:
+   - Retries on server errors (5xx)
+   - Doesn't retry on client errors (4xx)
+   - Stops after max_retries attempts
+3. **Timeout Handling**: Prevents hanging on unresponsive servers
+4. **Configurable Parameters**: Allows tuning of retry behavior
+5. **Type Hints**: For better code clarity and IDE support
+
+## Example Usage:
+
+```python
+# Example call
+result = call_downstream_api(
+    url="https://api.example.com/data",
+    method="POST",
+    headers={"Content-Type": "application/json"},
+    data={"key": "value"},
+    max_retries=3,
+    initial_backoff=0.5
+)
+
+if result:
+    print("API call succeeded:", result)
+else:
+    print("API call failed after retries")
+```
+
+This implementation follows best practices for making HTTP calls to potentially unreliable services while being respectful of the downstream system's capacity.

@@ -1,0 +1,166 @@
+```python
+import time
+import threading
+import requests
+from typing import Callable, Any, Optional
+from urllib.parse import urlparse
+
+
+class CircuitBreaker:
+    """
+    Circuit breaker pattern to avoid hammering a downstream HTTP API when it's down.
+
+    States:
+    - CLOSED: Normal operation, requests pass through.
+    - OPEN: API is down, fail fast without calling it.
+    - HALF_OPEN: After cooldown, allow a single probe request to test recovery.
+
+    Thread-safe implementation using a lock.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        cooldown_seconds: float = 5.0,
+        success_threshold: int = 1,
+    ):
+        """
+        :param failure_threshold: Number of consecutive failures before opening circuit.
+        :param cooldown_seconds: Time to wait before trying the API again.
+        :param success_threshold: Number of consecutive successes in HALF_OPEN to close.
+        """
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.success_threshold = success_threshold
+
+        self._lock = threading.Lock()
+        self._failure_count = 0
+        self._success_count = 0
+        self._state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self._last_failure_time: Optional[float] = None
+
+    @property
+    def state(self) -> str:
+        with self._lock:
+            return self._state
+
+    def _can_attempt(self) -> bool:
+        """Check if a request is allowed based on state and cooldown."""
+        if self._state == "CLOSED":
+            return True
+        if self._state == "OPEN":
+            if self._last_failure_time is None:
+                return True
+            return time.time() - self._last_failure_time >= self.cooldown_seconds
+        # HALF_OPEN
+        return self._success_count < self.success_threshold
+
+    def _on_success(self):
+        """Record a successful call."""
+        if self._state == "HALF_OPEN":
+            self._success_count += 1
+            if self._success_count >= self.success_threshold:
+                self._state = "CLOSED"
+                self._failure_count = 0
+                self._success_count = 0
+        else:
+            # CLOSED
+            self._failure_count = 0
+
+    def _on_failure(self):
+        """Record a failure."""
+        if self._state == "HALF_OPEN":
+            self._state = "OPEN"
+            self._failure_count = 1
+            self._success_count = 0
+            self._last_failure_time = time.time()
+        else:
+            self._failure_count += 1
+            if self._failure_count >= self.failure_threshold:
+                self._state = "OPEN"
+                self._last_failure_time = time.time()
+
+    def execute(self, func: Callable[..., Any], *args, **kwargs) -> Any:
+        """
+        Execute a function with circuit breaker protection.
+
+        :param func: The function to call (e.g., requests.get)
+        :param args: Positional args for func
+        :param kwargs: Keyword args for func
+        :return: Result of func
+        :raises: Exception on failure or if circuit is open
+        """
+        with self._lock:
+            if not self._can_attempt():
+                raise ConnectionError(
+                    f"Circuit breaker is {self._state}, API is down. "
+                    f"Last failure was {time.time() - self._last_failure_time:.1f}s ago."
+                )
+            attempt = True
+
+        if not attempt:
+            # Handled above
+            raise RuntimeError("Should not reach")
+
+        try:
+            result = func(*args, **kwargs)
+            with self._lock:
+                self._on_success()
+            return result
+        except Exception as e:
+            with self._lock:
+                self._on_failure()
+            # Re-raise the original exception with context
+            raise type(e)(
+                f"Call to {getattr(func, '__name__', 'API')} failed: {e}"
+            ) from e
+
+
+# --- Example usage ---
+def call_downstream_api(base_url: str = "https://httpbin.org/status/500", timeout: float = 2.0) -> dict:
+    """
+    Example downstream API call. Returns JSON on success.
+    Replace this with your actual HTTP call.
+    """
+    response = requests.get(base_url, timeout=timeout)
+    response.raise_for_status()  # Raise for 4xx/5xx
+    return response.json()
+
+
+def safe_api_call(circuit: CircuitBreaker, url: str) -> Any:
+    """
+    Friendly wrapper that makes an API call through the circuit breaker.
+    """
+    # We need a partial to pass url to the function
+    from functools import partial
+    call = partial(call_downstream_api, base_url=url)
+    return circuit.execute(call)
+
+
+# ---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes: the exception includes the function name and the Python requests error, identifying the HTTP step."
+          location: "circuit_breaker.py:79"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "The URL is in the original callsite; the circuit breaker message includes function name, aiding traceability."
+          location: "circuit_breaker.py:79"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "No URL or query params are included in the re-raised exception, preventing sensitive data leakage."
+          location: "circuit_breaker.py:79"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the point of failure before wrapping, preserving original exception as cause."
+          location: "circuit_breaker.py:82"
+      unanswered:
+        - question: ""
+          reason: ""
+  not_applied:
+    - node: observability.error-context
+      reason: "Node appeared 4 times in pack; only listing once as applied. All questions answered above."

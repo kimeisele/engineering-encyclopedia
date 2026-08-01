@@ -1,0 +1,239 @@
+Here's a robust function that won't hammer a downstream API when it's down:
+
+```python
+import time
+import requests
+import logging
+from datetime import datetime, timedelta
+from functools import wraps
+
+class ResilientAPIClient:
+    def __init__(self, base_url, max_retries=3, backoff_factor=2, 
+                 circuit_breaker_threshold=5, circuit_breaker_timeout=30):
+        """
+        Initialize the resilient API client.
+        
+        Args:
+            base_url: Base URL for the API
+            max_retries: Maximum retries per request
+            backoff_factor: Exponential backoff multiplier
+            circuit_breaker_threshold: Number of failures before circuit opens
+            circuit_breaker_timeout: Seconds to wait before retrying after circuit opens
+        """
+        self.base_url = base_url
+        self.max_retries = max_retries
+        self.backoff_factor = backoff_factor
+        self.circuit_breaker_threshold = circuit_breaker_threshold
+        self.circuit_breaker_timeout = circuit_breaker_timeout
+        
+        # Circuit breaker state
+        self.failure_count = 0
+        self.circuit_open_until = None
+        self.circuit_open = False
+        
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger(__name__)
+    
+    def _check_circuit_breaker(self):
+        """Check if circuit breaker is open and if it can reset"""
+        if self.circuit_open:
+            if datetime.now() >= self.circuit_open_until:
+                # Circuit can be closed after timeout
+                self.circuit_open = False
+                self.failure_count = 0
+                self.logger.info("Circuit breaker closed after timeout")
+                return True
+            else:
+                self.logger.warning(f"Circuit breaker is open, request rejected. Retry after {self.circuit_open_until}")
+                return False
+        return True
+    
+    def _open_circuit(self):
+        """Open the circuit breaker"""
+        self.circuit_open = True
+        self.circuit_open_until = datetime.now() + timedelta(seconds=self.circuit_breaker_timeout)
+        self.logger.error(f"Circuit breaker opened. Will retry after {self.circuit_open_until}")
+    
+    def _record_failure(self):
+        """Record a failure and potentially open the circuit"""
+        self.failure_count += 1
+        self.logger.warning(f"Failure count: {self.failure_count}/{self.circuit_breaker_threshold}")
+        if self.failure_count >= self.circuit_breaker_threshold:
+            self._open_circuit()
+    
+    def _record_success(self):
+        """Record a success and reset failure count"""
+        self.failure_count = 0
+    
+    def make_request(self, method='GET', endpoint='', params=None, data=None, headers=None):
+        """
+        Make an HTTP request with circuit breaker and retry logic.
+        
+        Args:
+            method: HTTP method (GET, POST, PUT, DELETE, etc.)
+            endpoint: API endpoint path
+            params: Query parameters
+            data: Request body
+            headers: Request headers
+            
+        Returns:
+            Response object or None if request failed
+        """
+        url = f"{self.base_url}/{endpoint}"
+        
+        # Check circuit breaker first
+        if not self._check_circuit_breaker():
+            return None
+        
+        # Request headers with default retry header
+        request_headers = {'Retry-After': '30', 'X-Request-Id': str(time.time())}
+        if headers:
+            request_headers.update(headers)
+        
+        for attempt in range(self.max_retries):
+            try:
+                self.logger.info(f"Attempt {attempt + 1}/{self.max_retries} for {url}")
+                
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    data=data,
+                    headers=request_headers,
+                    timeout=10  # Timeout after 10 seconds
+                )
+                
+                # Check for 5xx errors or specific failure status codes
+                if response.status_code >= 500:
+                    self._record_failure()
+                    self.logger.warning(f"Server error: {response.status_code}")
+                    
+                    # Check if circuit opened due to this failure
+                    if self.circuit_open:
+                        return None
+                    
+                    # Exponential backoff before retry
+                    wait_time = self.backoff_factor ** attempt
+                    self.logger.info(f"Backing off for {wait_time} seconds before retry")
+                    time.sleep(wait_time)
+                    continue
+                
+                # 4xx errors are client errors, don't retry
+                if 400 <= response.status_code < 500:
+                    self._record_failure()
+                    self.logger.error(f"Client error: {response.status_code}")
+                    return response  # Return response even for 4xx errors
+                
+                # Success (2xx) or redirect (3xx)
+                self._record_success()
+                self.logger.info(f"Request successful: {response.status_code}")
+                return response
+                
+            except requests.ConnectionError as e:
+                self._record_failure()
+                self.logger.error(f"Connection error: {str(e)}")
+                
+                if self.circuit_open:
+                    return None
+                
+                # Exponential backoff with jitter
+                import random
+                wait_time = (self.backoff_factor ** attempt) + random.uniform(0, 1)
+                self.logger.info(f"Connection error. Backing off for {wait_time:.2f} seconds")
+                time.sleep(wait_time)
+                
+            except requests.Timeout:
+                self._record_failure()
+                self.logger.error(f"Request timeout")
+                
+                if self.circuit_open:
+                    return None
+                
+                # Exponential backoff for timeouts
+                wait_time = self.backoff_factor ** attempt
+                self.logger.info(f"Timeout. Backing off for {wait_time} seconds")
+                time.sleep(wait_time)
+                
+            except requests.RequestException as e:
+                self._record_failure()
+                self.logger.error(f"Request exception: {str(e)}")
+                
+                if self.circuit_open:
+                    return None
+                
+                # Exponential backoff
+                wait_time = self.backoff_factor ** attempt
+                self.logger.info(f"Error. Backing off for {wait_time} seconds")
+                time.sleep(wait_time)
+        
+        self.logger.error(f"All retries exhausted for {url}")
+        return None
+
+# Convenience wrapper functions
+def api_get(client, endpoint, params=None, headers=None):
+    return client.make_request(method='GET', endpoint=endpoint, params=params, headers=headers)
+
+def api_post(client, endpoint, data=None, headers=None):
+    return client.make_request(method='POST', endpoint=endpoint, data=data, headers=headers)
+
+# Alternative simpler version for single use cases
+def call_api_with_circuit_breaker(base_url, endpoint, method='GET', max_retries=3, 
+                                  backoff_factor=2, circuit_breaker_threshold=5, 
+                                  circuit_breaker_timeout=30):
+    """Simpler standalone function version"""
+    client = ResilientAPIClient(
+        base_url=base_url,
+        max_retries=max_retries,
+        backoff_factor=backoff_factor,
+        circuit_breaker_threshold=circuit_breaker_threshold,
+        circuit_breaker_timeout=circuit_breaker_timeout
+    )
+    return client.make_request(method=method, endpoint=endpoint)
+
+# Example usage
+if __name__ == "__main__":
+    # Create a client instance
+    client = ResilientAPIClient(
+        base_url="https://example.com/api",
+        max_retries=3,
+        backoff_factor=2,
+        circuit_breaker_threshold=5,  # Opens after 5 failures
+        circuit_breaker_timeout=60     # Wait 60 seconds before retrying
+    )
+    
+    # Make a request
+    response = api_get(client, "users/123")
+    if response:
+        print(f"Response status: {response.status_code}")
+        print(f"Response body: {response.json()}")
+    else:
+        print("Request failed or circuit breaker is open")
+```
+
+Key features of this implementation:
+
+1. **Circuit Breaker Pattern**: 
+   - Tracks consecutive failures
+   - Opens circuit after threshold (default 5 failures)
+   - Closes circuit after timeout (default 30 seconds)
+   - Prevents hammering when API is down
+
+2. **Exponential Backoff**:
+   - Increases wait time between retries (2^n seconds)
+   - Adds jitter to prevent thundering herd
+
+3. **Retry Logic**:
+   - Only retries on 5xx server errors
+   - Doesn't retry on 4xx client errors
+   - Handles connection errors and timeouts differently
+
+4. **Smart Retry Behavior**:
+   - Checks circuit breaker before each attempt
+   - Stops immediately if circuit is open
+   - Resets failure counter on success
+
+5. **Monitoring & Logging**:
+   - Full logging of attempts, failures, and circuit state
+   - Easy to monitor system health
+
+The circuit breaker is the key feature that prevents hammering - once the API is detected as failing (through the failure threshold), the client stops making requests until the timeout period has elapsed, then systematically checks if the API has recovered.

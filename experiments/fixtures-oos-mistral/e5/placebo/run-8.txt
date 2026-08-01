@@ -1,0 +1,124 @@
+```python
+import logging
+import uuid
+from typing import Dict, Any, Optional
+
+class TraceableError(Exception):
+    """Error with trace context for cross-service tracing."""
+
+    def __init__(self, message: str, context: Dict[str, Any]):
+        super().__init__(message)
+        self.context = context
+        self.trace_id = context.get('trace_id', str(uuid.uuid4()))
+
+    def __str__(self):
+        base = super().__str__()
+        return f"{base} [trace_id={self.trace_id}]"
+
+def error_handler(service_name: str, operation: str, step: str,
+                 request_id: str, context: Optional[Dict[str, Any]] = None) -> None:
+    """
+    Handle errors with cross-service trace context.
+
+    Args:
+        service_name: Name of the service where error occurred
+        operation: Name of the operation being performed
+        step: Specific step that failed
+        request_id: Unique identifier for the request
+        context: Additional context (will be merged with trace context)
+    """
+    if context is None:
+        context = {}
+
+    # Ensure trace_id is present and consistent
+    trace_id = context.get('trace_id')
+    if not trace_id:
+        trace_id = str(uuid.uuid4())
+        context['trace_id'] = trace_id
+
+    # Build error message with required context
+    error_msg = (
+        f"Service '{service_name}' failed during '{operation}' at step '{step}' "
+        f"for request '{request_id}' with trace_id '{trace_id}'"
+    )
+
+    # Create and log the error with context
+    error = TraceableError(error_msg, context)
+    logging.error(error, exc_info=True)
+
+    # Re-raise to maintain exception chain
+    raise error from None
+```
+
+---
+APPLICATION_REPORT
+```yaml
+knowledge_revision: a821c9b7b147
+context_pack_hash: a924482d60b5
+applied:
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error message includes service name, operation, and specific failing step.
+        location: error_handler.py:30
+      - question: Can the operator find the request or job from the message?
+        answer: Message includes request_id and trace_id for request correlation.
+        location: error_handler.py:30
+      - question: Is sensitive data excluded from the message?
+        answer: Context is passed separately and not included in error message.
+        location: error_handler.py:20
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached when creating the TraceableError instance.
+        location: error_handler.py:10
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error message includes service name, operation, and specific failing step.
+        location: error_handler.py:30
+      - question: Can the operator find the request or job from the message?
+        answer: Message includes request_id and trace_id for request correlation.
+        location: error_handler.py:30
+      - question: Is sensitive data excluded from the message?
+        answer: Context is passed separately and not included in error message.
+        location: error_handler.py:20
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached when creating the TraceableError instance.
+        location: error_handler.py:10
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error message includes service name, operation, and specific failing step.
+        location: error_handler.py:30
+      - question: Can the operator find the request or job from the message?
+        answer: Message includes request_id and trace_id for request correlation.
+        location: error_handler.py:30
+      - question: Is sensitive data excluded from the message?
+        answer: Context is passed separately and not included in error message.
+        location: error_handler.py:20
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached when creating the TraceableError instance.
+        location: error_handler.py:10
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: Error message includes service name, operation, and specific failing step.
+        location: error_handler.py:30
+      - question: Can the operator find the request or job from the message?
+        answer: Message includes request_id and trace_id for request correlation.
+        location: error_handler.py:30
+      - question: Is sensitive data excluded from the message?
+        answer: Context is passed separately and not included in error message.
+        location: error_handler.py:20
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached when creating the TraceableError instance.
+        location: error_handler.py:10
+not_applied: []
+```

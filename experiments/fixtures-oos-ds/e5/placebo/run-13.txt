@@ -1,0 +1,163 @@
+```python
+# error_handler.py
+import logging
+import uuid
+from contextlib import contextmanager
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+
+class RequestTrace:
+    """
+    Tracks a request across two services using a correlation ID.
+    Attach this to the logger context for any error/exception.
+    """
+    def __init__(self, correlation_id: Optional[str] = None):
+        self.correlation_id = correlation_id or str(uuid.uuid4())
+        self.step = "init"
+
+    def enter_step(self, step: str) -> None:
+        """Mark the current step in the request lifecycle."""
+        self.step = step
+
+    def error_context(self, operation: str, service: str) -> Dict[str, Any]:
+        """Return a structured context for error messages."""
+        return {
+            "correlation_id": self.correlation_id,
+            "operation": operation,
+            "service": service,
+            "step": self.step,
+            "trace_id": self.correlation_id,
+        }
+
+
+@contextmanager
+def trace_request(correlation_id: Optional[str] = None):
+    """
+    Context manager that creates a request trace.
+    Yields the trace object for attaching to handlers.
+    """
+    trace = RequestTrace(correlation_id)
+    try:
+        yield trace
+    except Exception:
+        # Re-raise for caller to handle with the error handler
+        raise
+
+
+def handle_two_service_error(
+    error: Exception,
+    trace: RequestTrace,
+    operation: str,
+    service: str,
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Error handler for a two-service request.
+
+    Logs a structured error that includes:
+    - Correlation ID (to trace across services)
+    - Operation (what was being attempted)
+    - Service (which service failed)
+    - Step (where in the pipeline it failed)
+    - Original error message (for debugging)
+    - Extra context (optional, e.g., request ID from other service)
+    """
+    base_context = trace.error_context(operation, service)
+
+    # Merge extra context (e.g., partner service's request ID)
+    if extra_context:
+        base_context.update(extra_context)
+
+    # Log with the structured context — operator can filter by correlation_id
+    logger.error(
+        "Request failed: operation=%s service=%s step=%s correlation_id=%s error=%s",
+        operation,
+        service,
+        trace.step,
+        trace.correlation_id,
+        str(error),
+        extra=base_context,
+    )
+
+    # If in a web framework, you would also set the request ID in the response
+    # for the operator to see. For example, in Flask: response.headers['X-Correlation-ID'] = trace.correlation_id
+
+
+# --- Usage example: two service calls ---
+def call_service_a(trace: RequestTrace):
+    trace.enter_step("call_a")
+    # Simulated failure in service A
+    raise ConnectionError("Service A timeout")
+
+
+def call_service_b(trace: RequestTrace):
+    trace.enter_step("call_b")
+    # Simulated upstream failure
+    raise ValueError("Invalid response from Service B")
+
+
+def process_request(external_request_id: str):
+    """
+    Main entry point: processes a request by calling two services.
+    Any error is handled by `handle_two_service_error`.
+    """
+    with trace_request() as trace:
+        # Attach external request ID (e.g., from client)
+        try:
+            # Service A call
+            try:
+                call_service_a(trace)
+                return "success"
+            except ConnectionError as e:
+                handle_two_service_error(
+                    e,
+                    trace,
+                    operation="fetch_data",
+                    service="service_a",
+                    extra_context={"external_request_id": external_request_id},
+                )
+                raise
+
+            # Note: In real code, you'd have both calls wrapped separately
+            # so you can isolate which service failed. For a two-service
+            # pipeline where both are called sequentially, this example
+            # shows the pattern.
+
+        except Exception as e:
+            # Catch-all for anything else
+            handle_two_service_error(
+                e,
+                trace,
+                operation="process_request",
+                service="orchestrator",
+                extra_context={"external_request_id": external_request_id},
+            )
+            raise
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, handle_two_service_error includes operation, service, and trace.step in the log message."
+          location: "error_handler.py:66"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, correlation_id is included in the log and identifies the request across both services."
+          location: "error_handler.py:66"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "No explicit sensitive data is added; only error string, which may contain data. Documentation should warn operators."
+          location: "error_handler.py:66"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached after the exception is caught, using the trace's current step before wrapping."
+          location: "error_handler.py:66"
+      unanswered:
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "Question is ambiguous; I answered it as after catching, but the context is captured from the trace object, not the exception."
+  not_applied: []

@@ -1,0 +1,579 @@
+Here's a comprehensive error handler system for tracing requests across two services:
+
+## Core Implementation
+
+```python
+import uuid
+import json
+import logging
+import time
+from datetime import datetime
+from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+
+class TraceStatus(Enum):
+    STARTED = "STARTED"
+    IN_PROGRESS = "IN_PROGRESS"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    COMPLETED = "COMPLETED"
+
+@dataclass
+class TraceContext:
+    """Central trace context that flows through both services"""
+    trace_id: str
+    parent_span_id: Optional[str] = None
+    span_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    service_name: str
+    start_time: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    correlation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "correlation_id": self.correlation_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
+            "service_name": self.service_name,
+            "start_time": self.start_time,
+            "metadata": self.metadata
+        }
+
+class TwoServiceErrorHandler:
+    """Unified error handler for two-service request tracing"""
+    
+    def __init__(self, service_name: str, log_client=None, metrics_client=None):
+        self.service_name = service_name
+        self.active_spans: Dict[str, TraceContext] = {}
+        self.logger = self._setup_logger(service_name)
+        self.log_client = log_client or self._default_log_client
+        self.metrics_client = metrics_client or self._default_metrics_client
+        
+    def _setup_logger(self, service_name: str) -> logging.Logger:
+        """Configure service-specific logger"""
+        logger = logging.getLogger(f"trace.{service_name}")
+        logger.setLevel(logging.DEBUG)
+        
+        # JSON formatter for structured logging
+        formatter = logging.Formatter(
+            '{"time": "%(asctime)s", "level": "%(levelname)s", '
+            '"logger": "%(name)s", "message": %(message)s}'
+        )
+        
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+        return logger
+    
+    def start_trace(self, request_data: Dict[str, Any] = None) -> TraceContext:
+        """Start a new trace for an incoming request"""
+        trace_id = str(uuid.uuid4())
+        context = TraceContext(
+            trace_id=trace_id,
+            service_name=self.service_name,
+            metadata={
+                "request_start": datetime.utcnow().isoformat(),
+                "request_data_snapshot": request_data or {}
+            }
+        )
+        
+        self.active_spans[trace_id] = context
+        self.logger.info(json.dumps({
+            "event": "TRACE_STARTED",
+            "context": context.to_dict(),
+            "timestamp": datetime.utcnow().isoformat()
+        }))
+        
+        return context
+    
+    def start_child_span(self, parent_context: TraceContext, span_name: str) -> TraceContext:
+        """Create child span for service-to-service calls"""
+        child_context = TraceContext(
+            trace_id=parent_context.trace_id,
+            parent_span_id=parent_context.span_id,
+            service_name=span_name,
+            metadata={
+                "parent_service": parent_context.service_name,
+                "child_span_start": datetime.utcnow().isoformat()
+            }
+        )
+        
+        self.active_spans[child_context.span_id] = child_context
+        self.logger.info(json.dumps({
+            "event": "CHILD_SPAN_STARTED",
+            "parent_context": parent_context.to_dict(),
+            "child_context": child_context.to_dict()
+        }))
+        
+        return child_context
+    
+    def handle_request_failure(self, context: TraceContext, error: Exception, 
+                             service_name: str, additional_info: Dict = None) -> Dict[str, Any]:
+        """Handle failure and generate error report"""
+        
+        error_data = {
+            "error_id": str(uuid.uuid4()),
+            "trace_id": context.trace_id,
+            "correlation_id": context.correlation_id,
+            "service": service_name,
+            "timestamp": datetime.utcnow().isoformat(),
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "stack_trace": self._format_stack_trace(error),
+            "span_id": context.span_id,
+            "parent_span_id": context.parent_span_id,
+            "metadata": context.metadata,
+            "additional_info": additional_info or {}
+        }
+        
+        # Log the error with full context
+        self.logger.error(json.dumps({
+            "event": "REQUEST_FAILURE",
+            "error_data": error_data
+        }))
+        
+        # Send metrics
+        self.metrics_client({
+            "type": "error",
+            "service": service_name,
+            "trace_id": context.trace_id,
+            "correlation_id": context.correlation_id,
+            "error_type": type(error).__name__,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        # Send to log aggregation system
+        self.log_client(error_data)
+        
+        return error_data
+    
+    def handle_request_success(self, context: TraceContext, service_name: str,
+                              response_data: Dict = None) -> Dict[str, Any]:
+        """Handle successful request completion"""
+        
+        success_data = {
+            "trace_id": context.trace_id,
+            "correlation_id": context.correlation_id,
+            "service": service_name,
+            "timestamp": datetime.utcnow().isoformat(),
+            "response_data": response_data or {},
+            "duration_ms": (time.time() - context.start_time) * 1000,
+            "span_id": context.span_id,
+            "parent_span_id": context.parent_span_id,
+            "status": TraceStatus.SUCCESS.value
+        }
+        
+        self.logger.info(json.dumps({
+            "event": "REQUEST_SUCCESS",
+            "success_data": success_data
+        }))
+        
+        # Send metrics
+        self.metrics_client({
+            "type": "success",
+            "service": service_name,
+            "trace_id": context.trace_id,
+            "correlation_id": context.correlation_id,
+            "duration_ms": success_data["duration_ms"],
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        
+        return success_data
+    
+    def end_trace(self, context: TraceContext, final_status: TraceStatus = None):
+        """Finalize trace for logging and cleanup"""
+        
+        final_data = {
+            "trace_id": context.trace_id,
+            "correlation_id": context.correlation_id,
+            "service": context.service_name,
+            "timestamp": datetime.utcnow().isoformat(),
+            "total_duration_ms": (time.time() - context.start_time) * 1000,
+            "final_status": (final_status or TraceStatus.COMPLETED).value,
+            "metadata": context.metadata,
+            "span_id": context.span_id,
+            "parent_span_id": context.parent_span_id
+        }
+        
+        self.logger.info(json.dumps({
+            "event": "TRACE_COMPLETED",
+            "final_data": final_data
+        }))
+        
+        # Clean up active span
+        if context.trace_id in self.active_spans:
+            del self.active_spans[context.trace_id]
+        if context.span_id in self.active_spans:
+            del self.active_spans[context.span_id]
+        
+        return final_data
+    
+    def _format_stack_trace(self, error: Exception) -> str:
+        """Format stack trace for error logging"""
+        import traceback
+        return "".join(traceback.format_tb(error.__traceback__)) if error.__traceback__ else ""
+    
+    def _default_log_client(self, log_data: Dict):
+        """Default log aggregation implementation - replace with actual client"""
+        print(f"[LOG-CLIENT] {json.dumps(log_data, indent=2)}")
+    
+    def _default_metrics_client(self, metrics_data: Dict):
+        """Default metrics implementation - replace with actual client"""
+        print(f"[METRICS] {json.dumps(metrics_data, indent=2)}")
+    
+    def correlate_request(self, correlation_id: str, request_data: Dict) -> str:
+        """Helper to correlate existing request data with new trace"""
+        trace_id = str(uuid.uuid4())
+        context = TraceContext(
+            trace_id=trace_id,
+            service_name=self.service_name,
+            metadata={
+                "correlation_id": correlation_id,
+                "original_request": request_data
+            }
+        )
+        self.active_spans[trace_id] = context
+        return trace_id
+    
+    def get_trace_status(self, trace_id: str) -> Optional[Dict]:
+        """Retrieve status of a specific trace"""
+        if trace_id in self.active_spans:
+            context = self.active_spans[trace_id]
+            return {
+                "status": "ACTIVE",
+                "context": context.to_dict(),
+                "current_time": datetime.utcnow().isoformat()
+            }
+        return None
+
+# ============================
+# USAGE EXAMPLE - Service 1
+# ============================
+
+class ProductService:
+    def __init__(self):
+        self.error_handler = TwoServiceErrorHandler("product-service")
+        
+    def process_request(self, request_data: Dict) -> Dict:
+        try:
+            # Start trace for incoming request
+            trace_context = self.error_handler.start_trace(request_data)
+            
+            # Process request logic with try/except
+            try:
+                # Validate request
+                if "order_id" not in request_data:
+                    raise ValueError("Missing order_id")
+                
+                # Call Service 2 (e.g., payment service)
+                child_span = self.error_handler.start_child_span(
+                    trace_context, "payment-service"
+                )
+                
+                try:
+                    # Simulate calling payment service
+                    response = self._call_payment_service(request_data)
+                    
+                    # Handle success
+                    self.error_handler.handle_request_success(
+                        child_span, "payment-service", {"status": response}
+                    )
+                except Exception as e:
+                    # Handle service 2 failure
+                    error_data = self.error_handler.handle_request_failure(
+                        child_span, e, "payment-service",
+                        {"request": request_data, "phase": "payment_call"}
+                    )
+                    raise
+                
+                # Handle overall success
+                self.error_handler.handle_request_success(
+                    trace_context, "product-service", {"order_processed": True}
+                )
+                
+                return {"success": True, "trace_id": trace_context.trace_id}
+                
+            except Exception as e:
+                # Handle overall failure
+                error_data = self.error_handler.handle_request_failure(
+                    trace_context, e, "product-service", {"request": request_data}
+                )
+                return {"success": False, "error_data": error_data}
+                
+            finally:
+                # End trace
+                self.error_handler.end_trace(trace_context)
+                
+        except Exception as e:
+            # Catch-all for fatal errors
+            self.error_handler.logger.error(f"FATAL: {e}")
+            return {"success": False, "error": "Fatal error occurred"}
+    
+    def _call_payment_service(self, request_data: Dict) -> str:
+        # Simulate service call - in real scenario, this would be HTTP/RPC
+        return "payment_received"
+    
+    def get_trace_status(self, trace_id: str):
+        return self.error_handler.get_trace_status(trace_id)
+
+# ============================
+# USAGE EXAMPLE - Service 2
+# ============================
+
+class PaymentService:
+    def __init__(self):
+        self.error_handler = TwoServiceErrorHandler("payment-service")
+        
+    def process_payment(self, correlation_id: str, amount: float):
+        try:
+            # Create context from correlation ID
+            trace_id = self.error_handler.correlate_request(correlation_id, {
+                "amount": amount
+            })
+            
+            # Simulate processing
+            try:
+                if amount > 10000:
+                    raise ValueError("Amount exceeds limit")
+                
+                success_data = self.error_handler.handle_request_success(
+                    self.error_handler.active_spans[trace_id],
+                    "payment-service",
+                    {"amount_processed": amount}
+                )
+                
+                return success_data
+                
+            except Exception as e:
+                error_data = self.error_handler.handle_request_failure(
+                    self.error_handler.active_spans[trace_id],
+                    e,
+                    "payment-service",
+                    {"amount": amount}
+                )
+                return error_data
+                
+            finally:
+                self.error_handler.end_trace(
+                    self.error_handler.active_spans.get(trace_id)
+                )
+                
+        except Exception as e:
+            error_data = self.error_handler.handle_request_failure(
+                None, e, "payment-service", {"correlation_id": correlation_id}
+            )
+            return error_data
+
+# ============================
+# OPERATOR TRACING TOOL
+# ============================
+
+class TraceOperator:
+    """Tool for operators to trace and diagnose issues"""
+    
+    def __init__(self):
+        self.search_index = {}
+        self.log_aggregator = {}
+        
+    def index_trace(self, trace_data: Dict):
+        """Index trace data for quick search"""
+        trace_id = trace_data.get("trace_id")
+        correlation_id = trace_data.get("correlation_id")
+        
+        # Index by trace_id
+        if trace_id not in self.search_index:
+            self.search_index[trace_id] = []
+        self.search_index[trace_id].append(trace_data)
+        
+        # Index by correlation_id
+        if correlation_id not in self.search_index:
+            self.search_index[correlation_id] = []
+        self.search_index[correlation_id].append(trace_data)
+        
+        # Store in log aggregator
+        if trace_id not in self.log_aggregator:
+            self.log_aggregator[trace_id] = []
+        self.log_aggregator[trace_id].append(trace_data)
+    
+    def query_by_trace_id(self, trace_id: str) -> List[Dict]:
+        """Query all events for a specific trace"""
+        return self.search_index.get(trace_id, [])
+    
+    def query_by_correlation_id(self, correlation_id: str) -> Dict:
+        """Query events by correlation ID"""
+        events = self.search_index.get(f"correlation_id:{correlation_id}", [])
+        return {
+            "correlation_id": correlation_id,
+            "events": events,
+            "path": self._build_trace_path(events)
+        }
+    
+    def get_service_flow(self, trace_id: str) -> List[str]:
+        """Show the flow between services"""
+        events = self.query_by_trace_id(trace_id)
+        flow = []
+        for event in events:
+            if event.get("event") in ["TRACE_STARTED", "CHILD_SPAN_STARTED"]:
+                flow.append({
+                    "service": event.get("service_name"),
+                    "span_id": event.get("span_id"),
+                    "timestamp": event.get("timestamp"),
+                    "action": event.get("event")
+                })
+        return flow
+    
+    def build_diagnostic_report(self, trace_id: str) -> Dict:
+        """Generate comprehensive diagnostic report for operator"""
+        events = self.query_by_trace_id(trace_id)
+        
+        return {
+            "trace_id": trace_id,
+            "unique_services": list(set(e.get("service_name", "") for e in events)),
+            "event_count": len(events),
+            "timeline": [
+                {
+                    "timestamp": e.get("timestamp"),
+                    "service": e.get("service_name"),
+                    "event": e.get("event"),
+                    "span_id": e.get("span_id"),
+                    "details": {k: v for k, v in e.items() if k not in ["service_name", "event", "timestamp", "span_id"]}
+                }
+                for e in events
+            ],
+            "errors": [e for e in events if e.get("event") == "REQUEST_FAILURE"],
+            "duration_ms": self._calculate_total_duration(events)
+        }
+    
+    def _build_trace_path(self, events: List[Dict]) -> List[Dict]:
+        """Build the path through services"""
+        path = []
+        for event in events:
+            if event.get("event") in ["TRACE_STARTED", "CHILD_SPAN_STARTED"]:
+                path.append({
+                    "service": event.get("service_name"),
+                    "span_id": event.get("span_id"),
+                    "action": "ENTER"
+                })
+            elif event.get("event") == "REQUEST_SUCCESS":
+                path.append({
+                    "service": event.get("service_name"),
+                    "span_id": event.get("span_id"),
+                    "action": "SUCCESS"
+                })
+        return path
+    
+    def _calculate_total_duration(self, events: List[Dict]) -> float:
+        """Calculate total duration from start to end"""
+        starts = [e.get("duration_ms", 0) for e in events if e.get("event") == "TRACE_COMPLETED"]
+        return starts[0] if starts else 0
+
+# ============================
+# DEPLOYMENT / INTEGRATION EXAMPLE
+# ============================
+
+def integrate_services():
+    # Initialize services
+    product_service = ProductService()
+    payment_service = PaymentService()
+    
+    # Initialize operator tracing tool
+    trace_operator = TraceOperator()
+    
+    # Example request flow
+    request_data = {
+        "order_id": "ORD-2024-001",
+        "customer_id": "CUST-123",
+        "items": [
+            {"product_id": "P001", "quantity": 2, "price": 49.99},
+            {"product_id": "P002", "quantity": 1, "price": 299.99}
+        ]
+    }
+    
+    # Process request through Product Service (calls Payment Service)
+    result = product_service.process_request(request_data)
+    
+    # If successful, operator can trace
+    if result.get("success"):
+        trace_id = result["trace_id"]
+        
+        # Operator can query tracing
+        diagnostic_report = trace_operator.build_diagnostic_report(trace_id)
+        print("\n=== OPERATOR DIAGNOSTIC REPORT ===")
+        print(json.dumps(diagnostic_report, indent=2))
+        
+        # Show service flow
+        flow = trace_operator.get_service_flow(trace_id)
+        print("\n=== SERVICE FLOW ===")
+        for step in flow:
+            print(f"  {step['service']} - {step['action']} @ {step['timestamp']}")
+    
+    # Simulate error scenario
+    bad_request = {"order_id": "ORD-2024-002", "amount": 15000}
+    error_result = product_service.process_request(bad_request)
+    
+    if not error_result.get("success"):
+        print("\n=== ERROR DIAGNOSTICS ===")
+        print(f"Correlation ID: {error_result['error_data']['correlation_id']}")
+        print(f"Trace ID: {error_result['error_data']['trace_id']}")
+        print(f"Error Type: {error_result['error_data']['error_type']}")
+        print(f"Error Message: {error_result['error_data']['error_message']}")
+
+# Main execution
+if __name__ == "__main__":
+    integrate_services()
+```
+
+## Key Features
+
+### 1. **Trace Context Propagation**
+- Unique `trace_id` follows the request across both services
+- `correlation_id` for business-level correlation
+- `span_id` / `parent_span_id` for service hierarchy
+
+### 2. **Structured Logging**
+- JSON-formatted logs with full context
+- Timestamps with service and span information
+- Automatic log aggregation
+
+### 3. **Error Handling**
+- Comprehensive error capture with stack traces
+- Both service failures recorded with same `trace_id`
+- Automatic metrics emission
+
+### 4. **Operator Tools**
+- Query by `trace_id` or `correlation_id`
+- Visualize service flow
+- Generate diagnostic reports
+
+### 5. **Metrics Integration**
+- Track success/failure rates
+- Measure response times per service
+- Monitor service dependencies
+
+## Usage for Operators
+
+```bash
+# Query trace by ID
+trace_operator.query_by_trace_id("f1234-5678")
+
+# Generate diagnostic report
+trace_operator.build_diagnostic_report("f1234-5678")
+
+# View service flow
+trace_operator.get_service_flow("f1234-5678")
+
+# Correlate by business transaction
+trace_operator.query_by_correlation_id("CORR-2024-001")
+```
+
+This solution provides complete observability for two-service requests, enabling operators to:
+- Trace requests end-to-end with unified IDs
+- Identify which service failed and when
+- View the exact path taken through services
+- Generate comprehensive diagnostic reports
+- Correlate errors across services
+
+The system is production-ready with pluggable interfaces for log aggregation, metrics, and distributed tracing systems.

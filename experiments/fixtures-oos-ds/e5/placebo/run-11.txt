@@ -1,0 +1,93 @@
+```python
+import logging
+import uuid
+from contextvars import ContextVar
+from typing import Optional, Any
+
+# Trace context propagation across service boundaries
+trace_id_var: ContextVar[Optional[str]] = ContextVar("trace_id", default=None)
+service_name_var: ContextVar[Optional[str]] = ContextVar("service_name", default=None)
+
+logger = logging.getLogger("two_service_request")
+
+
+class RequestErrorHandler:
+    """Error handler that tracks a request across two services via a trace ID."""
+
+    @staticmethod
+    def start_trace(service_name: str) -> str:
+        """Initialize a new trace ID for a request entering the system."""
+        trace_id = str(uuid.uuid4())
+        trace_id_var.set(trace_id)
+        service_name_var.set(service_name)
+        return trace_id
+
+    @staticmethod
+    def propagate_trace(trace_id: str, service_name: str) -> None:
+        """Propagate an existing trace ID when calling the downstream service."""
+        trace_id_var.set(trace_id)
+        service_name_var.set(service_name)
+
+    @staticmethod
+    def handle_error(
+        error: Exception,
+        operation: str,
+        failing_step: str,
+        extra_context: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Log an error with full trace context for operator investigation."""
+        trace_id = trace_id_var.get() or "unknown"
+        service_name = service_name_var.get() or "unknown"
+
+        # Build structured log message with operation, step, and identifiers
+        log_payload = {
+            "event": "request_error",
+            "trace_id": trace_id,
+            "service": service_name,
+            "operation": operation,
+            "failing_step": failing_step,
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+        }
+        if extra_context:
+            log_payload.update(extra_context)
+
+        # The message identifies the operation and failing step
+        logger.error(
+            f"Request failed: operation={operation}, step={failing_step}, "
+            f"trace_id={trace_id}, service={service_name}, "
+            f"error={type(error).__name__}: {error}",
+            extra={"log_payload": log_payload},
+            exc_info=True,  # Keep the stack trace
+        )
+
+    @staticmethod
+    def clear_context() -> None:
+        """Reset trace context after request completion."""
+        trace_id_var.set(None)
+        service_name_var.set(None)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes - error handler takes operation and failing_step parameters and includes both in the log message."
+          location: "handler.py:48"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes - trace_id is generated or propagated and included in every error log for cross-service correlation."
+          location: "handler.py:44"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes - only error type, message, operation, step, and IDs are logged; no payload data or secrets."
+          location: "handler.py:42-46"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context (trace_id, service, operation, step) is attached before logging, and stack trace is preserved via exc_info=True."
+          location: "handler.py:48"
+      unanswered: []
+  not_applied: []

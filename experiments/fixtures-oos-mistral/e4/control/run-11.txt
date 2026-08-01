@@ -1,0 +1,125 @@
+# HTTP API Client with Backoff and Retry Logic
+
+Here's a robust function that calls a downstream HTTP API with proper backoff and retry logic to avoid hammering a potentially down service:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Callable, Any
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    params: Optional[dict] = None,
+    data: Optional[dict] = None,
+    headers: Optional[dict] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    backoff_factor: float = 2.0,
+    timeout: float = 10.0,
+    retry_on_status: Optional[list] = None,
+    success_callback: Optional[Callable[[Any], None]] = None,
+    failure_callback: Optional[Callable[[Exception, int], None]] = None
+) -> Optional[Any]:
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, PUT, etc.)
+        params: Query parameters
+        data: Request body data
+        headers: Request headers
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        backoff_factor: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+        retry_on_status: List of HTTP status codes to retry on (None means retry on all errors)
+        success_callback: Function to call on successful response
+        failure_callback: Function to call on failure (after all retries exhausted)
+
+    Returns:
+        Response data if successful, None otherwise
+    """
+    backoff = initial_backoff
+    last_exception = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                params=params,
+                json=data,
+                headers=headers,
+                timeout=timeout
+            )
+
+            # Check if we should retry based on status code
+            if retry_on_status is None:
+                should_retry = not response.ok
+            else:
+                should_retry = response.status_code in retry_on_status
+
+            if not should_retry:
+                if success_callback:
+                    success_callback(response)
+                return response.json() if response.content else None
+
+            # If we get here, we should retry
+            last_exception = RequestException(f"HTTP {response.status_code}: {response.text}")
+
+        except RequestException as e:
+            last_exception = e
+            # Only retry on connection errors or timeouts unless explicitly configured
+            if retry_on_status is not None and getattr(e.response, 'status_code', None) not in retry_on_status:
+                break
+
+        # Don't sleep on the last attempt
+        if attempt < max_retries:
+            time.sleep(backoff)
+            backoff *= backoff_factor
+
+    # All retries exhausted
+    if failure_callback:
+        failure_callback(last_exception, attempt)
+    return None
+```
+
+## Key Features:
+
+1. **Exponential Backoff**: Starts with a short delay and increases between retries
+2. **Configurable Retry Conditions**:
+   - Can retry on specific HTTP status codes
+   - Can retry on connection errors/timeouts
+3. **Callbacks**:
+   - Success callback when API responds successfully
+   - Failure callback when all retries are exhausted
+4. **Timeout Protection**: Prevents hanging on unresponsive servers
+5. **Type Hints**: Better code clarity and IDE support
+
+## Usage Example:
+
+```python
+def handle_success(response):
+    print(f"Success! Status: {response.status_code}")
+    return response.json()
+
+def handle_failure(exception, attempt):
+    print(f"Failed after {attempt} attempts. Error: {exception}")
+
+# Example call
+result = call_downstream_api(
+    url="https://api.example.com/data",
+    method="GET",
+    max_retries=3,
+    initial_backoff=0.5,
+    backoff_factor=2,
+    retry_on_status=[500, 502, 503, 504],
+    success_callback=handle_success,
+    failure_callback=handle_failure
+)
+```
+
+This implementation follows best practices for making HTTP calls to potentially unreliable downstream services while being respectful of their capacity.
