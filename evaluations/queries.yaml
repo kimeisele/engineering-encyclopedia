@@ -1,0 +1,53 @@
+# Regression corpus — a guard against regressions, not evidence of quality.
+# Section 8 of the founding brief carries the evidence; this file only makes
+# sure retrieval keeps returning the required nodes and never lets a
+# forbidden-to-dominate node outrank all required nodes.
+#
+# Each entry:
+#   query:                    a vague, natural request as a user would type it
+#   required:                 node ids that MUST appear in the pack
+#   forbidden_to_dominate:    a node that must NOT rank above every required node
+#
+# Equivalence (Section 5) is judged on pack inclusion for `required` and on
+# ranking for `forbidden_to_dominate`; exact ranking equality between the FTS5
+# and token-overlap backends is never asserted.
+
+- query: "make sure this worker doesn't process the same job twice"
+  required: [reliability.idempotency]
+  forbidden_to_dominate: [reliability.retry-semantics]
+
+- query: "the job failed, should I retry it or give up"
+  required: [reliability.retry-semantics]
+  forbidden_to_dominate: [reliability.idempotency]
+
+- query: "two threads are updating the same counter"
+  required: [concurrency.race-conditions]
+  forbidden_to_dominate: [observability.error-context]
+
+- query: "write the config file so a crash can't corrupt it"
+  required: [python.files.atomic-replacement]
+  forbidden_to_dominate: [python.processes.subprocess-safety]
+
+- query: "run git with a branch name supplied by the user"
+  required: [python.processes.subprocess-safety]
+  forbidden_to_dominate: [python.files.atomic-replacement]
+
+- query: "sanitize the user input before it reaches the database"
+  required: [security.input-validation]
+  forbidden_to_dominate: [reliability.idempotency]
+
+- query: "make sure the tests actually cover the important paths"
+  required: [testing.coverage-limitations]
+  forbidden_to_dominate: [security.input-validation]
+
+- query: "the error message doesn't say what actually went wrong"
+  required: [observability.error-context]
+  forbidden_to_dominate: [testing.coverage-limitations]
+
+- query: "save the file so a partial write doesn't lose data"
+  required: [python.files.atomic-replacement]
+  forbidden_to_dominate: [reliability.retry-semantics]
+
+- query: "avoid charging the same customer twice"
+  required: [reliability.idempotency]
+  forbidden_to_dominate: [python.files.atomic-replacement]

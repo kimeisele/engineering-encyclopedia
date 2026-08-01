@@ -1,0 +1,83 @@
+id: python.files.atomic-replacement
+version: 1
+title: Atomic file replacement
+kind: pattern
+status: established
+
+summary: >
+  Update a file by writing a temporary file in the same directory, flushing
+  it, and renaming it over the target. The rename is atomic on POSIX, so
+  readers see either the old or the new content, never a truncated middle
+  state.
+
+intent_signals:
+  - write the config file atomically
+  - update a json config file on disk
+  - replace the file in place
+  - a crash during the write corrupts the file
+  - a partial write leaves the file broken
+  - save the file without losing data on a crash
+
+applies_when:
+  - a file on disk must be updated in place
+  - readers may open the file while it is being replaced
+  - a crash between write and completion must not corrupt content
+
+does_not_apply_when:
+  - the file is append-only logs where partial lines are tolerated
+  - the write is a one-time creation of a brand-new file
+
+does_not_imply:
+  - durability across power loss without an fsync
+  - that directory metadata is also flushed
+  - that concurrent writers are safe
+  - that the new content is valid
+
+questions:
+  - Is the temp file created in the same directory as the target?
+  - Is the data flushed before the rename?
+  - What happens to the temp file if the write fails?
+  - Can two writers both rename over the target?
+
+techniques:
+  - write to a temp file, fsync, then os.replace
+  - temp files named uniquely per process
+  - fsync the directory after the rename for durability
+  - write a new file version and swap a symlink
+
+risks:
+  - renaming across filesystems, which is not atomic
+  - omitting fsync and losing data on power loss
+  - leftover temp files after a crash
+  - a config file replaced with an invalid new version
+
+tradeoffs:
+  - technique: os.replace over a uniquely named temp file
+    benefit: atomic on POSIX, simple
+    cost: needs same-directory temp file and cleanup
+    choose_when: the file is read by other processes
+  - technique: direct open with truncation
+    benefit: one syscall, no temp file
+    cost: readers see a truncated file mid-write
+    choose_when: nothing else reads the file concurrently
+
+relations:
+  requires_consideration_of:
+    - concurrency.race-conditions
+
+contexts:
+  languages: [python]
+  project_types: [cli, web-service, worker, script]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Truncating writes to config and state files are a frequent review
+    finding; the pattern and its durability caveats are distilled from
+    standard file-replacement practice.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [atomic write, file replacement, fsync, temp file, rename]

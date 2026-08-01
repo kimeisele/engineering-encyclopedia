@@ -1,0 +1,18 @@
+# Licensed under CC BY 4.0 — see knowledge/LICENSE.
+# Context values used by the eight v1 nodes.
+languages:
+  - any
+  - python
+project_types:
+  - worker
+  - cli
+  - web-service
+  - automation
+  - library
+  - script
+lifecycle_stages:
+  - design
+  - implementation
+  - review
+  - debugging
+  - operation

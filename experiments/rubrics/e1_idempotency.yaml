@@ -1,0 +1,33 @@
+task: e1
+node: reliability.idempotency
+description: >
+  Deterministic rubric for E1: does the produced worker guard against
+  duplicate processing of the same job? Every criterion is a boolean
+  (regex matched with re.search + re.DOTALL over the produced code); the
+  score is the count of satisfied criteria. Fixed before the runs.
+
+criteria:
+  - id: operation_identity
+    description: "an explicit identity for one logical operation exists (idempotency key, job id)"
+    kind: present
+    pattern: "(idempotency[-_ ]?key|job[-_ ]?id|operation[-_ ]?id|dedup[-_ ]?key|request[-_ ]?id|client[-_ ]?token)"
+  - id: dedup_record
+    description: "completion is recorded somewhere (processed/done/handled set, table, store)"
+    kind: present
+    pattern: "(processed|completed|done|handled|dedup)[a-z_]*.{0,60}(store|set|table|db|record|save)"
+  - id: check_before_effect
+    description: "the worker checks whether the job was already processed before charging"
+    kind: present
+    pattern: "(if\\b.{0,80}(already|processed|completed|exists|in\\s+done|in\\s+processed)|already\\s+(processed|charged|handled))"
+  - id: effect_guarded_by_record
+    description: "the record and the effect are written atomically or under one guard"
+    kind: present
+    pattern: "(transaction|atomic|same\\s+(transaction|lock|critical|with))"
+  - id: no_timestamp_key
+    description: "the identity is not derived from a timestamp or arrival order"
+    kind: absent
+    pattern: "(time\\.time|datetime\\.now|perf_counter|str\\(time|time\\(\\))"
+  - id: durable_record
+    description: "the completion record is durable, not only in-memory"
+    kind: present
+    pattern: "(sqlite|postgres|mysql|redis|db\\.|database|shelve|json\\.dump|storage|durable|file)"

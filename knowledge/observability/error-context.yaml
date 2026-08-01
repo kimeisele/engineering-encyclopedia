@@ -1,0 +1,82 @@
+id: observability.error-context
+version: 1
+title: Error context
+kind: guideline
+status: established
+
+summary: >
+  An error message must say what failed, where it failed, and with which
+  state. A bare exception without context is a dead end for the operator;
+  the fix is to include the operation, identifier and failing step at the
+  point where the failure is known.
+
+intent_signals:
+  - include the operation in the error message
+  - log the exception with context
+  - what failed and why
+  - the error message lacks context
+  - record enough to reproduce what went wrong
+  - include the id and the failed step
+
+applies_when:
+  - an error is logged or returned to an operator
+  - a failure in a loop or worker needs identification
+  - a reproduced failure depends on request state
+
+does_not_apply_when:
+  - the error contains secrets or other sensitive data
+
+does_not_imply:
+  - that more logging is better
+  - that the message replaces a stack trace
+  - that context at raise time survives every wrapping layer
+
+questions:
+  - Does the message identify the operation and the failing step?
+  - Can the operator find the request or job from the message?
+  - Is sensitive data excluded from the message?
+  - Is the context attached before or after the exception is wrapped?
+
+techniques:
+  - include the operation name, identifier and step in the message
+  - attach request or job ids to every log line
+  - log state at the failure point, not only in a handler
+  - preserve the original exception when wrapping
+
+risks:
+  - logging secrets or personal data in context
+  - a generic handler that strips the useful context
+  - retry loops that overwrite the original error
+  - context that names the code but not the instance
+
+tradeoffs:
+  - technique: structured fields on every error
+    benefit: filterable and greppable
+    cost: discipline at every raise site
+    choose_when: the system is inspected by operators
+  - technique: single formatted message
+    benefit: quick to write
+    cost: hard to filter and to extend
+    choose_when: the error surface is small
+
+relations:
+  related:
+    - testing.coverage-limitations
+  requires_consideration_of:
+    - reliability.retry-semantics
+
+contexts:
+  languages: [any]
+  project_types: [worker, cli, web-service, automation, library]
+  lifecycle_stages: [implementation, debugging, operation]
+
+provenance:
+  origin: curated
+  rationale: >
+    Useless error messages recur in every codebase; the node distills the
+    minimal context that makes a failure reproducible by an operator.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [error context, error messages, logging, observability, failure]

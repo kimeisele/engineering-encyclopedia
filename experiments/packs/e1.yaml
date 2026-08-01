@@ -1,0 +1,113 @@
+context_pack:
+  primary:
+  - does_not_imply:
+    - exactly-once delivery
+    - absence of concurrency
+    - transactional safety across systems
+    - that a retry loop is now correct
+    hash: 4cbc1598c0d7
+    id: reliability.idempotency
+    questions:
+    - What value identifies one logical operation, and where does it come from?
+    - Where is completion recorded, and is that record durable before the effect?
+    - What state remains after a failure between effect and completion record?
+    - Can two workers observe the same operation as not-yet-done simultaneously?
+    relevance: charges the customer twice
+    risks:
+    - check-then-act races between the completion lookup and the effect
+    - deduplication state that is not durable across process restart
+    - keys derived from timestamps or request arrival order
+    summary: 'An idempotent operation can be repeated for the same logical intent
+      without producing unintended additional effects. Repetition is made safe by
+      identity and recorded completion, not by hoping the operation runs only once.
+
+      '
+    version: 1
+  - does_not_imply:
+    - durability across power loss without an fsync
+    - that directory metadata is also flushed
+    - that concurrent writers are safe
+    - that the new content is valid
+    hash: 4c5573dcd875
+    id: python.files.atomic-replacement
+    questions:
+    - Is the temp file created in the same directory as the target?
+    - Is the data flushed before the rename?
+    - What happens to the temp file if the write fails?
+    - Can two writers both rename over the target?
+    relevance: write the config file atomically
+    risks:
+    - renaming across filesystems, which is not atomic
+    - omitting fsync and losing data on power loss
+    - leftover temp files after a crash
+    - a config file replaced with an invalid new version
+    summary: 'Update a file by writing a temporary file in the same directory, flushing
+      it, and renaming it over the target. The rename is atomic on POSIX, so readers
+      see either the old or the new content, never a truncated middle state.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that locks are the only answer
+    - that a mutex makes the surrounding logic correct
+    - that a race will show up in tests
+    - that the bug is in the last code changed
+    hash: 785591749aba
+    id: concurrency.race-conditions
+    questions:
+    - What state is shared, and where is it mutated?
+    - Is the read-and-write sequence atomic as one step?
+    - Can two workers observe the same value as unclaimed?
+    - What happens if the check and the action are interleaved?
+    relevance: a race between read and write
+    risks:
+    - check-then-act on shared state without atomicity
+    - locks held across slow I/O
+    - assuming tests expose the interleaving
+    summary: 'A race condition is a flaw in timing: the outcome depends on the order
+      in which concurrent operations happen to interleave. Any check-then-act sequence
+      that is not atomic can observe stale state and make a wrong decision.
+
+      '
+    version: 1
+  supporting:
+  - does_not_imply:
+    - that the operation is idempotent
+    - that retrying will eventually succeed
+    - that more attempts make the system more reliable
+    - that backoff alone prevents overload
+    hash: 5f6b8be02160
+    id: reliability.retry-semantics
+    questions:
+    - What happens when the same attempt is delivered more than once?
+    - How many attempts are allowed, and what happens after the last one?
+    - How is the wait between attempts chosen, and is jitter added?
+    - Is the retry budget shared across workers or per attempt?
+    relevance: the queue redelivers a job
+    risks:
+    - retry storms when many clients retry in lockstep
+    - retrying operations that are not idempotent
+    - unbounded retries masking a real outage
+    summary: 'A retry repeats an operation that failed. Retrying is only correct when
+      the operation is safe to repeat, the retry budget is explicit, and backoff prevents
+      amplification; a retry without a policy is a loop that hides the failure.
+
+      '
+    version: 1
+context_pack_hash: 7eb2a2da0948
+knowledge_revision: 63696d2b4dc7
+request:
+  original: Write a worker that consumes jobs from a queue and charges a customer.
+retrieval_backend: fts5
+trace:
+  excluded:
+  - security.input-validation
+  - python.processes.subprocess-safety
+  - observability.error-context
+  - testing.coverage-limitations
+  selected:
+  - reliability.idempotency
+  - python.files.atomic-replacement
+  - concurrency.race-conditions
+  - reliability.retry-semantics
+  truncated: false

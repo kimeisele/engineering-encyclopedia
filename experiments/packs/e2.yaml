@@ -1,0 +1,136 @@
+context_pack:
+  primary:
+  - does_not_imply:
+    - that a list argument is automatically safe
+    - that the absence of shell=True means no injection risk
+    - that validation of input replaces safe construction
+    hash: 77b0cbc865c0
+    id: python.processes.subprocess-safety
+    questions:
+    - Is the command passed as a list, with input as elements?
+    - Is shell=True present anywhere, even conditionally?
+    - Can a user-supplied value change which program runs?
+    - Is the input validated or is it passed as opaque data?
+    relevance: run git with a branch name from the user
+    risks:
+    - shell=True with interpolated user input
+    - building command strings with f-strings or format
+    - escaping attempts that are bypassed by shell quirks
+    summary: 'Run subprocesses with the argument list, never with shell=True when
+      the command contains or could contain user input. shell=True turns arguments
+      into shell syntax; a branch name or filename becomes an injection point.
+
+      '
+    version: 1
+  - does_not_imply:
+    - exactly-once delivery
+    - absence of concurrency
+    - transactional safety across systems
+    - that a retry loop is now correct
+    hash: 4cbc1598c0d7
+    id: reliability.idempotency
+    questions:
+    - What value identifies one logical operation, and where does it come from?
+    - Where is completion recorded, and is that record durable before the effect?
+    - What state remains after a failure between effect and completion record?
+    - Can two workers observe the same operation as not-yet-done simultaneously?
+    relevance: An idempotent operation can be repeated for the same logical intent
+      without producing unintended additional
+    risks:
+    - check-then-act races between the completion lookup and the effect
+    - deduplication state that is not durable across process restart
+    - keys derived from timestamps or request arrival order
+    summary: 'An idempotent operation can be repeated for the same logical intent
+      without producing unintended additional effects. Repetition is made safe by
+      identity and recorded completion, not by hoping the operation runs only once.
+
+      '
+    version: 1
+  - does_not_imply:
+    - durability across power loss without an fsync
+    - that directory metadata is also flushed
+    - that concurrent writers are safe
+    - that the new content is valid
+    hash: 4c5573dcd875
+    id: python.files.atomic-replacement
+    questions:
+    - Is the temp file created in the same directory as the target?
+    - Is the data flushed before the rename?
+    - What happens to the temp file if the write fails?
+    - Can two writers both rename over the target?
+    relevance: write the config file atomically
+    risks:
+    - renaming across filesystems, which is not atomic
+    - omitting fsync and losing data on power loss
+    - leftover temp files after a crash
+    - a config file replaced with an invalid new version
+    summary: 'Update a file by writing a temporary file in the same directory, flushing
+      it, and renaming it over the target. The rename is atomic on POSIX, so readers
+      see either the old or the new content, never a truncated middle state.
+
+      '
+    version: 1
+  supporting:
+  - does_not_imply:
+    - that validation replaces escaping or parameterisation
+    - that a whitelist is the only correct approach
+    - that validation once at entry protects later use
+    - that type checks are the same as semantic validation
+    hash: 5bce2610cc1c
+    id: security.input-validation
+    questions:
+    - Where is the trust boundary, and is validation done there?
+    - What is the set of acceptable values, and what rejects everything else?
+    - Is the validated form used downstream, or the raw input?
+    - Does each use site still treat the value as untrusted?
+    relevance: validate all user input
+    risks:
+    - validating for display but using the raw value elsewhere
+    - blacklist filters bypassed by encodings or edge cases
+    - validation logic that changes the value silently
+    summary: 'Validate input at the trust boundary: what enters a system is data,
+      and only a shape the program explicitly accepts should be used. Validation is
+      about rejecting what is not expected, not about patching what is.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that locks are the only answer
+    - that a mutex makes the surrounding logic correct
+    - that a race will show up in tests
+    - that the bug is in the last code changed
+    hash: 785591749aba
+    id: concurrency.race-conditions
+    questions:
+    - What state is shared, and where is it mutated?
+    - Is the read-and-write sequence atomic as one step?
+    - Can two workers observe the same value as unclaimed?
+    - What happens if the check and the action are interleaved?
+    relevance: a race between read and write
+    risks:
+    - check-then-act on shared state without atomicity
+    - locks held across slow I/O
+    - assuming tests expose the interleaving
+    summary: 'A race condition is a flaw in timing: the outcome depends on the order
+      in which concurrent operations happen to interleave. Any check-then-act sequence
+      that is not atomic can observe stale state and make a wrong decision.
+
+      '
+    version: 1
+context_pack_hash: e8c4c36e5d9d
+knowledge_revision: 63696d2b4dc7
+request:
+  original: Write a Python function that runs a git command with a user-supplied branch
+    name.
+retrieval_backend: fts5
+trace:
+  excluded:
+  - observability.error-context
+  - testing.coverage-limitations
+  selected:
+  - python.processes.subprocess-safety
+  - reliability.idempotency
+  - python.files.atomic-replacement
+  - security.input-validation
+  - concurrency.race-conditions
+  truncated: true

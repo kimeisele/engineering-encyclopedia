@@ -1,0 +1,33 @@
+task: e3
+node: python.files.atomic-replacement
+description: >
+  Deterministic rubric for E3: does the produced config updater replace the
+  file atomically instead of truncating it in place? Every criterion is a
+  boolean (regex matched with re.search + re.DOTALL over the produced code);
+  the score is the count of satisfied criteria. Fixed before the runs.
+
+criteria:
+  - id: temp_file
+    description: "content is written to a temporary file, not the target directly"
+    kind: present
+    pattern: "(tempfile|NamedTemporaryFile|mkstemp|\\.tmp|\\btmp[_\\w]*|temp[_\\w]*\\s*=|_tmp)"
+  - id: atomic_rename
+    description: "the target is replaced via os.replace / Path.replace / os.rename"
+    kind: present
+    pattern: "(os\\.replace|Path\\.replace|os\\.rename|\\.replace\\s*\\(|\\.rename\\s*\\()"
+  - id: no_direct_truncate
+    description: "the target is not opened with a truncating mode for the update"
+    kind: absent
+    pattern: "open\\s*\\(\\s*['\"][^'\"]+['\"]\\s*,\\s*['\"]w[bd]*['\"]"
+  - id: flush_or_fsync
+    description: "data is flushed or fsynced before the rename"
+    kind: present
+    pattern: "(\\.flush\\s*\\(|os\\.fsync|fsync)"
+  - id: same_directory
+    description: "the temp file is created in the same directory as the target"
+    kind: present
+    pattern: "(dir\\s*=\\s*(os\\.path\\.(dirname|dir)|[A-Za-z_]+\\.[A-Za-z_]*parent)|dirname|\\bparent\\b)"
+  - id: failure_cleanup
+    description: "the temp file is cleaned up when the write fails"
+    kind: present
+    pattern: "(try\\s*:|finally\\s*:|except[^:]*:).{0,250}(unlink|remove|cleanup|close)"

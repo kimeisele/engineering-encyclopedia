@@ -1,0 +1,80 @@
+id: python.processes.subprocess-safety
+version: 1
+title: Subprocess safety
+kind: guideline
+status: established
+
+summary: >
+  Run subprocesses with the argument list, never with shell=True when the
+  command contains or could contain user input. shell=True turns arguments
+  into shell syntax; a branch name or filename becomes an injection point.
+
+intent_signals:
+  - run git with a branch name from the user
+  - pass the branch name as a list element
+  - run a shell command with user input
+  - shell=True with interpolated input
+  - subprocess with a user-supplied argument
+  - a command built from user input
+
+applies_when:
+  - a subprocess is run with data that came from outside the program
+  - the command line is assembled from multiple parts
+  - the same function is reused with different arguments
+
+does_not_apply_when:
+  - the entire command is a fixed literal with no external input
+  - the shell is intentionally required for a specific feature
+
+does_not_imply:
+  - that a list argument is automatically safe
+  - that the absence of shell=True means no injection risk
+  - that validation of input replaces safe construction
+
+questions:
+  - Is the command passed as a list, with input as elements?
+  - Is shell=True present anywhere, even conditionally?
+  - Can a user-supplied value change which program runs?
+  - Is the input validated or is it passed as opaque data?
+
+techniques:
+  - subprocess.run with a list argument and shell=False
+  - passing input as argv elements rather than a formatted string
+  - validating or whitelisting values before use
+  - avoiding shell features instead of escaping them
+
+risks:
+  - shell=True with interpolated user input
+  - building command strings with f-strings or format
+  - escaping attempts that are bypassed by shell quirks
+
+tradeoffs:
+  - technique: argument list with shell=False
+    benefit: no shell interpretation of arguments
+    cost: no pipes, globs or redirections without extra work
+    choose_when: input is untrusted or even possibly untrusted
+  - technique: shell=True with a fully static command
+    benefit: shell features available
+    cost: any future input makes it unsafe
+    choose_when: the command is constant and never gains input
+
+relations:
+  related:
+    - security.input-validation
+
+contexts:
+  languages: [python]
+  project_types: [script, cli, automation]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    shell=True injection is a canonical Python vulnerability, recurring in
+    scripts and CLIs that wrap git or other tools; the node records the
+    safe-construction pattern and its limits.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [subprocess, shell injection, shell=True, argv, command execution]
