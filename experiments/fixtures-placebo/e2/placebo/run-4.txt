@@ -1,0 +1,39 @@
+```python
+import subprocess
+import shlex
+
+def run_git_command(branch_name: str) -> None:
+    """
+    Run a git command with a user-supplied branch name.
+    
+    This function uses `git rev-parse --verify` to check the branch exists
+    without executing shell commands (protecting against injection), then
+    runs the actual git operation with the branch name as a separate argument.
+    """
+    # Validate branch name to prevent command injection (especially if using shell=True)
+    if not branch_name or any(c in branch_name for c in [';', '|', '&', '>', '<', '`', '$', '\n']):
+        raise ValueError("Invalid branch name")
+    
+    # Use a list of arguments to avoid shell injection
+    # First verify the branch exists
+    verify_cmd = ["git", "rev-parse", "--verify", branch_name]
+    try:
+        subprocess.run(verify_cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Branch '{branch_name}' not found in repository.") from e
+    
+    # Now run the actual git operation (example: show branch info)
+    # Replace this line with the specific git command you need
+    cmd = ["git", "branch", "--show-current"]
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    print(f"Current branch: {result.stdout.strip()}")
+    print(f"Verified branch: {branch_name}")
+```
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: c4a4796d0072
+  applied: []
+  not_applied:
+    - node: observability.error-context
+      reason: "The task only requires executing a git command with a branch name; error handling is already done via subprocess exceptions and input validation. The observability node's focus on structured error messages with operation/step/state is speculative and would overcomplicate this simple utility without a specific error-context requirement from the user."

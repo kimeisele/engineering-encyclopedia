@@ -1,0 +1,70 @@
+```python
+import subprocess
+import shlex
+from typing import List, Union
+
+def run_git_command(branch_name: str, args: List[str] = None) -> subprocess.CompletedProcess:
+    """
+    Execute a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name: The branch name to use in the git command (user-supplied).
+        args: Optional additional git arguments (e.g., ['checkout', '--']).
+    
+    Returns:
+        subprocess.CompletedProcess: The result of the git command.
+    
+    Raises:
+        ValueError: If branch_name contains characters that could cause command injection.
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    if not branch_name or not all(c.isalnum() or c in '-_./' for c in branch_name):
+        raise ValueError(f"Invalid branch name: {branch_name!r}. Allowed: alphanumeric, '-', '_', '.', '/'")
+    
+    # Build command safely - use list form, never shell=True with user input
+    cmd = ['git']
+    if args:
+        cmd.extend(args)
+    cmd.append(branch_name)
+    
+    try:
+        # Using list form prevents shell injection; capture output for errors
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+        return result
+    except subprocess.CalledProcessError as e:
+        # Enrich error with context: what failed, which command, what state
+        error_msg = (
+            f"git command failed: {shlex.join(cmd)}\n"
+            f"exit code: {e.returncode}\n"
+            f"stdout: {e.stdout.strip() if e.stdout else '(empty)'}\n"
+            f"stderr: {e.stderr.strip() if e.stderr else '(empty)'}"
+        )
+        raise subprocess.CalledProcessError(e.returncode, cmd, error_msg) from e
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: c4a4796d0072
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, error message includes full git command and exit code, clearly showing which operation failed."
+          location: "script.py:35"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "The branch name is embedded in the command shown, allowing operator to trace the job's branch."
+          location: "script.py:35"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Only branch name (validated) and command output are shown; no secrets or credentials included."
+          location: "script.py:35"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Before wrapping - we enrich error with operation details, then re-raise with original cause."
+          location: "script.py:36-40"
+      unanswered: []
+  not_applied: []
+```

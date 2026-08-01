@@ -1,0 +1,114 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any, Dict, Union
+
+
+def update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    *,
+    create_if_missing: bool = False,
+    atomic: bool = True,
+) -> Dict[str, Any]:
+    """
+    Update a JSON config file on disk by merging in the provided updates.
+
+    Args:
+        file_path: Path to the JSON config file.
+        updates: Dictionary of key-value pairs to merge into the existing config.
+        create_if_missing: If True, create a new file with the updates when the
+            file doesn't exist. If False and the file is missing, raise an error.
+        atomic: If True, write to a temporary file and then atomically replace the
+            original. This prevents partial writes if the program crashes mid-write.
+
+    Returns:
+        The full merged configuration as a dictionary.
+
+    Raises:
+        FileNotFoundError: If the config file doesn't exist and create_if_missing is False.
+        json.JSONDecodeError: If the existing file is not valid JSON.
+        OSError: If the file cannot be written.
+    """
+    operation = f"update_json_config({file_path!r})"
+
+    # Load existing config
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            raise json.JSONDecodeError(
+                f"{operation}: failed to parse existing config file at step 'load'; "
+                f"file content is not valid JSON. Error: {e.msg}",
+                e.doc,
+                e.pos,
+            ) from e
+    elif create_if_missing:
+        config = {}
+    else:
+        raise FileNotFoundError(
+            f"{operation}: failed at step 'load'; config file {file_path!r} does not "
+            f"exist and create_if_missing=False"
+        )
+
+    # Merge updates (top-level keys only)
+    config.update(updates)
+
+    # Serialize and write
+    if atomic:
+        dir_name = os.path.dirname(os.path.abspath(file_path))
+        fd, temp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+                f.write("\n")  # ensure trailing newline
+            os.replace(temp_path, file_path)
+        except Exception:
+            # Clean up temp file on any failure
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
+    else:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+    return config
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: 6dba8da61a26
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: >-
+            Yes. The operation is named in the error messages (e.g.,
+            update_json_config('/path')) and the failing step is explicitly
+            labeled ('load', 'serialize').
+          location: "update_json_config:44,51,57"
+        - question: "Can the operator find the request or job from the message?"
+          answer: >-
+            Yes, the file_path is included in the operation identifier, allowing
+            the operator to trace the update to a specific config file.
+          location: "update_json_config:44"
+        - question: "Is sensitive data excluded from the message?"
+          answer: >-
+            Yes, only the file path and error details are included; no config
+            values, secrets, or payload data are echoed in error messages.
+          location: "update_json_config:44-62"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: >-
+            Context is attached before the exception is re-raised/transformed,
+            when the failure is first detected.
+          location: "update_json_config:44-62"
+      unanswered: []
+  not_applied: []
+```

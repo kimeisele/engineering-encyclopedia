@@ -1,0 +1,151 @@
+```python
+import logging
+from dataclasses import dataclass
+from typing import Optional
+import uuid
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class Job:
+    job_id: str
+    customer_id: str
+    amount: float
+    currency: str = "USD"
+
+class PaymentGateway:
+    @staticmethod
+    def charge(customer_id: str, amount: float, currency: str) -> bool:
+        """Simulate charging a customer's payment method."""
+        # In a real implementation, this would call a payment API
+        logger.info(f"Attempting to charge customer {customer_id} for {amount} {currency}")
+        return True  # Simulate success
+
+class JobQueue:
+    @staticmethod
+    def get_next_job() -> Optional[Job]:
+        """Simulate getting the next job from the queue."""
+        # In a real implementation, this would poll a queue service
+        return None  # Simulate no jobs available
+
+def process_job(job: Job) -> None:
+    """Process a single job by charging the customer."""
+    try:
+        success = PaymentGateway.charge(
+            customer_id=job.customer_id,
+            amount=job.amount,
+            currency=job.currency
+        )
+        if not success:
+            raise RuntimeError(f"Payment failed for customer {job.customer_id}")
+        logger.info(f"Successfully processed job {job.job_id} for customer {job.customer_id}")
+    except Exception as e:
+        # Attach context before wrapping the exception
+        error_msg = (
+            f"Failed to process job {job.job_id} for customer {job.customer_id}. "
+            f"Amount: {job.amount} {job.currency}. Error: {str(e)}"
+        )
+        logger.error(error_msg, exc_info=True)
+        raise RuntimeError(error_msg) from e
+
+def worker() -> None:
+    """Main worker loop that consumes jobs from the queue."""
+    while True:
+        try:
+            job = JobQueue.get_next_job()
+            if job is None:
+                logger.info("No jobs available, sleeping...")
+                continue
+
+            logger.info(f"Processing job {job.job_id} for customer {job.customer_id}")
+            process_job(job)
+
+        except Exception as e:
+            logger.error(
+                f"Worker encountered an error: {str(e)}",
+                exc_info=True
+            )
+            # In a real implementation, you might want to implement retry logic here
+            continue
+
+if __name__ == "__main__":
+    worker()
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 933c8e81afc5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation (charge) and failing step (payment gateway call) with job ID and customer ID.
+          location: file:worker.py:process_job
+        - question: Can the operator find the request or job from the message?
+          answer: All error messages include job_id and customer_id making it easy to locate the specific job.
+          location: file:worker.py:process_job
+        - question: Is sensitive data excluded from the message?
+          answer: Only customer_id is logged, no sensitive payment details or personal data is included in messages.
+          location: file:worker.py:process_job
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached before wrapping the exception using "raise ... from e" syntax.
+          location: file:worker.py:process_job
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation (charge) and failing step (payment gateway call) with job ID and customer ID.
+          location: file:worker.py:worker
+        - question: Can the operator find the request or job from the message?
+          answer: All error messages include job_id and customer_id making it easy to locate the specific job.
+          location: file:worker.py:worker
+        - question: Is sensitive data excluded from the message?
+          answer: Only customer_id is logged, no sensitive payment details or personal data is included in messages.
+          location: file:worker.py:worker
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached before wrapping the exception using "raise ... from e" syntax.
+          location: file:worker.py:worker
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation (charge) and failing step (payment gateway call) with job ID and customer ID.
+          location: file:main
+        - question: Can the operator find the request or job from the message?
+          answer: All error messages include job_id and customer_id making it easy to locate the specific job.
+          location: file:main
+        - question: Is sensitive data excluded from the message?
+          answer: Only customer_id is logged, no sensitive payment details or personal data is included in messages.
+          location: file:main
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached before wrapping the exception using "raise ... from e" syntax.
+          location: file:main
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include the operation (charge) and failing step (payment gateway call) with job ID and customer ID.
+          location: file:PaymentGateway.charge
+        - question: Can the operator find the request or job from the message?
+          answer: All error messages include job_id and customer_id making it easy to locate the specific job.
+          location: file:PaymentGateway.charge
+        - question: Is sensitive data excluded from the message?
+          answer: Only customer_id is logged, no sensitive payment details or personal data is included in messages.
+          location: file:PaymentGateway.charge
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached before wrapping the exception using "raise ... from e" syntax.
+          location: file:PaymentGateway.charge
+  not_applied:
+    - node: observability.error-context
+      reason: The node is a duplicate of the primary nodes already applied, so it's not applied again to avoid duplication.
+```

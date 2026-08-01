@@ -1,0 +1,64 @@
+```python
+import subprocess
+
+def run_git_command(branch_name):
+    """
+    Run a git command with a user-supplied branch name.
+
+    Args:
+        branch_name (str): The name of the branch to use in the git command.
+
+    Returns:
+        str: The output of the git command.
+
+    Raises:
+        subprocess.CalledProcessError: If the git command fails.
+    """
+    try:
+        # Example git command: git checkout <branch_name>
+        result = subprocess.run(
+            ["git", "checkout", branch_name],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        # Include the operation, failing step, and branch name in the error context
+        raise RuntimeError(
+            f"Git command failed while checking out branch '{branch_name}'. "
+            f"Error: {e.stderr.strip()}"
+        ) from e
+```
+
+---
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: c4a4796d0072
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes the git operation and failing step (checkout) with the branch name.
+          location: file:line 20
+        - question: Can the operator find the request or job from the message?
+          answer: The branch name in the error message helps identify the specific operation.
+          location: file:line 20
+        - question: Is sensitive data excluded from the message?
+          answer: Only the branch name is included; no sensitive data is exposed.
+          location: file:line 20
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when raising the exception, preserving the original error.
+          location: file:line 20
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in the pack; already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in the pack; already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in the pack; already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in the pack; already applied above.

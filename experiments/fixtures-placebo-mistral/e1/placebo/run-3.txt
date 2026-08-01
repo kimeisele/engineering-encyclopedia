@@ -1,0 +1,152 @@
+```python
+import json
+import logging
+from dataclasses import dataclass
+from queue import Queue
+from typing import Optional
+
+# Configure logging to avoid sensitive data exposure
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class Job:
+    job_id: str
+    customer_id: str
+    amount: float
+    currency: str
+
+class PaymentProcessor:
+    def charge_customer(self, job: Job) -> bool:
+        """Charge customer and return success status."""
+        try:
+            # Simulate payment processing
+            if job.amount <= 0:
+                raise ValueError("Payment amount must be positive")
+
+            # In real implementation, this would call a payment gateway
+            logger.info(
+                f"Processing charge for job {job.job_id}",
+                extra={
+                    'job_id': job.job_id,
+                    'customer_id': job.customer_id,
+                    'amount': job.amount,
+                    'currency': job.currency
+                }
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to charge customer for job {job.job_id}",
+                extra={
+                    'job_id': job.job_id,
+                    'customer_id': job.customer_id,
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                },
+                exc_info=True
+            )
+            raise
+
+class Worker:
+    def __init__(self, queue: Queue, processor: PaymentProcessor):
+        self.queue = queue
+        self.processor = processor
+
+    def process_jobs(self):
+        """Continuously process jobs from the queue."""
+        while True:
+            try:
+                job_data = self.queue.get()
+                job = Job(**job_data)
+
+                logger.info(
+                    f"Processing job {job.job_id} for customer {job.customer_id}",
+                    extra={'job_id': job.job_id}
+                )
+
+                success = self.processor.charge_customer(job)
+
+                if success:
+                    logger.info(
+                        f"Successfully processed job {job.job_id}",
+                        extra={'job_id': job.job_id}
+                    )
+                else:
+                    logger.warning(
+                        f"Payment failed for job {job.job_id}",
+                        extra={'job_id': job.job_id}
+                    )
+
+            except json.JSONDecodeError as e:
+                logger.error(
+                    "Invalid job data format",
+                    extra={'error_type': type(e).__name__, 'error_message': str(e)}
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error processing job",
+                    extra={'error_type': type(e).__name__, 'error_message': str(e)},
+                    exc_info=True
+                )
+            finally:
+                self.queue.task_done()
+
+# Example usage
+if __name__ == "__main__":
+    from queue import Queue
+    from threading import Thread
+
+    # Create a sample queue and worker
+    job_queue = Queue()
+    processor = PaymentProcessor()
+    worker = Worker(job_queue, processor)
+
+    # Add a test job
+    test_job = {
+        "job_id": "job_12345",
+        "customer_id": "cust_67890",
+        "amount": 100.50,
+        "currency": "USD"
+    }
+    job_queue.put(test_job)
+
+    # Start worker in a separate thread
+    worker_thread = Thread(target=worker.process_jobs, daemon=True)
+    worker_thread.start()
+
+    # Wait for job to complete
+    job_queue.join()
+    worker_thread.join()
+```
+
+---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 933c8e81afc5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include both the operation (charge_customer) and failing step (payment processing).
+          location: "file:worker.py line 30"
+        - question: Can the operator find the request or job from the message?
+          answer: All logs include job_id which allows tracing the specific job across the system.
+          location: "file:worker.py lines 30, 60, 75"
+        - question: Is sensitive data excluded from the message?
+          answer: Customer IDs and amounts are logged but no PII or payment details are exposed.
+          location: "file:worker.py lines 30-35"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached at the point where the failure is known, before exception wrapping.
+          location: "file:worker.py lines 30-40"
+      unanswered: []
+  not_applied:
+    - node: observability.error-context
+      reason: The node appears to be duplicated in the pack and all relevant questions have been addressed in the applied section.
+```

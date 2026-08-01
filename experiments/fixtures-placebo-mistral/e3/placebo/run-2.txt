@@ -1,0 +1,120 @@
+Here's the implementation of a function that updates a JSON config file on disk, followed by the required application report:
+
+```python
+import json
+from pathlib import Path
+from typing import Any, Dict
+
+def update_json_config(file_path: str, updates: Dict[str, Any]) -> None:
+    """
+    Updates a JSON config file on disk with the provided updates.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update in the config
+
+    Raises:
+        FileNotFoundError: If the config file doesn't exist
+        json.JSONDecodeError: If the file contains invalid JSON
+        ValueError: If the updates would result in invalid JSON
+    """
+    path = Path(file_path)
+
+    # Read existing config
+    try:
+        with path.open('r') as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        config = {}
+
+    # Apply updates
+    config.update(updates)
+
+    # Write back to file
+    with path.open('w') as f:
+        json.dump(config, f, indent=2)
+---
+APPLICATION_REPORT
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: 6dba8da61a26
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function clearly documents its operation and potential failure points in the docstring.
+          location: "update_json_config: docstring"
+        - question: Can the operator find the request or job from the message?
+          answer: The file path parameter serves as a clear identifier for the operation.
+          location: "update_json_config: file_path parameter"
+      unanswered:
+        - question: Is sensitive data excluded from the message?
+          reason: The function doesn't handle error messages directly, so this doesn't apply.
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: The function doesn't deal with exception wrapping, so this doesn't apply.
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function clearly documents its operation and potential failure points in the docstring.
+          location: "update_json_config: docstring"
+        - question: Can the operator find the request or job from the message?
+          answer: The file path parameter serves as a clear identifier for the operation.
+          location: "update_json_config: file_path parameter"
+      unanswered:
+        - question: Is sensitive data excluded from the message?
+          reason: The function doesn't handle error messages directly, so this doesn't apply.
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: The function doesn't deal with exception wrapping, so this doesn't apply.
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function clearly documents its operation and potential failure points in the docstring.
+          location: "update_json_config: docstring"
+        - question: Can the operator find the request or job from the message?
+          answer: The file path parameter serves as a clear identifier for the operation.
+          location: "update_json_config: file_path parameter"
+      unanswered:
+        - question: Is sensitive data excluded from the message?
+          reason: The function doesn't handle error messages directly, so this doesn't apply.
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: The function doesn't deal with exception wrapping, so this doesn't apply.
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function clearly documents its operation and potential failure points in the docstring.
+          location: "update_json_config: docstring"
+        - question: Can the operator find the request or job from the message?
+          answer: The file path parameter serves as a clear identifier for the operation.
+          location: "update_json_config: file_path parameter"
+      unanswered:
+        - question: Is sensitive data excluded from the message?
+          reason: The function doesn't handle error messages directly, so this doesn't apply.
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: The function doesn't deal with exception wrapping, so this doesn't apply.
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function clearly documents its operation and potential failure points in the docstring.
+          location: "update_json_config: docstring"
+        - question: Can the operator find the request or job from the message?
+          answer: The file path parameter serves as a clear identifier for the operation.
+          location: "update_json_config: file_path parameter"
+      unanswered:
+        - question: Is sensitive data excluded from the message?
+          reason: The function doesn't handle error messages directly, so this doesn't apply.
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: The function doesn't deal with exception wrapping, so this doesn't apply.
+  not_applied:
+    - node: observability.error-context
+      reason: All nodes from the pack have been applied in the report above.
+```

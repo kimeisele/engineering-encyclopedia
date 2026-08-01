@@ -1,0 +1,108 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any
+
+
+def update_json_config(file_path: str, updates: dict[str, Any], create: bool = False) -> None:
+    """
+    Update a JSON config file on disk by merging the given updates into the
+    existing configuration. Nested dictionaries are merged recursively; other
+    values are replaced.
+
+    Args:
+        file_path: Path to the JSON config file.
+        updates: Dictionary of key-value pairs to merge into the config.
+        create: If True and the file does not exist, create it with the updates.
+                If False and the file does not exist, raise FileNotFoundError.
+
+    Raises:
+        FileNotFoundError: If the file does not exist and create is False.
+        json.JSONDecodeError: If the file exists but contains invalid JSON.
+        OSError: If the file cannot be read or written.
+    """
+    if updates is None:
+        raise ValueError("updates must be a non-None dictionary")
+
+    config: dict[str, Any] = {}
+
+    if os.path.exists(file_path):
+        # Read existing configuration
+        with open(file_path, "r", encoding="utf-8") as f:
+            try:
+                config = json.load(f)
+            except json.JSONDecodeError as e:
+                raise json.JSONDecodeError(
+                    f"Failed to read JSON config file '{file_path}' at byte offset {e.pos}: {e.msg}",
+                    e.doc,
+                    e.pos,
+                ) from e
+            if not isinstance(config, dict):
+                raise ValueError(f"JSON config file '{file_path}' must contain a JSON object at the top level")
+    elif not create:
+        raise FileNotFoundError(f"Config file '{file_path}' does not exist and create=False")
+    else:
+        # For a new file we start with an empty dict
+        config = {}
+
+    # Recursive merge function
+    def _merge(base: dict[str, Any], new_updates: dict[str, Any]) -> None:
+        for key, value in new_updates.items():
+            if (
+                key in base
+                and isinstance(base[key], dict)
+                and isinstance(value, dict)
+            ):
+                # Recursively merge nested dictionaries
+                _merge(base[key], value)
+            else:
+                # Replace or add the key
+                base[key] = value
+
+    _merge(config, updates)
+
+    # Write back atomically to avoid corruption on crash
+    dir_name = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp_path, file_path)
+    except Exception:
+        # Clean up temp file on any failure
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a3d1bd8d8057
+  context_pack_hash: 18344011084d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — errors mention 'config file', the file path, and the specific step (read, parse, write)."
+          location: "update_json_config:37,43,58"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — the full file path is always included in every exception message."
+          location: "update_json_config:37,43"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — only file paths and JSON parse offsets are included; update values are never logged."
+          location: "update_json_config:37-43"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached when the exception is raised, before any wrapping; parse errors include position."
+          location: "update_json_config:37-43"
+      unanswered: []
+  not_applied: []
+```

@@ -1,0 +1,76 @@
+```python
+import json
+from pathlib import Path
+from typing import Any, Dict
+
+def update_json_config(file_path: str, updates: Dict[str, Any]) -> None:
+    """
+    Updates a JSON config file on disk with the provided updates.
+
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary of key-value pairs to update in the config
+
+    Raises:
+        FileNotFoundError: If the config file doesn't exist
+        json.JSONDecodeError: If the file contains invalid JSON
+        ValueError: If updates would create invalid JSON structure
+    """
+    path = Path(file_path)
+
+    # Read existing config or create empty dict if file doesn't exist
+    if path.exists():
+        with open(path, 'r') as f:
+            try:
+                config = json.load(f)
+            except json.JSONDecodeError as e:
+                raise json.JSONDecodeError(f"Invalid JSON in config file: {e.msg}", e.doc, e.pos)
+    else:
+        config = {}
+
+    # Validate updates don't contain None values which would make invalid JSON
+    for key, value in updates.items():
+        if value is None:
+            raise ValueError(f"Update value for key '{key}' cannot be None")
+
+    # Apply updates
+    config.update(updates)
+
+    # Write back to file
+    with open(path, 'w') as f:
+        json.dump(config, f, indent=2)
+
+    # Ensure file is flushed to disk
+    f.flush()
+    path.chmod(0o644)  # Set reasonable permissions
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function documents its operation and potential failure points in docstring.
+          location: "update_json_config: docstring"
+        - question: Can the operator find the request or job from the message?
+          answer: File path parameter identifies the specific config being modified.
+          location: "update_json_config: file_path parameter"
+        - question: Is sensitive data excluded from the message?
+          answer: Function only handles config data, no logging of sensitive info.
+          location: "update_json_config: implementation"
+      unanswered:
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: This question is about error context in logging, which doesn't apply to this file update function.
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied above.
+```

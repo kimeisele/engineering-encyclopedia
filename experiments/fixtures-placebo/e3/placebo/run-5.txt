@@ -1,0 +1,130 @@
+```python
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Union
+
+
+def update_json_config(
+    file_path: Union[str, Path],
+    update: dict[str, Any],
+    *,
+    merge_lists: bool = False,
+    atomic: bool = True,
+) -> dict[str, Any]:
+    """
+    Update a JSON config file on disk.
+
+    Args:
+        file_path: Path to the JSON file. The file must exist and be valid JSON.
+        update: Dictionary of keys/values to merge into the config.
+                Nested dictionaries are merged recursively; other types are replaced.
+        merge_lists: If True, lists are concatenated instead of replaced.
+        atomic: If True, write to a temp file and rename for atomicity.
+
+    Returns:
+        The merged config dictionary.
+
+    Raises:
+        FileNotFoundError: If the config file does not exist.
+        json.JSONDecodeError: If the existing file is not valid JSON.
+        OSError: If reading or writing fails.
+
+    Example:
+        # config.json: {"a": {"b": 1}, "c": [1,2]}
+        update_json_config("config.json", {"a": {"b": 2}, "c": [3]})
+        # Result: {"a": {"b": 2}, "c": [3]}
+    """
+    file_path = Path(file_path)
+
+    # Load existing config
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Config file not found: {file_path}") from None
+    except json.JSONDecodeError as e:
+        raise json.JSONDecodeError(
+            f"Invalid JSON in config file '{file_path}': {e.msg}",
+            e.doc,
+            e.pos,
+        ) from e
+
+    # Deep merge the update into the config
+    config = _deep_merge(config, update, merge_lists)
+
+    # Write back to disk
+    if atomic:
+        _atomic_write_json(file_path, config)
+    else:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
+    return config
+
+
+def _deep_merge(
+    base: Any,
+    update: Any,
+    merge_lists: bool,
+) -> Any:
+    """Recursively merge `update` into `base`."""
+    if isinstance(base, dict) and isinstance(update, dict):
+        result = base.copy()
+        for key, value in update.items():
+            if key in result:
+                result[key] = _deep_merge(result[key], value, merge_lists)
+            else:
+                result[key] = value
+        return result
+
+    if merge_lists and isinstance(base, list) and isinstance(update, list):
+        return base + update
+
+    # For everything else, update wins
+    return update
+
+
+def _atomic_write_json(file_path: Path, config: dict[str, Any]) -> None:
+    """Write JSON atomically via temp file + rename."""
+    dir_path = file_path.parent
+    fd, temp_name = tempfile.mkstemp(dir=dir_path, prefix=file_path.stem, suffix=".tmp")
+    temp_path = Path(temp_name)
+
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(temp_path, file_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, each exception message states the operation ('config file not found', 'Invalid JSON') and the specific failing step (file path or parse error)."
+          location: "update_json_config:37-42"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, the file path is always included, which uniquely identifies the config being updated."
+          location: "update_json_config:37-42"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, messages contain only file paths and JSON parse positions—no config contents or secrets are ever included."
+          location: "update_json_config:37-42"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached when re-raising; for JSONDecodeError we preserve original error while adding file path context."
+          location: "update_json_config:39-43"
+      unanswered: []
+  not_applied:
+    - node: observability.error-context
+      reason: "This is the same node applied above; listed once under applied to avoid duplication."
