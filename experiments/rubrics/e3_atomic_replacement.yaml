@@ -23,7 +23,7 @@ criteria:
   - id: no_direct_truncate
     description: "the target is not opened with a truncating mode for the update (literal or target-named path)"
     kind: absent
-    pattern: "(?<!fd)open\\s*\\(\\s*(['\"][^'\"]+['\"]|(?!\\w*(tmp|temp|fd)\\w*)[A-Za-z_]\\w*(path|file|config|target|dest|name|filename|json)\\w*)\\s*,\\s*['\"]w[bd]*['\"]"
+    pattern: "(?<!fd)open\\s*\\(\\s*(['\"][^'\"]+['\"]|(?!\\w*(tmp|temp|fd)\\w*)((path|file|config|target|dest|name|filename|json)\\w*|[A-Za-z_]\\w*(path|file|config|target|dest|name|filename|json)\\w*))\\s*,\\s*['\"]w[bd]*['\"]"
     blind_to: "a truncating write to a generically named variable (open(f, 'w')) or via os.open/a library is not caught; quoted literal paths are always treated as target writes (a literal /tmp path would false-positive)"
   - id: flush_or_fsync
     description: "data is flushed or fsynced before the rename"
