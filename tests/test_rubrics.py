@@ -151,6 +151,32 @@ FIXTURES = {
             "negative": "idempotency_key = correlation_id",
         },
     },
+    "e6": {
+        "claims_located": {
+            "positive": "the report claims X at worker.py:41",
+            "negative": "the report claims X",
+        },
+        "raw_output_cited": {
+            "positive": "the raw output shows the charge at line 12",
+            "negative": "the report describes the charge",
+        },
+        "order_parts_addressed": {
+            "positive": "the order part about retries is unaddressed",
+            "negative": "the implementation is correct",
+        },
+        "alternatives_excluded": {
+            "positive": "another explanation, a stale cache, was not excluded",
+            "negative": "the cause is the retry loop",
+        },
+        "contradictions_checked": {
+            "positive": "this contradicts the earlier decision on retries",
+            "negative": "the retry loop is fine",
+        },
+        "no_attitude_only": {
+            "positive": "the claim is at line 7 of the output",
+            "negative": "I think the review is thorough and careful",
+        },
+    },
 }
 
 

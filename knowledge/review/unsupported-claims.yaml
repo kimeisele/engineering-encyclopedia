@@ -1,0 +1,87 @@
+id: review.unsupported-claims
+version: 1
+title: Unsupported claims
+kind: principle
+status: established
+
+summary: >
+  A review instruction is only verifiable when it is a contract: fixed
+  questions that must be answered with a location in the artifact under
+  review. "Verify, don't believe" is an attitude; "which claim is not
+  covered by the raw output" is a check. The decision is which questions
+  make a claim falsifiable against the diff, the report and the raw output.
+
+intent_signals:
+  - verify the report against the raw output
+  - which claim is not backed by the output
+  - review the diff for unsupported claims
+  - check the answer against the evidence
+  - what was smoothed over
+  - an alternative explanation was not excluded
+
+applies_when:
+  - a report or summary is reviewed against source material
+  - a claim must be traceable to a location
+  - an instruction demands verification rather than agreement
+
+does_not_apply_when:
+  - the artifact under review is itself the raw output
+  - the review is a taste or style judgement
+
+does_not_imply:
+  - that every claim needs a quote
+  - that a location makes a claim true
+  - that more questions make the review stricter
+  - that the reviewer's verdict replaces the evidence
+
+questions:
+  - Which claim in the report is not covered by the raw output?
+  - Which part of the order is unaddressed?
+  - Which alternative explanation was not excluded?
+  - Which contradiction with an earlier decision exists?
+  - What was smoothed over that should remain open?
+
+techniques:
+  - questions that must be answered with a location
+  - claims matched to the raw output line by line
+  - listing the unaddressed parts of the order
+  - naming the alternative explanations that were not excluded
+
+risks:
+  - questions answerable without looking at the artifact
+  - a verdict that restates the report instead of checking it
+  - locations that name the file but not the claim
+  - an attitude word instead of a check
+
+tradeoffs:
+  - technique: location-answering questions
+    benefit: falsifiable and machine-checkable
+    cost: the questions must be written per review
+    choose_when: the review must be audited
+  - technique: free-text review instruction
+    benefit: quick to write
+    cost: not verifiable after the fact
+    choose_when: the review is not a contract
+
+relations:
+  related:
+    - testing.evaluation-contamination
+  requires_consideration_of:
+    - testing.coverage-limitations
+
+contexts:
+  languages: [any]
+  project_types: [cli, web-service, automation, library]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Review instructions fail as attitudes; the node records the questions
+    that turn "verify, don't believe" into a machine contract with
+    answerable, located checks.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [review, unsupported claims, verification, evidence, machine contract]
