@@ -44,15 +44,16 @@ matches control — or scores below it — on five of six task×provider cells,
 so the effect is not prompt length; on one cell (Mistral e2) the placebo
 sits at the treatment level, so a structural component cannot be ruled out
 there. An out-of-sample check on two later nodes (circuit-breaker,
-correlation-id) does **not** generalise cleanly: one of four cells
-reproduced the effect, two were flat, one negative (see
-`experiments/RESULTS.md`, `docs/OOS_DIAGNOSIS.md`). Honest bounds: n=5 per
-arm, three in-sample and two out-of-sample tasks, two providers, one
-in-sample anomaly and one out-of-sample negative cell. The knowledge is
-**supported** by the in-sample result, never claimed as proven, and the
-claim does not currently extend beyond the tasks measured.
-Out-of-sample tasks on later nodes are reported separately. Full detail,
-raw scores and caveats: `experiments/RESULTS.md`.
+correlation-id), scored with the repaired instrument, supports **one clear
+out-of-sample effect** (e4-Mistral +3.20, placebo at control), one
+ceiling-limited flat cell (e4-DeepSeek), and **two cells too small to call**
+(e5-DeepSeek +0.40, e5-Mistral +0.20 — both inside within-arm spread at
+n=5; see `experiments/RESULTS.md`, `docs/OOS_DIAGNOSIS.md`). Honest bounds:
+n=5 per arm, three in-sample and two out-of-sample tasks, two providers,
+one in-sample anomaly. The knowledge is **supported** by the in-sample
+result, never claimed as proven; out of sample the rule survives **in
+direction** on a single strong cell. Full detail, raw scores and caveats:
+`experiments/RESULTS.md`.
 
 ## Repository layout
 

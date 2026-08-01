@@ -84,10 +84,13 @@ out-of-sample pass found a defect in the measurement, not in the knowledge
 (a rubric pattern — see `experiments/RESULTS.md`, instrument-repair section);
 this is the second time the project caught its own instrument.
 
-With the repaired rubrics, the out-of-sample result is: **three of four
-cells positive (+3.20, +0.40, +0.20), one flat at a 5.60/6.00 control
-ceiling, none negative.** Judgment: the rule **survives out-of-sample in
-direction**; the support is modest (only e4-Mistral is a large delta; the
-others are within n=5 spread), so the rule remains supported, not proven,
-and the flat cell is the plainest reminder that a node is only testable
-when its task's control arm has headroom.
+With the repaired rubrics, the out-of-sample result is: **one clear effect
+(e4-Mistral +3.20, placebo at control), one ceiling-limited flat cell
+(e4-DeepSeek, control 5.60/6.00), and two cells too small to call**
+(e5-DeepSeek +0.40, e5-Mistral +0.20 — both inside within-arm spread at
+n=5; e5-Mistral moved from −1.40 to +0.20 by rescoring alone, so it is not
+evidence in either direction). Judgment: the rule **survives out-of-sample
+in direction** — that is the defensible claim, resting on a single strong
+cell — and "three of four positive" would overstate the data. The rule
+remains supported, not proven, and the flat cell is the plainest reminder
+that a node is only testable when its task's control arm has headroom.
