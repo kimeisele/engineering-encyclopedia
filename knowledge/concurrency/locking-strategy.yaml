@@ -1,0 +1,85 @@
+id: concurrency.locking-strategy
+version: 1
+title: Locking strategy
+kind: principle
+status: established
+
+summary: >
+  Locks are a decision, not a default: choose optimistic or pessimistic
+  control, identify the version that detects conflict, and scope the lock to
+  the critical section. The wrong strategy is a deadlock or a race dressed
+  up as safety.
+
+intent_signals:
+  - optimistic or pessimistic locking
+  - a version field detects the conflict
+  - lock only the critical section
+  - two writers update the same row
+  - retry on conflict
+  - a lock held across slow io
+
+applies_when:
+  - shared state is mutated by concurrent writers
+  - a read-decision-write sequence must be atomic
+  - conflict detection needs a version or owner
+
+does_not_apply_when:
+  - the operation is a single atomic instruction
+  - state is immutable and only replaced
+
+does_not_imply:
+  - that a lock makes the surrounding logic correct
+  - that optimistic locking needs no retry handling
+  - that pessimistic locking scales
+  - that any lock beats a unique constraint
+
+questions:
+  - What identifies the version of the state being changed?
+  - Is the conflict detected before or after the write?
+  - How long is the lock held, and across what?
+  - What happens when the conflict is detected?
+
+techniques:
+  - a version or updated_at field checked on write
+  - locks scoped to the critical section only
+  - unique constraints that make the race impossible
+  - bounded retry on optimistic conflict
+
+risks:
+  - locks held across network or slow io
+  - version fields that never change
+  - optimistic retries without a bound
+  - a global lock that serialises everything
+
+tradeoffs:
+  - technique: optimistic with version check
+    benefit: scales with readers
+    cost: retry handling on conflict
+    choose_when: conflicts are rare
+  - technique: pessimistic lock on the section
+    benefit: no lost updates
+    cost: contention and deadlock risk
+    choose_when: conflicts are frequent
+
+relations:
+  related:
+    - concurrency.race-conditions
+  requires_consideration_of:
+    - reliability.idempotency
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, cli]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Models reach for a lock as a default; the node records the decision
+    about strategy, version identity and scope that makes the lock correct,
+    and the negative knowledge counters deadlock and lost-update beliefs.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [locking strategy, optimistic locking, pessimistic locking, version field, critical section]

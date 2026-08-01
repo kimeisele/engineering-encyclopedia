@@ -1,0 +1,83 @@
+id: observability.correlation-id
+version: 1
+title: Correlation id
+kind: guideline
+status: established
+
+summary: >
+  A correlation id identifies one logical request across every service and
+  log line it touches. The decision is what generates the id, where it is
+  created, and how it is propagated without being regenerated or conflated
+  with other identifiers.
+
+intent_signals:
+  - trace one request across services
+  - the log lines of one request share an id
+  - include the request id in every log line
+  - propagate the id to the next service
+  - regenerate the id at each hop
+
+applies_when:
+  - a request crosses more than one service or worker
+  - logs from different components must be joined later
+  - an operator must reconstruct one request's path
+
+does_not_apply_when:
+  - the system is a single process with no downstream calls
+
+does_not_imply:
+  - that the correlation id is an idempotency key
+  - that it replaces a trace system
+  - that generating one per service is enough
+  - that it must be exposed to users
+
+questions:
+  - What value identifies one logical request, and where is it created?
+  - How is it propagated to every downstream call?
+  - Is it included in every log line and error?
+  - What happens when an inbound call has no id?
+
+techniques:
+  - generate the id once at the entry point
+  - pass it explicitly in calls and headers
+  - include it in every log line and error
+  - generate one when the inbound id is absent
+
+risks:
+  - regenerating the id at each hop
+  - logging without the id in some paths
+  - using the idempotency key as the correlation id
+  - an id that is not unique across requests
+
+tradeoffs:
+  - technique: explicit parameter on every call
+    benefit: visible and testable
+    cost: plumbing through every function
+    choose_when: calls are explicit
+  - technique: context propagation via middleware
+    benefit: no signature changes
+    cost: implicit and easy to miss
+    choose_when: the framework supports it
+
+relations:
+  related:
+    - observability.error-context
+  requires_consideration_of:
+    - reliability.idempotency
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, library]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Models log without request identity or regenerate the id per hop because
+    the correlation id is a remembered slogan, not a decision about identity
+    and propagation; the questions record that decision.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [correlation id, request tracing, log correlation, propagation, request identity]

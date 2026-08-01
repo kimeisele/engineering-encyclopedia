@@ -1,0 +1,86 @@
+id: reliability.circuit-breaker
+version: 1
+title: Circuit breaker
+kind: pattern
+status: established
+
+summary: >
+  A circuit breaker stops calling a failing dependency so failures do not
+  cascade and the dependency can recover. The decision is what counts as a
+  failure, when the circuit opens, and how recovery is probed without
+  hammering the dependency.
+
+intent_signals:
+  - stop calling the api while it is down
+  - do not hammer the failing service
+  - fail fast when the dependency is unhealthy
+  - the circuit is open and requests fail immediately
+  - a half-open probe tests recovery
+  - too many failures in a row
+
+applies_when:
+  - a call to another service can fail for a sustained period
+  - failure of the dependency should not stall the caller
+  - the dependency needs time to recover
+
+does_not_apply_when:
+  - the dependency failure is instantaneous and local
+  - the caller is the only consumer and can wait indefinitely
+
+does_not_imply:
+  - that the breaker replaces timeouts or retries
+  - that open is permanent
+  - that a breaker hides the failure from operators
+  - that thresholds are one-size-fits-all
+
+questions:
+  - What counts as a failure, and over what window?
+  - When does the circuit open, and what happens to in-flight calls?
+  - How does the half-open state test recovery?
+  - What does the caller do while the circuit is open?
+
+techniques:
+  - count failures in a rolling window and open past a threshold
+  - fail fast with a stored error while open
+  - a single half-open probe after a cooldown
+  - closing the circuit after a successful probe
+
+risks:
+  - thresholds chosen without data
+  - opening the circuit on transient single failures
+  - the half-open probe hammering a slow dependency
+  - a breaker that never reports to operators
+
+tradeoffs:
+  - technique: failure-count threshold
+    benefit: simple state machine
+    cost: needs tuning per dependency
+    choose_when: failure patterns are stable
+  - technique: failure-rate with rolling window
+    benefit: adapts to traffic
+    cost: more state and arithmetic
+    choose_when: traffic varies a lot
+
+relations:
+  related:
+    - reliability.retry-semantics
+  requires_consideration_of:
+    - observability.error-context
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, cli]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Models know the circuit-breaker pattern and still write unbounded
+    retries or requests through an outage; the node records the decisions —
+    threshold, open behaviour, recovery probe — that the remembered pattern
+    leaves open.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [circuit breaker, fail fast, failure threshold, half-open, dependency health]
