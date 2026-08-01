@@ -1,0 +1,142 @@
+```python
+import subprocess
+import re
+from typing import List
+
+def run_git_branch_command(branch_name: str) -> subprocess.CompletedProcess:
+    """
+    Run a git command (git checkout) with a user-supplied branch name.
+
+    Args:
+        branch_name: The branch name to check out.
+
+    Returns:
+        The CompletedProcess result.
+
+    Raises:
+        ValueError: If the branch name is not valid.
+    """
+    # Validate the branch name against a strict pattern
+    # Git branch names must not contain spaces, control characters,
+    # or sequences like "..", "~", "^", ":", "?", "*", "[", "\\",
+    # and cannot start or end with "/" or contain "//".
+    if not isinstance(branch_name, str) or not branch_name:
+        raise ValueError("Branch name must be a non-empty string")
+    
+    # Strict validation: allow alphanumeric, dash, underscore, dot, and forward slash
+    # to form valid git ref names (no leading/trailing slash, no "..", no "//")
+    if not re.fullmatch(r"[A-Za-z0-9_\-\./]+", branch_name):
+        raise ValueError("Branch name contains invalid characters")
+    if branch_name.startswith("/") or branch_name.endswith("/"):
+        raise ValueError("Branch name cannot start or end with '/'")
+    if "//" in branch_name or ".." in branch_name:
+        raise ValueError("Branch name cannot contain '//' or '..'")
+    if branch_name.startswith("-"):
+        raise ValueError("Branch name cannot start with '-'")
+
+    # Command as a list, no shell=True — this prevents injection
+    command: List[str] = ["git", "checkout", branch_name]
+    
+    # Run the command
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False  # Let the caller handle non-zero exit codes
+    )
+    return result
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: e8c4c36e5d9d
+  applied:
+    - node: python.processes.subprocess-safety
+      version: 1
+      hash: 77b0cbc865c0
+      questions_answered:
+        - question: "Is the command passed as a list, with input as elements?"
+          answer: "Yes, command is a list with branch_name as a separate element, never interpolated into a string." 
+          location: "subprocess.run(command, ...) on line ~45"
+        - question: "Is shell=True present anywhere, even conditionally?"
+          answer: "No, shell=True is never used; subprocess.run is called without it." 
+          location: "subprocess.run call on line ~50"
+        - question: "Can a user-supplied value change which program runs?"
+          answer: "No, 'git' is fixed as the first element; branch_name is always a later argument, so it cannot alter the executable." 
+          location: "command list construction on line ~40-41"
+        - question: "Is the input validated or is it passed as opaque data?"
+          answer: "Input is strictly validated with regex and structural checks before being placed in the command list." 
+          location: "Validation block from line ~15-30"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The trust boundary is the function entry point; validation is the first operation before any git execution." 
+          location: "Lines 15-30, input validation checks"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable values match the regex [A-Za-z0-9_\-\./]+ and pass structural checks; everything else raises ValueError." 
+          location: "Lines 18-26, regex and structural checks"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "The validated branch_name is used directly in the command; no raw or unvalidated copy is used." 
+          location: "Line 41, branch_name in command list"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, the validated value is passed to subprocess as a list element; validation alone is not relied upon for safety." 
+          location: "lines 40-45, list construction and subprocess call"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "No shared mutable state exists; the function is stateless and operates only on local variables." 
+          location: "Entire function scope, lines 1-51"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Not applicable; there is no read-write sequence, only construction and execution of a command." 
+          location: "N/A — function is single-threaded and stateless"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No shared claimable value exists; this is not a concurrent operation." 
+          location: "N/A — function has no shared data"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "No check-then-act pattern exists; the function's checks and subprocess call are sequential and independent." 
+          location: "N/A — no interleaving possible with local state only"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The branch_name parameter identifies the operation; it comes from the calling code, supplying the logical intent." 
+          location: "Function signature, line 3"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Not applicable — this function does not track completion; it returns the subprocess result to the caller." 
+          location: "Return statement, line 51"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "No completion record is maintained in this function; failures surface as non-zero exit codes to the caller." 
+          location: "N/A — caller handles completion and retry policy"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Not applicable — this single function does not implement or check any completion tracking." 
+          location: "N/A — no deduplication or completion state exists"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Not applicable — no files are written by this function; it only invokes a git checkout." 
+          location: "N/A"
+        - question: "Is the data flushed before the rename?"
+          answer: "Not applicable — no data writing or file replacement occurs in this function." 
+          location: "N/A"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "Not applicable — no temp files are created or managed here." 
+          location: "N/A"
+        - question: "Can two writers both rename over the target?"
+          answer: "Not applicable — this function performs no file operations or renames." 
+          location: "N/A"
+      unanswered: []
+  not_applied: []
+```

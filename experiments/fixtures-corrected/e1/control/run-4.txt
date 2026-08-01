@@ -1,0 +1,605 @@
+I'll create a comprehensive worker system that consumes jobs from a queue and handles customer charging. This will include proper error handling, retry logic, and idempotency.
+
+```python
+import json
+import time
+import uuid
+import logging
+import redis
+import psycopg2
+from datetime import datetime
+from typing import Dict, Any, Optional
+import os
+from dataclasses import dataclass
+from enum import Enum
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class JobStatus(Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    RETRY = "retry"
+
+class ChargeStatus(Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    INSUFFICIENT_FUNDS = "insufficient_funds"
+    DUPLICATE = "duplicate"
+    NETWORK_ERROR = "network_error"
+
+@dataclass
+class Job:
+    job_id: str
+    customer_id: str
+    amount: float
+    currency: str
+    payment_method: str
+    metadata: Dict[str, Any]
+    created_at: datetime
+    retry_count: int = 0
+    max_retries: int = 3
+
+class DatabaseManager:
+    """Manages database operations for jobs and charges"""
+    
+    def __init__(self):
+        self.connection = psycopg2.connect(
+            host=os.getenv('DB_HOST', 'localhost'),
+            database=os.getenv('DB_NAME', 'payment_db'),
+            user=os.getenv('DB_USER', 'payment_user'),
+            password=os.getenv('DB_PASSWORD', 'payment_password')
+        )
+        self.connection.autocommit = False
+        self.setup_tables()
+    
+    def setup_tables(self):
+        """Create necessary tables if they don't exist"""
+        with self.connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS jobs (
+                    job_id VARCHAR(36) PRIMARY KEY,
+                    customer_id VARCHAR(100) NOT NULL,
+                    amount DECIMAL(10,2) NOT NULL,
+                    currency VARCHAR(3) NOT NULL,
+                    payment_method VARCHAR(50) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    metadata JSONB,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    retry_count INTEGER DEFAULT 0
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS charges (
+                    charge_id VARCHAR(36) PRIMARY KEY,
+                    job_id VARCHAR(36) NOT NULL,
+                    customer_id VARCHAR(100) NOT NULL,
+                    amount DECIMAL(10,2) NOT NULL,
+                    currency VARCHAR(3) NOT NULL,
+                    payment_method VARCHAR(50) NOT NULL,
+                    status VARCHAR(20) NOT NULL,
+                    external_transaction_id VARCHAR(100),
+                    error_message TEXT,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    UNIQUE(job_id, charge_id)
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS customers (
+                    customer_id VARCHAR(100) PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    email VARCHAR(200) NOT NULL,
+                    balance DECIMAL(10,2) NOT NULL DEFAULT 0.00
+                )
+            """)
+            
+            self.connection.commit()
+            logger.info("Database tables created successfully")
+    
+    def acquire_job(self, job_id: str, worker_id: str) -> bool:
+        """Atomically acquire a job for processing"""
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE jobs 
+                    SET status = %s, updated_at = NOW()
+                    WHERE job_id = %s AND status = %s
+                    RETURNING job_id
+                """, (JobStatus.PROCESSING.value, job_id, JobStatus.PENDING.value))
+                
+                if cursor.fetchone():
+                    self.connection.commit()
+                    return True
+                return False
+        except Exception as e:
+            logger.error(f"Error acquiring job {job_id}: {e}")
+            self.connection.rollback()
+            return False
+    
+    def complete_job(self, job_id: str, status: str, retry_count: int = 0):
+        """Update job status"""
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE jobs 
+                    SET status = %s, updated_at = NOW(), retry_count = %s
+                    WHERE job_id = %s
+                """, (status, retry_count, job_id))
+                self.connection.commit()
+        except Exception as e:
+            logger.error(f"Error completing job {job_id}: {e}")
+            self.connection.rollback()
+    
+    def record_charge(self, charge_data: Dict[str, Any]):
+        """Record a charge attempt"""
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO charges (
+                        charge_id, job_id, customer_id, amount, currency,
+                        payment_method, status, external_transaction_id,
+                        error_message, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    ON CONFLICT (job_id, charge_id) DO NOTHING
+                """, (
+                    charge_data['charge_id'],
+                    charge_data['job_id'],
+                    charge_data['customer_id'],
+                    charge_data['amount'],
+                    charge_data['currency'],
+                    charge_data['payment_method'],
+                    charge_data['status'],
+                    charge_data.get('external_transaction_id'),
+                    charge_data.get('error_message')
+                ))
+                self.connection.commit()
+        except Exception as e:
+            logger.error(f"Error recording charge: {e}")
+            self.connection.rollback()
+
+class QueueManager:
+    """Manages job queue operations using Redis"""
+    
+    def __init__(self):
+        self.redis_client = redis.Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=0,
+            decode_responses=True
+        )
+        self.queue_key = "payment_jobs"
+        self.processing_key = "processing_jobs"
+        self.retry_key = "retry_jobs"
+        
+    def enqueue_job(self, job_data: Dict[str, Any]) -> str:
+        """Add a job to the queue"""
+        job_id = str(uuid.uuid4())
+        job_data['job_id'] = job_id
+        job_data['created_at'] = datetime.now().isoformat()
+        
+        # Serialize job
+        job_json = json.dumps(job_data)
+        
+        # Add to queue with high priority
+        self.redis_client.zadd(self.queue_key, {job_json: time.time()})
+        
+        logger.info(f"Job {job_id} enqueued successfully")
+        return job_id
+    
+    def dequeue_job(self, timeout: int = 30) -> Optional[Dict[str, Any]]:
+        """Dequeue a job with blocking"""
+        try:
+            # Use blocking pop with priority
+            result = self.redis_client.bzpopmin(self.queue_key, timeout=timeout)
+            
+            if result:
+                _, job_json, _ = result
+                job_data = json.loads(job_json)
+                
+                # Add to processing set
+                self.redis_client.hset(self.processing_key, job_data['job_id'], job_json)
+                
+                logger.info(f"Job {job_data['job_id']} dequeued")
+                return job_data
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error dequeuing job: {e}")
+            return None
+    
+    def requeue_for_retry(self, job_data: Dict[str, Any], retry_count: int):
+        """Requeue a job for retry with backoff"""
+        job_data['retry_count'] = retry_count
+        
+        # Calculate delay based on retry count (exponential backoff)
+        delay = min(2 ** retry_count, 60) * 1000  # Cap at 60 seconds
+        
+        # Remove from processing set
+        self.redis_client.hdel(self.processing_key, job_data['job_id'])
+        
+        # Requeue with delay
+        self.redis_client.zadd(self.queue_key, {json.dumps(job_data): time.time() + delay/1000})
+        
+        logger.info(f"Job {job_data['job_id']} requeued for retry {retry_count} with delay {delay}ms")
+    
+    def remove_from_processing(self, job_id: str):
+        """Remove job from processing set"""
+        self.redis_client.hdel(self.processing_key, job_id)
+    
+    def get_processing_count(self) -> int:
+        """Get number of jobs currently being processed"""
+        return self.redis_client.hlen(self.processing_key)
+
+class PaymentProcessor:
+    """Handles actual payment processing"""
+    
+    def __init__(self, db_manager: DatabaseManager):
+        self.db_manager = db_manager
+        
+    def process_charge(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a payment charge"""
+        charge_id = str(uuid.uuid4())
+        charge_result = {
+            'charge_id': charge_id,
+            'job_id': job['job_id'],
+            'customer_id': job['customer_id'],
+            'amount': job['amount'],
+            'currency': job['currency'],
+            'payment_method': job['payment_method'],
+            'status': ChargeStatus.FAILED.value,
+            'external_transaction_id': None,
+            'error_message': None
+        }
+        
+        # Simulate payment processing with various scenarios
+        try:
+            # Simulate network/payment processing
+            time.sleep(1)  # Simulate processing time
+            
+            # Check if customer exists
+            customer = self.get_customer(job['customer_id'])
+            if not customer:
+                charge_result['error_message'] = "Customer not found"
+                charge_result['status'] = ChargeStatus.FAILED.value
+                return charge_result
+            
+            # Validate amount
+            if job['amount'] <= 0:
+                charge_result['error_message'] = "Invalid amount"
+                charge_result['status'] = ChargeStatus.FAILED.value
+                return charge_result
+            
+            # Simulate random failures (for testing)
+            import random
+            if random.random() < 0.1:  # 10% random failure rate
+                charge_result['error_message'] = "Payment processing failed"
+                charge_result['status'] = ChargeStatus.FAILED.value
+                return charge_result
+            
+            # Check sufficient funds (simulating payment method)
+            if job['payment_method'] == 'account_balance':
+                if customer[3] < job['amount']:
+                    charge_result['error_message'] = "Insufficient funds"
+                    charge_result['status'] = ChargeStatus.INSUFFICIENT_FUNDS.value
+                    return charge_result
+                
+                # Deduct balance
+                self.update_customer_balance(job['customer_id'], job['amount'], deduct=True)
+            
+            # Generate external transaction ID (simulated)
+            external_id = f"TXN-{uuid.uuid4().hex[:16].upper()}"
+            charge_result['external_transaction_id'] = external_id
+            charge_result['status'] = ChargeStatus.SUCCESS.value
+            charge_result['error_message'] = "Payment processed successfully"
+            
+            return charge_result
+            
+        except Exception as e:
+            logger.error(f"Error processing payment: {e}")
+            charge_result['error_message'] = str(e)
+            charge_result['status'] = ChargeStatus.NETWORK_ERROR.value
+            return charge_result
+    
+    def get_customer(self, customer_id: str):
+        """Retrieve customer from database"""
+        try:
+            with self.db_manager.connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT customer_id, name, email, balance
+                    FROM customers WHERE customer_id = %s
+                """, (customer_id,))
+                customer = cursor.fetchone()
+                self.db_manager.connection.commit()
+                return customer
+        except Exception as e:
+            logger.error(f"Error fetching customer {customer_id}: {e}")
+            return None
+    
+    def update_customer_balance(self, customer_id: str, amount: float, deduct: bool = True):
+        """Update customer balance"""
+        try:
+            with self.db_manager.connection.cursor() as cursor:
+                if deduct:
+                    cursor.execute("""
+                        UPDATE customers SET balance = balance - %s
+                        WHERE customer_id = %s
+                    """, (amount, customer_id))
+                else:
+                    cursor.execute("""
+                        UPDATE customers SET balance = balance + %s
+                        WHERE customer_id = %s
+                    """, (amount, customer_id))
+                self.db_manager.connection.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating customer balance: {e}")
+            return False
+
+class PaymentWorker:
+    """Main worker that consumes jobs and processes payments"""
+    
+    def __init__(self, worker_id: str = None):
+        self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
+        self.db_manager = DatabaseManager()
+        self.queue_manager = QueueManager()
+        self.payment_processor = PaymentProcessor(self.db_manager)
+        self.running = False
+        self.current_jobs = {}
+        
+        logger.info(f"Worker {self.worker_id} initialized")
+    
+    def start(self):
+        """Start the worker"""
+        self.running = True
+        logger.info(f"Worker {self.worker_id} started")
+    
+    def stop(self):
+        """Stop the worker gracefully"""
+        self.running = False
+        logger.info(f"Worker {self.worker_id} stopping")
+        
+        # Wait for current jobs to complete (with timeout)
+        for job_id in list(self.current_jobs.keys()):
+            logger.info(f"Waiting for job {job_id} to complete...")
+            # This would typically wait for the thread to finish
+            self.current_jobs[job_id].join(timeout=30)
+    
+    def run(self):
+        """Main worker loop"""
+        max_parallel_jobs = int(os.getenv('MAX_PARALLEL_JOBS', 5))
+        
+        while self.running:
+            try:
+                # Get current processing count
+                processing_count = len(self.current_jobs)
+                
+                # Check if we have capacity for more jobs
+                if processing_count >= max_parallel_jobs:
+                    logger.debug(f"At max capacity ({processing_count}/{max_parallel_jobs}), waiting...")
+                    time.sleep(1)
+                    continue
+                
+                # Dequeue a job
+                job_data = self.queue_manager.dequeue_job(timeout=5)
+                
+                if job_data:
+                    # Process the job immediately or in parallel
+                    self.process_job(job_data)
+                else:
+                    # No jobs available, small pause
+                    time.sleep(0.1)
+                    
+            except KeyboardInterrupt:
+                logger.info("Worker interrupted by user")
+                break
+            except Exception as e:
+                logger.error(f"Worker error: {e}")
+                time.sleep(5)  # Back off on errors
+    
+    def process_job(self, job_data: Dict[str, Any]):
+        """Process a single job"""
+        job_id = job_data['job_id']
+        retry_count = job_data.get('retry_count', 0)
+        
+        logger.info(f"Processing job {job_id} for customer {job_data['customer_id']}")
+        
+        # Acquire job in database
+        if not self.db_manager.acquire_job(job_id, self.worker_id):
+            logger.warning(f"Job {job_id} already being processed by another worker")
+            self.queue_manager.remove_from_processing(job_id)
+            return
+        
+        try:
+            # Process payment
+            charge_result = self.payment_processor.process_charge(job_data)
+            
+            # Record the charge
+            self.db_manager.record_charge(charge_result)
+            
+            # Handle result
+            if charge_result['status'] == ChargeStatus.SUCCESS.value:
+                logger.info(f"Payment successful for job {job_id}")
+                self.db_manager.complete_job(job_id, JobStatus.COMPLETED.value)
+                
+            elif charge_result['status'] in [ChargeStatus.DUPLICATE.value, ChargeStatus.INSUFFICIENT_FUNDS.value]:
+                # Permanent failure, don't retry
+                logger.error(f"Permanent failure for job {job_id}: {charge_result['error_message']}")
+                self.db_manager.complete_job(job_id, JobStatus.FAILED.value)
+                
+            else:
+                # Check if we should retry
+                if retry_count < job_data.get('max_retries', 3):
+                    retry_count += 1
+                    logger.warning(f"Job {job_id} failed, retrying ({retry_count}/{job_data.get('max_retries', 3)})")
+                    
+                    # Requeue for retry with backoff
+                    self.queue_manager.requeue_for_retry(job_data, retry_count)
+                    self.db_manager.complete_job(job_id, JobStatus.RETRY.value, retry_count)
+                else:
+                    logger.error(f"Job {job_id} failed permanently after {retry_count} retries")
+                    self.db_manager.complete_job(job_id, JobStatus.FAILED.value, retry_count)
+                    
+        except Exception as e:
+            logger.error(f"Error processing job {job_id}: {e}")
+            
+            # Handle unexpected errors with retry
+            if retry_count < job_data.get('max_retries', 3):
+                retry_count += 1
+                self.queue_manager.requeue_for_retry(job_data, retry_count)
+                self.db_manager.complete_job(job_id, JobStatus.RETRY.value, retry_count)
+            else:
+                self.db_manager.complete_job(job_id, JobStatus.FAILED.value, retry_count)
+        finally:
+            # Clean up
+            self.queue_manager.remove_from_processing(job_id)
+            if job_id in self.current_jobs:
+                del self.current_jobs[job_id]
+            
+            logger.info(f"Job {job_id} processing completed")
+
+class JobDispatcher:
+    """Handles job distribution to workers"""
+    
+    def __init__(self):
+        self.workers = {}
+        self.next_worker_index = 0
+    
+    def spawn_workers(self, num_workers: int = 4):
+        """Spawn multiple worker threads"""
+        import threading
+        
+        for i in range(num_workers):
+            worker_id = f"worker-{i+1}"
+            worker = PaymentWorker(worker_id)
+            self.workers[worker_id] = worker
+            
+            # Start worker in separate thread
+            thread = threading.Thread(target=worker.run, daemon=True)
+            thread.start()
+            
+            logger.info(f"Spawned {worker_id} in thread {thread.ident}")
+        
+        logger.info(f"Successfully spawned {num_workers} workers")
+
+def main():
+    """Main entry point"""
+    # Create test customers
+    setup_test_data(db_manager)
+    
+    # Create queue manager for testing
+    queue_manager = QueueManager()
+    
+    # Add some test jobs
+    test_jobs = [
+        {
+            'customer_id': 'CUST001',
+            'amount': 100.00,
+            'currency': 'USD',
+            'payment_method': 'account_balance'
+        },
+        {
+            'customer_id': 'CUST002',
+            'amount': 50.00,
+            'currency': 'EUR',
+            'payment_method': 'credit_card'
+        },
+        {
+            'customer_id': 'CUST003',
+            'amount': 200.00,
+            'currency': 'USD',
+            'payment_method': 'paypal'
+        }
+    ]
+    
+    for job in test_jobs:
+        queue_manager.enqueue_job(job)
+    
+    # Start worker
+    worker = PaymentWorker("worker-main")
+    worker.start()
+    
+    try:
+        worker.run()
+    except KeyboardInterrupt:
+        worker.stop()
+
+def setup_test_data(db_manager: DatabaseManager):
+    """Populate test data"""
+    try:
+        with db_manager.connection.cursor() as cursor:
+            # Insert test customers
+            cursor.execute("""
+                INSERT INTO customers (customer_id, name, email, balance)
+                VALUES 
+                    ('CUST001', 'John Doe', 'john@example.com', 1000.00),
+                    ('CUST002', 'Jane Smith', 'jane@example.com', 500.00),
+                    ('CUST003', 'Bob Johnson', 'bob@example.com', 750.00)
+                ON CONFLICT (customer_id) DO NOTHING
+            """)
+            db_manager.connection.commit()
+            logger.info("Test customers created")
+    except Exception as e:
+        logger.error(f"Error creating test data: {e}")
+        db_manager.connection.rollback()
+
+if __name__ == "__main__":
+    main()
+```
+
+This worker system includes:
+
+## Key Features:
+
+1. **Queue Management** (Redis):
+   - Priority-based queue using sorted sets
+   - Exponential backoff for retries
+   - Atomic job processing
+
+2. **Database Management** (PostgreSQL):
+   - Job tracking with status
+   - Charge records with idempotency
+   - Customer balance management
+   - Transaction support
+
+3. **Payment Processing**:
+   - Simulated payment gateway
+   - Various payment methods
+   - Insufficient funds handling
+   - Error scenarios
+
+4. **Worker Architecture**:
+   - Multiple concurrent workers
+   - Graceful shutdown
+   - Idempotency protection
+   - Retry mechanism with backoff
+
+5. **Error Handling**:
+   - Retry logic with configurable attempts
+   - Permanent vs retryable errors
+   - Distributed locking to prevent double processing
+
+## Configuration:
+Set these environment variables:
+- `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- `REDIS_HOST`, `REDIS_PORT`
+- `MAX_PARALLEL_JOBS`
+- `MAX_RETRIES`
+
+## Usage:
+1. Install dependencies: `pip install redis psycopg2-binary`
+2. Set up PostgreSQL and Redis
+3. Run the worker
+4. Enqueue jobs using the `enqueue_job` method
+
+The system handles concurrent processing, retries, and idempotency properly for production-like workloads.

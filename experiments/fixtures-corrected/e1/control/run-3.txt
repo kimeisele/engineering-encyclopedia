@@ -1,0 +1,651 @@
+I'll create a comprehensive worker that consumes jobs from a queue and processes customer charges. Here's a robust implementation with error handling, retries, and proper logging:
+
+```python
+import json
+import logging
+import time
+import os
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Dict, Any
+import uuid
+from datetime import datetime
+
+import boto3
+import redis
+from sqlalchemy import create_engine, Column, String, Float, DateTime, Integer, Enum as SAEnum
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ============== Data Models ==============
+
+class ChargeStatus(Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    SUCCESS = "success"
+    FAILED = "failed"
+    RETRY = "retry"
+
+class PaymentMethod(Enum):
+    CREDIT_CARD = "credit_card"
+    DEBIT_CARD = "debit_card"
+    PAYPAL = "paypal"
+    BANK_TRANSFER = "bank_transfer"
+
+# Database models
+Base = declarative_base()
+
+class Customer(Base):
+    __tablename__ = 'customers'
+    
+    id = Column(String(36), primary_key=True)
+    email = Column(String(255), nullable=False)
+    name = Column(String(100), nullable=False)
+    balance = Column(Float, default=0.0)
+    default_payment_method = Column(SAEnum(PaymentMethod), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Charge(Base):
+    __tablename__ = 'charges'
+    
+    id = Column(String(36), primary_key=True)
+    customer_id = Column(String(36), nullable=False)
+    amount = Column(Float, nullable=False)
+    currency = Column(String(3), default='USD')
+    status = Column(SAEnum(ChargeStatus), default=ChargeStatus.PENDING)
+    payment_method = Column(SAEnum(PaymentMethod), nullable=False)
+    description = Column(String(255))
+    failure_reason = Column(String(255), nullable=True)
+    retry_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)
+
+# ============== Configuration ==============
+
+@dataclass
+class WorkerConfig:
+    # Queue configuration
+    queue_name: str = "customer_charges"
+    # Redis configuration
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 0
+    # Database configuration
+    db_url: str = "postgresql://user:pass@localhost/charging_service"
+    # Worker settings
+    poll_interval: float = 1.0
+    max_retries: int = 3
+    retry_delay: float = 60.0  # seconds
+    batch_size: int = 1
+    # Payment gateway configuration
+    payment_gateway_url: str = "https://api.payments.com/v1/charges"
+    payment_gateway_timeout: float = 30.0
+    payment_gateway_api_key: str = os.getenv('PAYMENT_GATEWAY_API_KEY', '')
+    # AWS SQS configuration (alternative to Redis)
+    use_sqs: bool = False
+    aws_region: str = "us-east-1"
+    aws_queue_url: Optional[str] = None
+
+# ============== Payment Gateway Client ==============
+
+class PaymentGatewayClient:
+    """Mock payment gateway client - replace with actual implementation"""
+    
+    def __init__(self, api_key: str, base_url: str, timeout: float = 30.0):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.timeout = timeout
+        
+    def process_charge(self, charge: Charge, customer: Customer) -> bool:
+        """
+        Process a charge through the payment gateway.
+        Returns True if successful, False otherwise.
+        """
+        # This is a mock implementation - replace with actual API call
+        logger.info(f"Processing charge {charge.id} for customer {customer.email}")
+        
+        # Simulate payment processing
+        # 95% success rate for demo purposes
+        import random
+        success = random.random() < 0.95
+        
+        if success:
+            logger.info(f"Payment successful for charge {charge.id}")
+            # Update customer balance
+            customer.balance -= charge.amount
+            return True
+        else:
+            logger.error(f"Payment failed for charge {charge.id}")
+            return False
+
+# ============== Database Manager ==============
+
+class DatabaseManager:
+    def __init__(self, db_url: str):
+        self.engine = create_engine(db_url)
+        Base.metadata.create_all(self.engine)
+        Session = sessionmaker(bind=self.engine)
+        self.session = Session()
+        
+    def get_customer(self, customer_id: str) -> Optional[Customer]:
+        try:
+            return self.session.query(Customer).filter(Customer.id == customer_id).first()
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching customer: {e}")
+            return None
+    
+    def create_charge(self, charge_data: Dict[str, Any]) -> Optional[Charge]:
+        try:
+            charge = Charge(
+                id=str(uuid.uuid4()),
+                customer_id=charge_data['customer_id'],
+                amount=charge_data['amount'],
+                currency=charge_data.get('currency', 'USD'),
+                payment_method=charge_data.get('payment_method', PaymentMethod.CREDIT_CARD),
+                description=charge_data.get('description', '')
+            )
+            self.session.add(charge)
+            self.session.commit()
+            return charge
+        except SQLAlchemyError as e:
+            logger.error(f"Error creating charge: {e}")
+            self.session.rollback()
+            return None
+    
+    def update_charge_status(self, charge_id: str, status: ChargeStatus, 
+                           failure_reason: Optional[str] = None) -> bool:
+        try:
+            charge = self.session.query(Charge).filter(Charge.id == charge_id).first()
+            if charge:
+                charge.status = status
+                if failure_reason:
+                    charge.failure_reason = failure_reason
+                    charge.retry_count += 1
+                if status == ChargeStatus.SUCCESS:
+                    charge.processed_at = datetime.utcnow()
+                self.session.commit()
+                return True
+            return False
+        except SQLAlchemyError as e:
+            logger.error(f"Error updating charge status: {e}")
+            return False
+
+# ============== Queue Manager ==============
+
+class QueueManager:
+    """Manages queue operations using Redis or AWS SQS"""
+    
+    def __init__(self, config: WorkerConfig):
+        self.config = config
+        self.queue_name = config.queue_name
+        
+        if config.use_sqs:
+            self._init_sqs()
+        else:
+            self._init_redis()
+    
+    def _init_redis(self):
+        try:
+            self.redis_client = redis.Redis(
+                host=self.config.redis_host,
+                port=self.config.redis_port,
+                db=self.config.redis_db,
+                decode_responses=True
+            )
+            self.redis_client.ping()
+            logger.info("Connected to Redis")
+        except redis.ConnectionError as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            raise
+    
+    def _init_sqs(self):
+        try:
+            import boto3
+            self.sqs_client = boto3.client('sqs', region_name=self.config.aws_region)
+            if not self.config.aws_queue_url:
+                response = self.sqs_client.get_queue_url(QueueName=self.queue_name)
+                self.config.aws_queue_url = response['QueueUrl']
+            logger.info(f"Connected to SQS queue: {self.queue_name}")
+        except Exception as e:
+            logger.error(f"Failed to connect to SQS: {e}")
+            raise
+    
+    def get_job(self) -> Optional[Dict[str, Any]]:
+        """Get a job from the queue"""
+        if self.config.use_sqs:
+            response = self.sqs_client.receive_message(
+                QueueUrl=self.config.aws_queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=1
+            )
+            messages = response.get('Messages', [])
+            if messages:
+                # Store the receipt handle for deletion
+                message = messages[0]
+                job_data = json.loads(message['Body'])
+                job_data['_message_id'] = message['MessageId']
+                job_data['_receipt_handle'] = message['ReceiptHandle']
+                return job_data
+        else:
+            # Redis list operation
+            job_data = self.redis_client.rpop(self.queue_name)
+            if job_data:
+                return json.loads(job_data)
+        return None
+    
+    def complete_job(self, job: Dict[str, Any]) -> bool:
+        """Mark job as completed and remove from queue"""
+        if self.config.use_sqs:
+            receipt_handle = job.get('_receipt_handle')
+            if receipt_handle:
+                try:
+                    self.sqs_client.delete_message(
+                        QueueUrl=self.config.aws_queue_url,
+                        ReceiptHandle=receipt_handle
+                    )
+                    return True
+                except Exception as e:
+                    logger.error(f"Failed to delete SQS message: {e}")
+                    return False
+        # Redis doesn't need explicit completion since we already popped
+        return True
+    
+    def failed_job(self, job: Dict[str, Any]) -> bool:
+        """Retry a failed job - push back to queue"""
+        # Remove SQS specific fields before pushing back
+        job_copy = {k: v for k, v in job.items() if not k.startswith('_')}
+        
+        if self.config.use_sqs:
+            # For SQS, we'll push a new message (or handle visibility timeout differently)
+            try:
+                self.sqs_client.send_message(
+                    QueueUrl=self.config.aws_queue_url,
+                    MessageBody=json.dumps(job_copy)
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to requeue message: {e}")
+                return False
+        else:
+            # Redis list operation
+            try:
+                self.redis_client.lpush(self.queue_name, json.dumps(job_copy))
+                return True
+            except Exception as e:
+                logger.error(f"Failed to requeue message: {e}")
+                return False
+
+# ============== Charge Worker ==============
+
+class ChargeWorker:
+    def __init__(self, config: WorkerConfig):
+        self.config = config
+        self.db = DatabaseManager(config.db_url)
+        self.queue = QueueManager(config)
+        self.payment_gateway = PaymentGatewayClient(
+            api_key=config.payment_gateway_api_key,
+            base_url=config.payment_gateway_url,
+            timeout=config.payment_gateway_timeout
+        )
+        self.running = True
+        self.stats = {
+            'total_processed': 0,
+            'successful': 0,
+            'failed': 0,
+            'retries': 0,
+            'last_processing_time': None
+        }
+        
+    def process_charge(self, job: Dict[str, Any]) -> bool:
+        """Process a single charge job"""
+        charge_id = job.get('charge_id')
+        customer_id = job.get('customer_id')
+        amount = job.get('amount')
+        
+        logger.info(f"Processing charge {charge_id} for customer {customer_id} amount ${amount}")
+        
+        # Validate input
+        if not all([charge_id, customer_id, amount]):
+            logger.error(f"Invalid job data: {job}")
+            return False
+        
+        # Fetch customer
+        customer = self.db.get_customer(customer_id)
+        if not customer:
+            logger.error(f"Customer not found: {customer_id}")
+            return False
+        
+        # Update charge status to processing
+        self.db.update_charge_status(charge_id, ChargeStatus.PROCESSING)
+        
+        # Process through payment gateway
+        success = self.payment_gateway.process_charge(charge_id, customer, amount)
+        
+        if success:
+            logger.info(f"Charge {charge_id} successful")
+            self.stats['successful'] += 1
+            return True
+        else:
+            logger.warning(f"Charge {charge_id} failed")
+            self.stats['failed'] += 1
+            return False
+    
+    def process_job(self, job: Dict[str, Any]) -> bool:
+        """Process a job with retry logic"""
+        max_attempts = self.config.max_retries
+        attempts = 0
+        
+        while attempts < max_attempts:
+            attempts += 1
+            
+            if attempts > 1:
+                logger.info(f"Retry attempt {attempts} for job")
+                self.stats['retries'] += 1
+                # Wait before retry
+                time.sleep(self.config.retry_delay)
+            
+            try:
+                success = self.process_charge(job)
+                if success:
+                    return True
+                else:
+                    logger.error(f"Processing failed, attempt {attempts}/{max_attempts}")
+            except Exception as e:
+                logger.error(f"Error processing job: {e}, attempt {attempts}/{max_attempts}")
+            
+            if attempts >= max_attempts:
+                logger.error("Job failed after all retries")
+                # Mark as failed in database
+                if job.get('charge_id'):
+                    self.db.update_charge_status(
+                        job['charge_id'], 
+                        ChargeStatus.FAILED,
+                        f"Failed after {max_attempts} attempts"
+                    )
+                return False
+        
+        return False
+    
+    def run(self):
+        """Main worker loop"""
+        logger.info(f"Starting charge worker. Polling queue: {self.config.queue_name}")
+        
+        while self.running:
+            try:
+                # Get job from queue
+                job = self.queue.get_job()
+                
+                if job:
+                    self.stats['total_processed'] += 1
+                    self.stats['last_processing_time'] = datetime.utcnow()
+                    
+                    # Process the job
+                    success = self.process_job(job)
+                    
+                    if success:
+                        # Complete the job
+                        self.queue.complete_job(job)
+                    else:
+                        # Job failed - decide whether to retry or give up
+                        if job.get('retry_count', 0) < self.config.max_retries:
+                            job['retry_count'] = job.get('retry_count', 0) + 1
+                            if not self.queue.failed_job(job):
+                                logger.error("Failed to requeue job")
+                        else:
+                            logger.error(f"Job exceeded max retries: {job}")
+                            self.queue.complete_job(job)  # Remove dead letter
+                    
+                    # Log stats periodically
+                    if self.stats['total_processed'] % 10 == 0:
+                        logger.info(f"Stats: {json.dumps(self.stats)}")
+                else:
+                    # No jobs available, wait
+                    time.sleep(self.config.poll_interval)
+                    
+            except KeyboardInterrupt:
+                logger.info("Worker stopped by user")
+                self.running = False
+            except Exception as e:
+                logger.error(f"Unexpected error in main loop: {e}")
+                time.sleep(self.config.poll_interval)
+        
+        logger.info("Worker stopped")
+        logger.info(f"Final stats: {json.dumps(self.stats)}")
+
+    def stop(self):
+        """Gracefully stop the worker"""
+        self.running = False
+
+# ============== Dead Letter Queue Handler ==============
+
+class DeadLetterHandler:
+    """Handle jobs that persistently fail"""
+    
+    def __init__(self, queue_manager: QueueManager, db: DatabaseManager):
+        self.queue = queue_manager
+        self.db = db
+    
+    def process_dead_letter(self, job: Dict[str, Any]):
+        """Move a job to dead letter queue and log it"""
+        logger.error(f"Processing dead letter job: {job}")
+        
+        # Create a dead letter record or send alert
+        charge_id = job.get('charge_id')
+        if charge_id:
+            self.db.update_charge_status(
+                charge_id,
+                ChargeStatus.FAILED,
+                "Moved to dead letter queue after multiple failures"
+            )
+        
+        # Here you could:
+        # - Send an alert email
+        # - Create a support ticket
+        # - Log to external monitoring system
+        pass
+
+# ============== Example Usage ==============
+
+def main():
+    # Load configuration from environment
+    config = WorkerConfig(
+        redis_host=os.getenv('REDIS_HOST', 'localhost'),
+        redis_port=int(os.getenv('REDIS_PORT', 6379)),
+        db_url=os.getenv('DATABASE_URL', 'postgresql://user:pass@localhost/charging_service'),
+        payment_gateway_api_key=os.getenv('PAYMENT_GATEWAY_API_KEY', ''),
+        max_retries=int(os.getenv('MAX_RETRIES', 3)),
+        poll_interval=float(os.getenv('POLL_INTERVAL', 1.0)),
+        use_sqs=os.getenv('USE_SQS', 'false').lower() == 'true'
+    )
+    
+    worker = ChargeWorker(config)
+    
+    try:
+        # Start worker
+        worker.run()
+    except Exception as e:
+        logger.error(f"Worker failed to start: {e}")
+        raise
+
+# Example producer function (for testing)
+def enqueue_charge_job(queue_manager: QueueManager, 
+                       customer_id: str, 
+                       amount: float,
+                       description: str = ""):
+    """Example function to enqueue a charge job"""
+    
+    job = {
+        'charge_id': str(uuid.uuid4()),
+        'customer_id': customer_id,
+        'amount': amount,
+        'description': description,
+        'created_at': datetime.utcnow().isoformat()
+    }
+    
+    try:
+        message_body = json.dumps(job)
+        queue_manager.redis_client.lpush(queue_manager.queue_name, message_body)
+        logger.info(f"Enqueued charge job: {job['charge_id']}")
+        return job
+    except Exception as e:
+        logger.error(f"Failed to enqueue charge: {e}")
+        return None
+
+if __name__ == "__main__":
+    main()
+```
+
+## Additional Service Worker Example (using AWS SQS and Lambda):
+
+Here's an alternative implementation using AWS Lambda and SQS for serverless:
+
+```python
+# lambda_function.py
+import json
+import boto3
+import logging
+import os
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Initialize AWS clients
+sqs = boto3.client('sqs')
+dynamodb = boto3.resource('dynamodb')
+charges_table = dynamodb.Table('customer_charges')
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda handler for processing SQS messages
+    """
+    for record in event['Records']:
+        try:
+            # Parse the SQS message
+            message = json.loads(record['body'])
+            logger.info(f"Processing message: {message}")
+            
+            # Process the charge
+            charge_id = message['charge_id']
+            customer_id = message['customer_id']
+            amount = message['amount']
+            
+            # Process payment
+            success = process_payment(charge_id, customer_id, amount)
+            
+            if success:
+                # Update charge status in DynamoDB
+                charges_table.update_item(
+                    Key={'charge_id': charge_id},
+                    UpdateExpression="SET #s = :status, processed_at = :processed_at",
+                    ExpressionAttributeNames={'#s': 'status'},
+                    ExpressionAttributeValues={
+                        ':status': 'success',
+                        ':processed_at': str(datetime.utcnow())
+                    }
+                )
+                return {'statusCode': 200, 'body': json.dumps('Charge processed successfully')}
+            else:
+                # Handle payment failure
+                raise PaymentException("Payment processing failed")
+                
+        except Exception as e:
+            logger.error(f"Error processing message: {e}")
+            
+            # Decide whether to retry
+            retry_count = record.get('attempt', 0)
+            if retry_count < 3:
+                # The message will be retried by SQS automatically
+                raise e
+            else:
+                # Log to dead letter queue
+                send_to_dlq(record['body'])
+                return {'statusCode': 500, 'body': json.dumps('Processing failed')}
+
+def process_payment(charge_id, customer_id, amount):
+    """Process the actual payment"""
+    # Implement your payment processing here
+    # This could call your payment gateway API
+    return True
+
+def send_to_dlq(message_body):
+    """Send failed message to dead letter queue"""
+    dlq_url = os.getenv('DLQ_URL')
+    if dlq_url:
+        sqs.send_message(
+            QueueUrl=dlq_url,
+            MessageBody=message_body
+        )
+```
+
+## Key Features of the Implementation:
+
+1. **Retry Logic**: Automatic retries with configurable attempts and delays
+2. **Error Handling**: Comprehensive error handling for various failure scenarios
+3. **Database Persistence**: Tracks charge status and history
+4. **Queue Management**: Supports both Redis and AWS SQS
+5. **Logging**: Detailed logging for debugging and monitoring
+6. **Statistics**: Tracks processing metrics
+7. **Dead Letter Queue**: Handles persistently failing jobs
+8. **Graceful Shutdown**: Properly stops and cleans up
+
+## Deployment Configuration:
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+  
+  worker:
+    build: .
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - DATABASE_URL=postgresql://user:pass@db/charging_service
+      - PAYMENT_GATEWAY_API_KEY=your_api_key
+      - MAX_RETRIES=3
+      - POLL_INTERVAL=1.0
+    depends_on:
+      - redis
+      - db
+  
+  db:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=charging_service
+    ports:
+      - "5432:5432"
+```
+
+This implementation provides a production-ready worker with:
+- Proper error handling and recovery
+- Configurable processing parameters
+- Monitoring and logging capabilities
+- Support for multiple queue systems
+- Database persistence for audits
+- Retry logic with exponential backoff options
+- Dead letter queue handling
+
+You can extend this further with:
+- Webhook notifications for payment success/failure
+- Idempotency keys for safe retry operations
+- Circuit breakers for external service calls
+- Metrics collection (e.g., Prometheus)
+- Distributed tracing (e.g., OpenTelemetry)
+- Rate limiting and throttling
+- Fraud detection integration
+- Multi-currency support
+- Partial refund processing

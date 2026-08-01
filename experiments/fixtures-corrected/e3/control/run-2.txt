@@ -1,0 +1,268 @@
+Here's a comprehensive function that updates a JSON config file on disk with various options:
+
+```python
+import json
+import os
+import tempfile
+from typing import Dict, Any, Optional, Union, List
+from copy import deepcopy
+import logging
+
+logger = logging.getLogger(__name__)
+
+def update_json_config(
+    file_path: str,
+    updates: Dict[str, Any],
+    *,
+    create_if_missing: bool = False,
+    use_deep_merge: bool = False,
+    atomic_write: bool = True,
+    backup: bool = False,
+    pretty_print: bool = True,
+    ensure_ascii: bool = False,
+    encoding: str = 'utf-8'
+) -> Dict[str, Any]:
+    """
+    Update a JSON config file on disk with new or modified values.
+    
+    Args:
+        file_path: Path to the JSON config file
+        updates: Dictionary containing the updates to apply
+        create_if_missing: If True, create the file if it doesn't exist
+        use_deep_merge: If True, recursively merge nested dictionaries
+        atomic_write: If True, write to a temp file first and then atomically rename
+        backup: If True, create a backup of the original file
+        pretty_print: If True, format the JSON with indentation
+        ensure_ascii: If True, escape non-ASCII characters
+        encoding: File encoding to use
+    
+    Returns:
+        The updated config data as a dictionary
+    
+    Raises:
+        FileNotFoundError: If the file doesn't exist and create_if_missing is False
+        json.JSONDecodeError: If the file contains invalid JSON
+        OSError: If there are file system errors
+        ValueError: If updates is not a dictionary
+    """
+    
+    if not isinstance(updates, dict):
+        raise ValueError("Updates must be a dictionary")
+    
+    # Check if file exists
+    file_exists = os.path.exists(file_path)
+    
+    if not file_exists and not create_if_missing:
+        raise FileNotFoundError(f"Config file not found: {file_path}")
+    
+    # Load existing config or start fresh
+    if file_exists:
+        try:
+            with open(file_path, 'r', encoding=encoding) as f:
+                config_data = json.load(f)
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in {file_path}: {e}")
+            raise
+        except OSError as e:
+            logger.error(f"Error reading {file_path}: {e}")
+            raise
+    else:
+        config_data = {}
+    
+    # Apply updates
+    if use_deep_merge:
+        config_data = _deep_merge(config_data, deepcopy(updates))
+    else:
+        # Simple update (shallow)
+        if not isinstance(config_data, dict):
+            config_data = {}
+        config_data.update(deepcopy(updates))
+    
+    # Create backup if requested
+    if backup and file_exists:
+        backup_path = file_path + '.bak'
+        try:
+            import shutil
+            shutil.copy2(file_path, backup_path)
+        except OSError as e:
+            logger.warning(f"Could not create backup: {e}")
+    
+    # Prepare JSON string
+    json_str = json.dumps(config_data, indent=2 if pretty_print else None, 
+                         ensure_ascii=ensure_ascii)
+    if not pretty_print:
+        json_str += '\n'  # Add trailing newline if not pretty printing
+    
+    # Write the file
+    if atomic_write:
+        _atomic_write(file_path, json_str, encoding)
+    else:
+        try:
+            with open(file_path, 'w', encoding=encoding) as f:
+                f.write(json_str)
+        except OSError as e:
+            logger.error(f"Error writing to {file_path}: {e}")
+            raise
+    
+    return config_data
+
+
+def _deep_merge(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively merge two dictionaries.
+    
+    Args:
+        base: The original dictionary
+        updates: Dictionary with updates
+    
+    Returns:
+        Merged dictionary
+    """
+    result = deepcopy(base) if isinstance(base, dict) else {}
+    
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            # Recursive merge for nested dictionaries
+            result[key] = _deep_merge(result.get(key, {}), value)
+        else:
+            # Replace scalar values, lists, or non-matching types
+            result[key] = deepcopy(value)
+    
+    return result
+
+
+def _atomic_write(file_path: str, data: str, encoding: str) -> None:
+    """
+    Write data to a file atomically using a temporary file.
+    
+    Args:
+        file_path: Target file path
+        data: Data to write
+        encoding: File encoding
+    
+    Raises:
+        OSError: If the write operation fails
+    """
+    dir_path = os.path.dirname(os.path.abspath(file_path))
+    
+    # Create a temporary file in the same directory
+    temp_fd, temp_path = tempfile.mkstemp(dir=dir_path, prefix='.tmp_', 
+                                          suffix='.json')
+    
+    try:
+        # Write data to temporary file
+        with os.fdopen(temp_fd, 'w', encoding=encoding) as f:
+            f.write(data)
+        
+        # Atomically rename temporary file to target
+        os.replace(temp_path, file_path)
+    except Exception as e:
+        # Clean up temporary file on failure
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise e
+
+
+# Convenience functions for common use cases
+def get_config_value(file_path: str, key: str, default: Any = None, 
+                     encoding: str = 'utf-8') -> Any:
+    """
+    Get a value from a JSON config file.
+    
+    Args:
+        file_path: Path to the JSON config file
+        key: Key to retrieve
+        default: Default value if key doesn't exist
+        encoding: File encoding
+    
+    Returns:
+        The value at the given key, or default
+    """
+    try:
+        with open(file_path, 'r', encoding=encoding) as f:
+            config_data = json.load(f)
+        return config_data.get(key, default)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def update_config_value(file_path: str, key: str, value: Any, **kwargs) -> Dict[str, Any]:
+    """
+    Update a single key-value pair in a JSON config file.
+    
+    Args:
+        file_path: Path to the JSON config file
+        key: Key to update
+        value: New value
+        **kwargs: Additional arguments passed to update_json_config
+    
+    Returns:
+        Updated config data
+    """
+    return update_json_config(file_path, {key: value}, **kwargs)
+
+
+# Example usage
+if __name__ == "__main__":
+    import tempfile
+    import os
+    
+    # Example 1: Create and update a config file
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp:
+        temp.write(json.dumps({
+            "debug": False,
+            "server": {
+                "host": "localhost",
+                "port": 8080,
+                "timeout": 30
+            },
+            "database": {
+                "host": "db.example.com",
+                "credentials": {
+                    "user": "admin",
+                    "password": "secret"
+                }
+            }
+        }))
+        temp_path = temp.name
+    
+    print("Original config:")
+    with open(temp_path, 'r') as f:
+        print(f.read())
+    
+    # Simple update
+    update_json_config(temp_path, {"debug": True})
+    
+    # Deep update (merging nested dictionaries)
+    update_json_config(temp_path, 
+                       {"server": {"timeout": 45, "max_connections": 100}},
+                       use_deep_merge=True)
+    
+    print("\nUpdated config:")
+    with open(temp_path, 'r') as f:
+        print(f.read())
+    
+    # Clean up
+    os.unlink(temp_path)
+```
+
+This function provides:
+
+1. **Basic functionality**: Replace or add values in a JSON config file
+2. **Deep merging**: Option to recursively merge nested dictionaries
+3. **File handling**: Create missing files, atomic writes, backup support
+4. **Error handling**: Clear error messages for missing files, invalid JSON
+5. **Formatting options**: Pretty printing, Unicode handling
+6. **Convenience functions**: `get_config_value` and `update_config_value`
+
+Key features:
+
+- **Atomic writes**: Prevents file corruption if the process is interrupted
+- **Deep merge option**: Useful for updating nested structures without overwriting
+- **Backup creation**: Safety net for important configuration files
+- **Flexible formatting**: Control over JSON formatting
+- **Safe operations**: Robust error handling and validation
+
+The function handles the common scenarios you'll encounter when working with JSON config files and provides options to adapt it to your specific needs.

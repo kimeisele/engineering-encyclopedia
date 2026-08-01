@@ -1,0 +1,168 @@
+```python
+import json
+import os
+import tempfile
+from typing import Any
+
+
+def update_json_config(filepath: str, new_config: Any) -> None:
+    """
+    Atomically update a JSON config file on disk.
+
+    The function validates the new config, writes it to a temporary file in the
+    same directory, flushes it to disk, and then atomically renames it over the
+    target file. This ensures readers see either the old or the new content,
+    never a truncated or partial state.
+
+    Args:
+        filepath: Path to the JSON config file to update.
+        new_config: The new config data (must be JSON-serializable).
+    """
+    # Input validation at the trust boundary
+    if not isinstance(filepath, str) or not filepath:
+        raise ValueError("filepath must be a non-empty string")
+    
+    if not isinstance(new_config, dict):
+        raise ValueError("new_config must be a dict")
+    
+    if not _is_json_serializable(new_config):
+        raise ValueError("new_config must be JSON-serializable")
+
+    directory = os.path.dirname(filepath) or "."
+    basename = os.path.basename(filepath)
+    
+    # Ensure target is a .json file (basic check, not a security boundary)
+    if not basename.lower().endswith(".json"):
+        raise ValueError("filepath must end with .json")
+
+    temp_path = None
+    try:
+        # Create temp file in same directory for atomic rename
+        fd, temp_path = tempfile.mkstemp(
+            dir=directory,
+            prefix=f".{basename}.",
+            suffix=".tmp",
+            text=True
+        )
+        
+        # Write JSON content to temp file
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(new_config, f, indent=2, sort_keys=True, ensure_ascii=False)
+            f.write("\n")
+            # Flush data to OS buffer
+            f.flush()
+            # fsync to ensure data is durably written to disk
+            os.fsync(f.fileno())
+        
+        # Atomically rename temp file over target
+        os.replace(temp_path, filepath)
+        temp_path = None  # Prevent cleanup on success
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to update config file: {e}") from e
+    finally:
+        # Clean up temp file if it still exists (write failed or crash)
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
+def _is_json_serializable(obj: Any) -> bool:
+    """Check if an object can be serialized to JSON."""
+    try:
+        json.dumps(obj)
+        return True
+    except (TypeError, ValueError):
+        return False
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 18344011084d
+  applied:
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes, tempfile.mkstemp uses the target's directory, enabling an atomic os.replace on the same filesystem."
+          location: "solution.py:40"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes, explicit f.flush() and os.fsync() are called before os.replace, ensuring data is durably on disk."
+          location: "solution.py:45-47"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "A finally block cleans up the temp file with os.unlink if it still exists, preventing leftover artifacts."
+          location: "solution.py:53-55"
+        - question: "Can two writers both rename over the target?"
+          answer: "Yes, concurrent writers can race; os.replace is atomic per call, but last-writer-wins. No locking is implemented."
+          location: "solution.py:49"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The target file is shared. It's mutated via os.replace, which is atomic but doesn't prevent interleaved writers."
+          location: "solution.py:49"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, read and write are separate operations. Callers must coordinate if they need read-modify-write atomicity."
+          location: "solution.py:15-57"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes, if they read before either writes, both proceed; no locking or other coordination prevents this."
+          location: "solution.py:15-57"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving can cause lost updates or conflicting writes. The function provides atomic write, not read-modify-write safety."
+          location: "solution.py:49"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "The trust boundary is function entry. filepath is type-checked, new_config is validated as dict and JSON-serializable."
+          location: "solution.py:22-31"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Acceptable: non-empty string filepath ending .json, and a JSON-serializable dict. Everything else raises ValueError."
+          location: "solution.py:22-34"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Validated forms are used. filepath is normalized via dirname/basename; new_config is passed to json.dump."
+          location: "solution.py:28-31"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Yes, json.dump and os.replace treat data as potentially unsafe; no assumptions beyond validation are made."
+          location: "solution.py:43-49"
+      unanswered: []
+    - node: testing.coverage-limitations
+      version: 1
+      hash: 86fb7db91bdc
+      questions_answered:
+        - question: "Which behaviours are asserted, not just which lines run?"
+          answer: "The implementation is not tested; documented behaviors include atomic replacement, validation, and cleanup on failure."
+          location: "solution.py:15-57"
+        - question: "What important paths are not covered at all?"
+          answer: "No test suite is provided; paths like fsync failure, os.replace failure, and concurrent writers are unverified."
+          location: "solution.py:15-57"
+        - question: "Does the suite fail when the behaviour regresses?"
+          answer: "No test suite exists, so regressions would not be detected automatically."
+          location: "solution.py:15-57"
+        - question: "Is the metric used as evidence of quality?"
+          answer: "No coverage metric is used; quality is argued from design principles, not measured performance."
+          location: "solution.py:15-57"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "The filepath plus new_config content identify the operation. No explicit idempotency key is tracked."
+          location: "solution.py:15-57"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion is implied by successful os.replace. Durability relies on fsync before rename, but no separate log exists."
+          location: "solution.py:45-49"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "There is no completion record. If os.replace succeeds, the file is updated; on failure, old file remains intact."
+          location: "solution.py:51-55"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes, without external coordination both can see the old file and write different new versions; no deduplication."
+          location: "solution.py:15-57"
+      unanswered: []
+  not_applied: []

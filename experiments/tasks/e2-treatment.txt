@@ -171,3 +171,9 @@ Rules:
   `unanswered`.
 - Answers are non-empty and at most 40 words; locations are non-empty;
   every `not_applied` entry has a non-empty reason.
+
+FORMAT
+Separate your implementation from the application report with the exact
+line: ---APPLICATION_REPORT---
+Everything above that line is the artifact to be evaluated; everything
+below it is the report.

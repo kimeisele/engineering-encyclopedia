@@ -1,0 +1,181 @@
+Here's a Python function that runs a git command with a user-supplied branch name:
+
+```python
+import subprocess
+import shlex
+import os
+
+def run_git_command(branch_name, command_options=None):
+    """
+    Run a git command with a user-supplied branch name.
+    
+    Args:
+        branch_name (str): The name of the branch to use
+        command_options (list, optional): Additional git command options/arguments
+    
+    Returns:
+        subprocess.CompletedProcess: The result of the subprocess call
+    
+    Raises:
+        subprocess.SubprocessError: If the git command fails
+    """
+    if not isinstance(branch_name, str) or not branch_name.strip():
+        raise ValueError("Branch name must be a non-empty string")
+    
+    # Sanitize branch name to prevent command injection
+    if any(char in branch_name for char in [';', '&', '|', '<', '>', '$', '`', '\n', '\r']):
+        raise ValueError("Branch name contains invalid characters")
+    
+    # Build the git command
+    git_cmd = ["git"]
+    
+    if command_options:
+        git_cmd.extend(command_options)
+    
+    git_cmd.extend([branch_name])
+    
+    # Run the command
+    try:
+        result = subprocess.run(
+            git_cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            raise subprocess.SubprocessError(
+                f"Git command failed with exit code {result.returncode}\n"
+                f"stderr: {result.stderr}"
+            )
+        
+        return result
+    
+    except FileNotFoundError:
+        raise RuntimeError("Git is not installed or not in PATH")
+    except Exception as e:
+        raise RuntimeError(f"Error running git command: {str(e)}")
+
+
+# Example usage functions:
+
+def checkout_branch(branch_name):
+    """Checkout a specific branch."""
+    return run_git_command(branch_name, ["checkout"])
+
+def create_branch(branch_name):
+    """Create a new branch."""
+    return run_git_command(branch_name, ["checkout", "-b"])
+
+def delete_branch(branch_name):
+    """Delete a branch."""
+    return run_git_command(branch_name, ["branch", "-d"])
+
+def show_branch_log(branch_name):
+    """Show commit log for a branch."""
+    return run_git_command(branch_name, ["log", "--oneline"])
+
+def merge_branch(branch_name):
+    """Merge a branch into current."""
+    return run_git_command(branch_name, ["merge"])
+
+def push_branch(branch_name):
+    """Push a branch to remote."""
+    return run_git_command(branch_name, ["push", "origin"])
+
+
+# Alternative implementation with command string (less safe, use with caution):
+
+def run_git_command_string(branch_name, git_command):
+    """
+    Alternative implementation using command string (WARNING: less safe).
+    
+    Args:
+        branch_name (str): The branch name
+        git_command (str): The git command with placeholder
+    
+    Returns:
+        str: The output of the command
+    """
+    if not isinstance(branch_name, str) or not branch_name.strip():
+        raise ValueError("Branch name must be a non-empty string")
+    
+    # Validate branch name
+    if not re.match(r'^[a-zA-Z0-9_/.-]+$', branch_name):
+        raise ValueError("Invalid branch name format")
+    
+    # Use shlex to properly quote/shell-escape the branch name
+    command = f"git {git_command} {shlex.quote(branch_name)}"
+    
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+        return result
+    except subprocess.SubprocessError as e:
+        raise RuntimeError(f"Failed to run git command: {str(e)}")
+
+
+# Example usage:
+
+if __name__ == "__main__":
+    # Examples of how to use the function
+    
+    try:
+        # Checkout an existing branch
+        result = checkout_branch("feature/my-feature")
+        print(result.stdout)
+        
+        # Create a new branch
+        result = create_branch("new-feature")
+        print(result.stdout)
+        
+        # Delete a branch
+        result = delete_branch("old-feature")
+        print(result.stdout)
+        
+        # Show branch log
+        result = show_branch_log("main")
+        print(result.stdout[:500])  # print first 500 chars
+        
+        # Merge a branch
+        result = merge_branch("feature/development")
+        print(result.stdout)
+        
+        # Push branch to remote
+        result = push_branch("feature/my-feature")
+        print(result.stdout)
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+```
+
+Key features of this implementation:
+
+1. **Safety**: The function uses `subprocess.run()` with a list of arguments (no shell=True), which prevents command injection vulnerabilities.
+
+2. **Input validation**: Validates that the branch name is a non-empty string and rejects input containing dangerous shell characters.
+
+3. **Error handling**: Properly handles git errors, missing git installation, and various exception scenarios.
+
+4. **Flexibility**: Allows adding custom git options through the `command_options` parameter.
+
+5. **Return value**: Returns a `subprocess.CompletedProcess` object containing stdout, stderr, and return code.
+
+**Security considerations:**
+
+- The first implementation using `subprocess.run()` with argument lists is the safest approach.
+- Always avoid using `shell=True` with user input unless absolutely necessary.
+- The second example with `shell=True` is shown only as a warning – it's less safe and should be avoided in production.
+
+**Example usage:**
+```python
+# For a simple git operation like checking out a branch:
+run_git_command("feature-branch", ["checkout"])
+
+# For more complex operations:
+run_git_command("feature-branch", ["push", "origin", "-u"])
+```

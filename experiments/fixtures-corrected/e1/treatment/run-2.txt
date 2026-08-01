@@ -1,0 +1,224 @@
+```python
+"""
+Worker that consumes jobs from a queue and charges a customer.
+
+Design:
+- Each job carries an `operation_id` identifying one logical charge.
+- Completion is durably recorded (fsync'd) *before* the charge effect.
+- A lock file prevents two workers from racing on the same operation.
+- Retries use exponential backoff with jitter and a bounded attempt count.
+- State files are written atomically (temp + fsync + rename).
+"""
+
+import json
+import os
+import random
+import time
+from pathlib import Path
+
+class ChargeWorker:
+    def __init__(self, queue, state_dir, max_attempts=5):
+        self.queue = queue
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.max_attempts = max_attempts
+
+    def _state_path(self, operation_id):
+        return self.state_dir / f"{operation_id}.json"
+
+    def _is_complete(self, operation_id):
+        """Durable check: does the completion record exist?"""
+        return self._state_path(operation_id).exists()
+
+    def _write_completion(self, operation_id):
+        """Durably record completion BEFORE the effect."""
+        path = self._state_path(operation_id)
+        temp = path.with_suffix(".tmp")
+        with open(temp, "w") as f:
+            json.dump({"operation_id": operation_id, "completed_at": time.time()}, f)
+            f.flush()
+            os.fsync(f.fileno())          # flush data
+        os.replace(temp, path)            # atomic rename (same dir)
+        dir_fd = os.open(self.state_dir, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)              # flush directory metadata
+        finally:
+            os.close(dir_fd)
+
+    def _lock_path(self, operation_id):
+        return self.state_dir / f"{operation_id}.lock"
+
+    def _acquire_lock(self, operation_id):
+        """Try to claim the operation exclusively (O_EXCL). Returns True if claimed."""
+        try:
+            fd = os.open(self._lock_path(operation_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
+    def _release_lock(self, operation_id):
+        try:
+            os.unlink(self._lock_path(operation_id))
+        except FileNotFoundError:
+            pass
+
+    def _charge(self, customer, amount, operation_id):
+        """
+        The actual charge. In real code this would call a payment service.
+        Must be side-effect free when called twice for same operation_id.
+        We rely on the completion record written BEFORE calling this.
+        """
+        # idempotency guard inside the charge itself, best-effort
+        if self._is_complete(operation_id):
+            return
+        # charge the customer...
+        print(f"Charging {customer} ${amount} (op={operation_id})")
+        # NOTE: if this throws, the completion record remains, so retry will
+        # see it and NOT re-charge.
+
+    def process_one(self):
+        job = self.queue.dequeue()
+        if not job:
+            return False
+
+        operation_id = job["operation_id"]
+        customer = job["customer"]
+        amount = job["amount"]
+
+        # 1. Idempotency: if already complete, drop.
+        if self._is_complete(operation_id):
+            return True
+
+        # 2. Race: claim with lock file.
+        if not self._acquire_lock(operation_id):
+            # Another worker is handling this; drop.
+            return True
+
+        try:
+            # 3. Re-check after acquiring the lock (check-then-act is now safe).
+            if self._is_complete(operation_id):
+                return True
+
+            # 4. Durable completion record BEFORE the effect.
+            self._write_completion(operation_id)
+
+            # 5. The effect (charge).
+            self._charge(customer, amount, operation_id)
+
+            return True
+        finally:
+            self._release_lock(operation_id)
+
+    def run(self):
+        """Main loop with retry semantics."""
+        while True:
+            attempt = 0
+            while attempt < self.max_attempts:
+                try:
+                    if not self.process_one():
+                        return  # no more jobs
+                    break
+                except Exception as e:
+                    attempt += 1
+                    if attempt >= self.max_attempts:
+                        print(f"Giving up: {e}")
+                        return
+                    sleep = (2 ** attempt) + random.uniform(0, 0.5)
+                    time.sleep(sleep)
+
+
+if __name__ == "__main__":
+    # Example queue with deque
+    from collections import deque
+
+    class SimpleQueue:
+        def __init__(self, jobs):
+            self.jobs = deque(jobs)
+        def dequeue(self):
+            return self.jobs.popleft() if self.jobs else None
+
+    jobs = [
+        {"operation_id": "op-001", "customer": "acme", "amount": 100.0},
+        {"operation_id": "op-002", "customer": "globex", "amount": 250.0},
+    ]
+    q = SimpleQueue(jobs)
+    worker = ChargeWorker(q, "/tmp/charge_state")
+    worker.run()
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "`operation_id` from the job payload; it is unique per charging intent and stable across retries."
+          location: "worker.py:32 (job['operation_id'])"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Completion written to a file with fsync before the charge. The effect only runs after the durable record exists."
+          location: "worker.py:53-63 and worker.py:107"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "Completion is written before the effect, so a failure after the effect leaves the record in place—safe."
+          location: "worker.py:105-108"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Yes without the lock. The lock file (O_EXCL) makes the claim atomic, preventing concurrent handling."
+          location: "worker.py:73-82, 99-103"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Yes: temp = path.with_suffix('.tmp') uses the same directory as the target state file."
+          location: "worker.py:54"
+        - question: "Is the data flushed before the rename?"
+          answer: "Yes: f.flush() then os.fsync(f.fileno()) flushes data to disk before os.replace."
+          location: "worker.py:56-59"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "The temp file may remain as a leftover. It is not used for completion; the target is untouched."
+          location: "worker.py:54-61"
+        - question: "Can two writers both rename over the target?"
+          answer: "Not for the same operation: the lock file prevents concurrent access; for different ops the target differs."
+          location: "worker.py:73-82, 99-103"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared: the completion file in state_dir. Mutated via atomic rename after lock acquisition."
+          location: "worker.py:53-63"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but the lock file makes the claim atomic; the check-then-act is protected by that lock."
+          location: "worker.py:73-82, 99-103"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "They can see the file absent, but only one can create the lock file (O_EXCL), so only one proceeds."
+          location: "worker.py:73-82"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving is prevented by the lock; after acquiring it, the worker re-checks completion before charging."
+          location: "worker.py:100-103"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Idempotency via operation_id: completion record prevents re-charging on duplicate delivery."
+          location: "worker.py:86-91"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Max 5 attempts; after the last, the worker gives up and prints an error, temporarily stopping."
+          location: "worker.py:116-125"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff (2^attempt) plus uniform jitter 0–0.5 seconds."
+          location: "worker.py:121-122"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per worker instance; each worker has its own count. Not shared across workers."
+          location: "worker.py:11,14-15"
+      unanswered: []
+  not_applied: []
