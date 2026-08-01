@@ -1,0 +1,85 @@
+id: testing.evaluation-contamination
+version: 1
+title: Evaluation contamination
+kind: pitfall
+status: established
+
+summary: >
+  An artifact evaluated together with its own description is contaminated: a
+  report that restates the checks verbatim contains the exact strings the
+  checks look for, so the measurement reflects the description, not the
+  artifact. The decision is where the artifact ends and its description
+  begins.
+
+intent_signals:
+  - the report is scored together with the code
+  - the artifact is measured with its own description
+  - the answer restates the question
+  - scoring input includes the report text
+  - the rubric matches the report instead of the code
+  - the submission contains its own evaluation
+
+applies_when:
+  - a generated artifact is scored by a checklist
+  - the submission includes a self-description or report
+  - the checklist patterns could also appear in prose
+
+does_not_apply_when:
+  - the artifact and its description are stored and scored separately
+  - the description cannot contain the check strings
+
+does_not_imply:
+  - that self-description is always wrong
+  - that a delimiter makes the artifact safe to score
+  - that removing the report fixes a wrong rubric
+  - that human review has the same blind spot
+
+questions:
+  - What exactly is being scored, and where does the artifact end?
+  - Can the description contain a string the rubric forbids in the artifact?
+  - Is the boundary defined in the protocol or inferred after the fact?
+  - Would a comment inside the code trip the same pattern as the report?
+
+techniques:
+  - an explicit delimiter between artifact and report in the prompt
+  - scoring only the extracted artifact, never the raw completion
+  - checklist patterns that cannot match quoted prose
+  - a fixed rubric agreed before the runs
+
+risks:
+  - absent-patterns that match quoted strings in the report
+  - a delimiter the model does not reliably emit
+  - scoring raw completions after the protocol changed
+  - patterns that also match comments inside the code
+
+tradeoffs:
+  - technique: delimiter plus extraction
+    benefit: one completion, grounded report
+    cost: heuristic if the model ignores it
+    choose_when: the report cites the artifact
+  - technique: two separate calls
+    benefit: no boundary to infer
+    cost: report not grounded in same code
+    choose_when: grounding is not needed
+
+relations:
+  related:
+    - testing.coverage-limitations
+
+contexts:
+  languages: [any]
+  project_types: [worker, cli, web-service, automation]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Discovered in the Section 8 experiment: the E2 treatment outputs embed an
+    application report that reproduces the node questions verbatim, and the
+    rubric scored the raw completion. The boundary decision and its failure
+    modes are recorded here so future evaluations define it in the protocol.
+  created_at: 2026-08-01
+  last_verified_at: 2026-08-01
+  verification_interval_days: 1095
+
+keywords: [evaluation contamination, rubric blind spot, artifact boundary, self-description, measurement validity]

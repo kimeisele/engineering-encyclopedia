@@ -35,14 +35,14 @@ class TestCli(unittest.TestCase):
         code, out = run_cli(["list"])
         self.assertEqual(code, 0)
         data = yaml.safe_load(out)
-        self.assertEqual(len(data), 10)
+        self.assertEqual(len(data), 11)
         self.assertEqual(data[0]["id"], "concurrency.race-conditions")  # sorted
 
     def test_list_json(self):
         code, out = run_cli(["list", "--format", "json"])
         self.assertEqual(code, 0)
         data = json.loads(out)
-        self.assertEqual(len(data), 10)
+        self.assertEqual(len(data), 11)
 
     def test_show_ok_and_unknown(self):
         code, out = run_cli(["show", "reliability.idempotency"])
