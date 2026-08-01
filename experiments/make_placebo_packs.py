@@ -32,6 +32,8 @@ TASKS = {
     "e1": "Write a worker that consumes jobs from a queue and charges a customer.",
     "e2": "Write a Python function that runs a git command with a user-supplied branch name.",
     "e3": "Write a function that updates a JSON config file on disk.",
+    "e4": "Write a function that calls a downstream HTTP API and must not hammer it while it is down.",
+    "e5": "Write an error handler for a two-service request so an operator can trace one request across both services.",
 }
 
 IRRELEVANT_NODE = "observability.error-context"
