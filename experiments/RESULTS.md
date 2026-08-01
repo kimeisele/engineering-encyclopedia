@@ -86,6 +86,33 @@ treatment 5.00 > control 3.60): part of Mistral's E2 improvement is
 structural. On DeepSeek the placebo is below control (2.80), so there the
 E2 effect is knowledge-driven.
 
+## Statistics — one honest sentence per task
+
+Spread is the pooled within-arm standard deviation of the two arms being
+compared (n=5 each); "exceeds" means the delta is larger than that spread.
+No significance testing is performed or implied.
+
+- **e1 (idempotency):** the treatment delta exceeds the within-arm spread on
+  Mistral (+1.80 vs pooled sd 1.00) and is inside it on DeepSeek (+1.00 vs
+  1.09), while the placebo delta is at or below control on both (−1.60,
+  −0.40), so the e1 effect is not prompt length, but its size on DeepSeek is
+  within n=5 noise.
+- **e2 (subprocess-safety):** the treatment delta exceeds the within-arm
+  spread on both providers (+1.40 vs 1.07 DeepSeek; +1.40 vs 0.63 Mistral),
+  but on Mistral the placebo delta also exceeds it (+1.20 vs 0.71), so the
+  e2 effect is larger than its spread yet partly structural on Mistral and
+  knowledge-driven on DeepSeek (placebo −0.80 there).
+- **e3 (atomic-replacement):** the treatment delta far exceeds the
+  within-arm spread on Mistral (+4.40 vs 0.50) and is inside it on DeepSeek
+  (+0.40 vs 0.39, a ceiling-limited pair at 5.60→6.00 of 6), with placebo at
+  control on both (5.20 vs 5.60; 1.40 = 1.40), so e3 is the cleanest
+  knowledge effect on Mistral and effectively a non-result on DeepSeek.
+
+Plain reading: the deltas that exceed their own spread are e1-Mistral,
+e2-both, e3-Mistral; the deltas inside their spread are e1-DeepSeek and
+e3-DeepSeek. The one structural anomaly (Mistral e2 placebo +1.20 over
+control, inside the treatment's range) is unchanged by this analysis.
+
 ## Limitation
 
 Two providers, n=5 per arm, three tasks, one rubric per task, five run
