@@ -98,6 +98,45 @@ class TestPackLimits(unittest.TestCase):
         self.assertLess(count_words(compact), count_words(guidance))
         self.assertLess(count_words(guidance), count_words(full))
 
+    def test_long_request_is_clamped_to_budget(self):
+        # Review finding F2: a request longer than the budget must not leave
+        # an over-budget pack; request.original is clamped deterministically.
+        nodes = load_nodes()
+        index = RetrievalIndex(nodes)
+        long_request = " ".join(["request"] * 300)
+        pack = compose_pack(nodes, index, long_request, PackOptions(detail="compact"))
+        self.assertLessEqual(count_words(pack), WORD_BUDGETS["compact"])
+        self.assertTrue(pack["trace"]["truncated"])
+        self.assertLessEqual(count_words(pack["request"]["original"]), 120)
+
+    def test_frozen_experiment_packs_match_corpus(self):
+        # Review finding F7: the frozen treatment packs must stay recomposable
+        # from the current corpus. The first edit to any knowledge node makes
+        # this fail loudly instead of silently breaking verify-report.
+        nodes = load_nodes()
+        requests = {
+            "e1": "Write a worker that consumes jobs from a queue and charges a customer.",
+            "e2": "Write a Python function that runs a git command with a user-supplied branch name.",
+            "e3": "Write a function that updates a JSON config file on disk.",
+        }
+        for task, request in requests.items():
+            with self.subTest(task=task):
+                frozen_path = ROOT / "experiments" / "packs" / f"{task}.yaml"
+                frozen = yaml.safe_load(frozen_path.read_text(encoding="utf-8"))
+                backend = frozen["retrieval_backend"]
+                if backend == "fts5" and not fts5_available():
+                    self.skipTest("fts5 unavailable in this interpreter")
+                index = RetrievalIndex(nodes, backend=backend)
+                recomposed = compose_pack(
+                    nodes, index, request, PackOptions(detail="guidance")
+                )
+                self.assertEqual(
+                    recomposed["context_pack_hash"], frozen["context_pack_hash"], task
+                )
+                self.assertEqual(
+                    recomposed["knowledge_revision"], frozen["knowledge_revision"], task
+                )
+
 
 def _hash_without_own_field(pack):
     import hashlib

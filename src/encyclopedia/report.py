@@ -202,6 +202,31 @@ def verify_report(
             (q.get("question") if isinstance(q, dict) else None)
             for q in entry.get("unanswered", []) or []
         }
+        # a question cannot be both answered and unanswered — that is a
+        # flat contradiction in the evidence
+        for question in sorted(answered & unanswered):
+            if question is not None:
+                _fail(
+                    failures,
+                    "contradictory_disposition",
+                    f"{node_id}: question {question!r} is both answered and unanswered",
+                )
+        # and no question may be repeated within one list
+        for label, items in (
+            ("questions_answered", entry.get("questions_answered", []) or []),
+            ("unanswered", entry.get("unanswered", []) or []),
+        ):
+            seen = set()
+            for item in items:
+                q = item.get("question") if isinstance(item, dict) else None
+                if q is not None:
+                    if q in seen:
+                        _fail(
+                            failures,
+                            "duplicate_question",
+                            f"{node_id}: question {q!r} repeated in {label}",
+                        )
+                    seen.add(q)
         for question in corpus_questions[node_id]:
             if question not in answered and question not in unanswered:
                 _fail(

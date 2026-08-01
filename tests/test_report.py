@@ -157,6 +157,27 @@ class TestVerifyReport(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "duplicate_disposition" for f in failures))
 
+    def test_contradictory_question_disposition_rejected(self):
+        # Review finding F1: the same question answered and unanswered is a
+        # flat contradiction in the evidence.
+        def mutate(r):
+            applied = r["application_report"]["applied"][0]
+            question = applied["questions_answered"][0]["question"]
+            applied["unanswered"].append({"question": question, "reason": "not really"})
+        ok, failures = self._write_and_verify(self._mutate(mutate))
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "contradictory_disposition" for f in failures))
+
+    def test_duplicate_question_rejected(self):
+        def mutate(r):
+            applied = r["application_report"]["applied"][0]
+            applied["questions_answered"].append(
+                dict(applied["questions_answered"][0])
+            )
+        ok, failures = self._write_and_verify(self._mutate(mutate))
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "duplicate_question" for f in failures))
+
     # -- binding to the corpus ----------------------------------------------
 
     def test_unknown_node_id_rejected(self):

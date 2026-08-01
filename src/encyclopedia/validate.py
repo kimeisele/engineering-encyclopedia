@@ -46,6 +46,21 @@ SUMMARY_MAX_WORDS = 70
 MAX_LIST_ENTRY_WORDS = 25
 MAX_NODE_WORDS = 500
 
+# Every list-valued field whose entries must stay <= MAX_LIST_ENTRY_WORDS.
+# The tests import this exact set so the validator and the suite can never
+# drift apart on what "valid" means.
+ENTRY_WORD_CHECKED_FIELDS = (
+    "intent_signals",
+    "applies_when",
+    "does_not_apply_when",
+    "does_not_imply",
+    "questions",
+    "techniques",
+    "risks",
+    "tradeoffs",
+    "keywords",
+)
+
 ID_RE = re.compile(r"^[a-z0-9]+(?:\.[a-z0-9-]+)+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -95,13 +110,26 @@ def validate_node(node: Node, ids: set, taxonomy: Dict[str, Any]) -> List[str]:
             continue
         if not (lo <= len(value) <= hi):
             errors.append(_err(node, f"'{field}' has {len(value)} entries, need {lo}-{hi}"))
-        for entry in value:
-            if not isinstance(entry, str):
+
+    # Entry-level word limit over the shared field set (Section 3: any
+    # single list entry <= 25 words). Tradeoff entries are mappings and are
+    # counted across all their sub-values.
+    for field in ENTRY_WORD_CHECKED_FIELDS:
+        for entry in data.get(field, []) or []:
+            if field in LIST_LIMITS and not isinstance(entry, str):
                 errors.append(_err(node, f"'{field}' entries must be strings"))
-            elif count_words(entry) > MAX_LIST_ENTRY_WORDS:
-                errors.append(
-                    _err(node, f"'{field}' entry exceeds {MAX_LIST_ENTRY_WORDS} words: {entry!r}")
-                )
+                continue
+            if isinstance(entry, (str, dict)):
+                words = count_words(entry)
+                if words > MAX_LIST_ENTRY_WORDS:
+                    errors.append(
+                        _err(
+                            node,
+                            f"'{field}' entry exceeds {MAX_LIST_ENTRY_WORDS} words: {entry!r}",
+                        )
+                    )
+            else:
+                errors.append(_err(node, f"'{field}' entries must be strings or mappings"))
 
     # --- provenance ------------------------------------------------------
     prov = data.get("provenance")

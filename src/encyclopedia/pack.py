@@ -33,7 +33,7 @@ MAX_RELEVANCE_WORDS = 15
 RELATION_KEYS = ("related", "requires_consideration_of")
 
 _FIELDS_BY_DETAIL = {
-    "compact": (),
+    "compact": ("summary",),
     "guidance": ("summary", "questions", "does_not_imply", "risks"),
     "full": (
         "summary",
@@ -175,7 +175,9 @@ def compose_pack(
     pack: Dict[str, Any] = {
         "request": {"original": request},
         "knowledge_revision": corpus_revision(nodes),
-        "context_pack_hash": "",
+        # 12-char placeholder so the budget counts the final hash word while
+        # enforcing; the real hash is computed at the end (same length).
+        "context_pack_hash": "0" * 12,
         "retrieval_backend": index.backend,
         "context_pack": {
             "primary": [
@@ -230,12 +232,21 @@ def _enforce_budget(
             ]
         pack["trace"]["truncated"] = True
         pack["trace"]["selected"] = list(selected)
-    # Last resort: trim trace.excluded (already <= 5) while still over budget.
+    # Trim trace.excluded (already <= 5) while still over budget.
     while count_words(pack) > budget and pack["trace"]["excluded"]:
         pack["trace"]["excluded"].pop()
         pack["trace"]["truncated"] = True
-    # The final check is done by callers/tests; if still over (impossible for
-    # this corpus under the given budgets), the pack keeps the lowest-ranked
-    # single node — deterministically the first survivor.
-    if count_words(pack) > budget:
+    # Last resort: a request longer than the budget would otherwise keep the
+    # pack over budget even with a single node. Clamp request.original
+    # deterministically to the words the budget allows. (For this corpus the
+    # remaining content is far below any budget, so the clamp never fires
+    # on the ten regression queries.)
+    request_words = count_words(pack["request"]["original"])
+    other_words = count_words(pack) - request_words
+    allowed_request = budget - other_words
+    if allowed_request < 1:
+        allowed_request = 1
+    trimmed = " ".join(pack["request"]["original"].split()[:allowed_request])
+    if trimmed != pack["request"]["original"]:
+        pack["request"]["original"] = trimmed
         pack["trace"]["truncated"] = True

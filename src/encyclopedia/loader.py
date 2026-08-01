@@ -57,10 +57,14 @@ TAXONOMY_DIR = Path(
 
 @dataclass(frozen=True)
 class Node:
-    """A loaded knowledge node with its computed content hash."""
+    """A loaded knowledge node with its computed content hash.
+
+    ``version`` is the raw YAML value; the validator enforces the integer
+    type so a string version surfaces as a validation error, not a crash.
+    """
 
     id: str
-    version: int
+    version: Any
     title: str
     kind: str
     status: str
@@ -93,7 +97,10 @@ def load_nodes(knowledge_dir: Path = KNOWLEDGE_DIR) -> List[Node]:
         nodes.append(
             Node(
                 id=str(data["id"]),
-                version=int(data["version"]),
+                # The raw value is kept: the validator enforces the integer
+                # type. Coercing here would hide a schema violation and crash
+                # on non-numeric values instead of failing validation.
+                version=data["version"],
                 title=str(data["title"]),
                 kind=str(data["kind"]),
                 status=str(data["status"]),

@@ -6,11 +6,13 @@ from pathlib import Path
 
 from encyclopedia.loader import load_nodes, load_taxonomy
 from encyclopedia.validate import (
+    ENTRY_WORD_CHECKED_FIELDS,
     LIST_LIMITS,
     MAX_LIST_ENTRY_WORDS,
     MAX_NODE_WORDS,
     SUMMARY_MAX_WORDS,
     validate_all,
+    validate_node,
 )
 from encyclopedia.words import count_words
 
@@ -31,11 +33,9 @@ REQUIRED_FIELDS = {
     "keywords",
 }
 
-# every list-valued field whose entries must stay <= MAX_LIST_ENTRY_WORDS
-LIST_FIELDS = (
-    "intent_signals", "applies_when", "does_not_apply_when", "does_not_imply",
-    "questions", "techniques", "risks", "tradeoffs",
-)
+# every list-valued field whose entries must stay <= MAX_LIST_ENTRY_WORDS —
+# imported from the validator so the two can never disagree
+LIST_FIELDS = ENTRY_WORD_CHECKED_FIELDS
 
 
 class TestCorpus(unittest.TestCase):
@@ -105,6 +105,63 @@ class TestCorpus(unittest.TestCase):
         for node in nodes:
             self.assertNotIn("candidates", node.data)
             self.assertNotIn("future", node.data)
+
+    # -- validator soundness (review findings F3/F4) -------------------------
+
+    @staticmethod
+    def _mutant(base, **changes):
+        from encyclopedia.loader import Node
+
+        data = dict(base.data)
+        data.update(changes)
+        return Node(
+            id=base.id, version=data.get("version"), title=base.title,
+            kind=base.kind, status=base.status, data=data,
+            content_hash="x" * 12, path=base.path,
+        )
+
+    def test_validator_checks_every_list_field_for_word_limit(self):
+        nodes = load_nodes()
+        taxonomy = load_taxonomy()
+        ids = {n.id for n in nodes}
+        for field in ("applies_when", "does_not_apply_when", "keywords"):
+            mutant = self._mutant(nodes[0], **{field: ["word " * 30]})
+            errors = validate_node(mutant, ids, taxonomy)
+            self.assertTrue(
+                any(field in e and "exceeds" in e for e in errors), f"{field}: {errors}"
+            )
+
+    def test_string_version_rejected(self):
+        nodes = load_nodes()
+        taxonomy = load_taxonomy()
+        ids = {n.id for n in nodes}
+        mutant = self._mutant(nodes[0], version="1")
+        errors = validate_node(mutant, ids, taxonomy)
+        self.assertTrue(any("version must be an integer" in e for e in errors))
+
+    def test_non_numeric_version_is_clean_failure_not_crash(self):
+        import tempfile
+        from pathlib import Path
+
+        from encyclopedia import loader
+
+        with tempfile.TemporaryDirectory() as td:
+            bad_dir = Path(td)
+            (bad_dir / "bad.yaml").write_text(
+                "id: test.bad\n"
+                "version: one\n"
+                "title: Bad\n"
+                "kind: principle\n"
+                "status: established\n",
+                encoding="utf-8",
+            )
+            loaded = loader.load_nodes(bad_dir)
+            self.assertEqual(loaded[0].version, "one")  # raw, no coercion
+        # validation surfaces a clean error, no exception
+        mutant = self._mutant(load_nodes()[0], version="one")
+        taxonomy = load_taxonomy()
+        errors = validate_node(mutant, {n.id for n in load_nodes()}, taxonomy)
+        self.assertTrue(any("version must be an integer" in e for e in errors))
 
 
 if __name__ == "__main__":

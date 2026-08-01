@@ -139,3 +139,18 @@ Decision: local verification uses a project-local `.venv` (gitignored) with
 CI is unaffected (fresh runner, `pip install .`).
 Alternative rejected: `sudo`/system installs — invasive and unnecessary.
 Reversibility: easy
+
+### D9 — `not_applied` entries are not hash-bound (Section 7)
+Section: 7
+Brief says: "every `version` and `hash` matches the current corpus — a
+mismatch means the agent cited stale or invented content".
+Problem: the brief's own example `not_applied` entry carries only `node` and
+`reason`, and a not-applied citation asserts nothing about the node's
+content; requiring version/hash there would make the brief's example report
+fail verification.
+Decision: `verify-report` checks `version` and `hash` against the corpus for
+`applied` entries only. `not_applied` entries must carry a non-empty `reason`
+and must be pack nodes, but are not hash-bound.
+Alternative rejected: enforcing version/hash on both dispositions — stricter
+than the brief's own example allows.
+Reversibility: easy
