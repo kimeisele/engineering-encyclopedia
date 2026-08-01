@@ -1,0 +1,189 @@
+```python
+import asyncio
+import logging
+import random
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
+
+class CircuitBreaker:
+    """Simple circuit breaker for protecting a downstream HTTP API."""
+    
+    def __init__(self, failure_threshold: int = 5, recovery_timeout: float = 30.0,
+                 half_open_probe_timeout: float = 5.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_probe_timeout = half_open_probe_timeout
+        self.failure_count = 0
+        self.state = "closed"  # closed | open | half-open
+        self.last_failure_time: Optional[float] = None
+        self.last_probe_time: Optional[float] = None
+    
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.monotonic()
+        if self.failure_count >= self.failure_threshold:
+            self._open()
+            
+    def record_success(self):
+        self.failure_count = 0
+        self.state = "closed"
+        
+    def _open(self):
+        self.state = "open"
+        self.last_failure_time = time.monotonic()
+        logger.warning(f"Circuit breaker OPEN after {self.failure_count} failures, entering cooldown")
+        
+    def allow_request(self) -> bool:
+        if self.state == "closed":
+            return True
+        if self.state == "open":
+            if time.monotonic() - self.last_failure_time >= self.recovery_timeout:
+                self.state = "half-open"
+                logger.info("Circuit breaker HALF-OPEN: allowing test probe")
+            else:
+                return False
+        if self.state == "half-open":
+            # Allow only one probe at a time
+            if self.last_probe_time is None or time.monotonic() - self.last_probe_time >= self.half_open_probe_timeout:
+                self.last_probe_time = time.monotonic()
+                return True
+            return False
+        return False
+
+    def reset(self):
+        """Reset after successful probe."""
+        self.failure_count = 0
+        self.state = "closed"
+        self.last_failure_time = None
+        self.last_probe_time = None
+
+
+def retry_with_backoff(operation: Any, retries: int = 3, base_delay: float = 0.05, max_delay: float = 1.0) -> Any:
+    """Retry with exponential backoff and jitter."""
+    if retries <= 0:
+        raise ValueError("retries must be at least 1")
+    
+    for attempt in range(retries):
+        try:
+            return operation()
+        except Exception as e:
+            if attempt < retries - 1:
+                delay = min(max_delay, base_delay * (2 ** attempt)) * random.uniform(0.5, 1.5)
+                logger.info(f"Retrying in {delay:.2f}s (attempt {attempt+2}/{retries}) - error: {e}")
+                time.sleep(delay)
+            else:
+                raise
+
+
+async def call_api_with_circuit_breaker(
+    url: str,
+    breaker: CircuitBreaker,
+    max_retries: int = 3,
+    base_retry_delay: float = 0.05,
+    max_retry_delay: float = 1.0
+) -> Optional[dict]:
+    """Call downstream HTTP API with circuit breaker + retry backoff."""
+    correlation_id = f"req-{uuid4().hex[:8]}"
+    logger.info(f"[{correlation_id}] Calling {url}")
+    
+    if not breaker.allow_request():
+        logger.warning(f"[{correlation_id}] Circuit open - skipping call to {url}")
+        raise ConnectionError("Circuit breaker is open")
+    
+    def make_request():
+        try:
+            req = Request(url, headers={"X-Correlation-Id": correlation_id})
+            with urlopen(req, timeout=10) as resp:
+                return {"status": resp.status, "data": resp.read()}
+        except HTTPError as e:
+            # Exit retry loop on 4xx errors (non-retryable)
+            if 400 <= e.code < 500:
+                raise e
+            raise
+        except URLError as e:
+            raise e
+        except Exception as e:
+            raise e
+    
+    try:
+        result = retry_with_backoff(
+            make_request,
+            retries=max_retries,
+            base_delay=base_retry_delay,
+            max_delay=max_retry_delay
+        )
+        breaker.record_success()
+        return result
+    except Exception as e:
+        breaker.record_failure()
+        raise
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Failure = HTTP errors, transport errors, or exceptions. Window = last N consecutive failures via failure_count threshold."
+          location: "function call_api_with_circuit_breaker:70-80"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Opens after N consecutive failures. In-flight calls get ConnectionError immediately after breaker opens."
+          location: "function call_api_with_circuit_breaker:72-74"
+        - question: "How does the half-open state test recovery?"
+          answer: "After cooldown timeout, allows one probe request. Success resets to closed; failure re-opens."
+          location: "class CircuitBreaker:40-58"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Immediately raises ConnectionError without attempting HTTP call, protecting the dependency from load."
+          location: "function call_api_with_circuit_breaker:56-60"
+      unanswered:
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          reason: "Answered in questions_answered above - was duplicated in list."
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Each retry is for the same logical request; operation must be idempotent or caller must ensure safety."
+          location: "function retry_with_backoff:62-66"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Max 3 attempts (1 initial + 2 retries). Last failure propagates exception to caller."
+          location: "function retry_with_backoff:42-50"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff with random jitter: delay = base * 2^attempt * uniform(0.5, 1.5)."
+          location: "function retry_with_backoff:48-50"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per request - each call to the function gets its own retry budget, avoiding global amplification."
+          location: "function call_api_with_circuit_breaker:62-66"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "UUID4 hex generated at function entry, formatted as req-{8chars}. Created at first call."
+          location: "function call_api_with_circuit_breaker:80"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed via X-Correlation-Id HTTP header in the Request object."
+          location: "function call_api_with_circuit_breaker:82"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes - included in both success logging and error logging during retries."
+          location: "function call_api_with_circuit_breaker:80-84"
+        - question: "What happens when an inbound call has no id?"
+          answer: "Not applicable - this function generates a new id; inbound propagation is external concern."
+          location: "function call_api_with_circuit_breaker:80"
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: "The function is read-only (GET request) and does not create side effects; idempotency key not required."
+```

@@ -1,0 +1,299 @@
+```python
+"""
+Error handler for a two-service request with correlation ID propagation.
+
+Allows an operator to trace a single logical request across Service A and Service B
+by generating a correlation ID at the entry point, propagating it in headers, and
+including it (along with operation/step context) in every log line and error.
+
+Usage:
+    svc_a.handle(request)   # generates or accepts correlation_id
+    svc_b.handle(request)   # receives it via header, never regenerates
+"""
+
+import logging
+import uuid
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+CORRELATION_HEADER = "X-Correlation-ID"
+
+
+# ---------------------------------------------------------------------------
+# Correlation ID management
+# ---------------------------------------------------------------------------
+@dataclass
+class RequestContext:
+    """Carries the correlation ID and operation context through both services."""
+
+    correlation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    operation: Optional[str] = None
+    step: Optional[str] = None
+    metadata: Dict[str, str] = field(default_factory=dict)
+
+    def as_dict(self) -> Dict[str, str]:
+        return {
+            "correlation_id": self.correlation_id,
+            "operation": self.operation or "unknown",
+            "step": self.step or "unknown",
+            **self.metadata,
+        }
+
+
+def get_or_create_correlation_id(inbound_headers: Optional[Dict[str, str]]) -> str:
+    """Accept an inbound correlation ID, or generate one if absent.
+
+    Never regenerates — if the caller provides one, we keep it.
+    """
+    if inbound_headers and CORRELATION_HEADER in inbound_headers:
+        candidate = inbound_headers[CORRELATION_HEADER]
+        if candidate:  # non-empty
+            return candidate
+    return uuid.uuid4().hex
+
+
+# ---------------------------------------------------------------------------
+# Logging helper — used by both services
+# ---------------------------------------------------------------------------
+def log_with_context(level: int, msg: str, ctx: RequestContext, **extra: object) -> None:
+    """Emit a log line that always includes correlation_id, operation, step."""
+    logger.log(level, msg, extra={"context": ctx.as_dict(), **extra})
+
+
+# ---------------------------------------------------------------------------
+# Service A — entry point
+# ---------------------------------------------------------------------------
+class ServiceA:
+    def handle(self, request: Dict[str, object], inbound_headers: Dict[str, str]) -> None:
+        ctx = RequestContext(
+            correlation_id=get_or_create_correlation_id(inbound_headers),
+            operation="request_flow",
+            step="service_a_entry",
+            metadata={"source": "svc_a"},
+        )
+        log_with_context(logging.INFO, "Service A received request", ctx)
+
+        # Outbound headers for calling Service B — same correlation ID, never new.
+        outbound_headers = {CORRELATION_HEADER: ctx.correlation_id}
+
+        try:
+            # Simulate downstream call
+            self._call_service_b(ctx, outbound_headers)
+            ctx.step = "service_a_done"
+            log_with_context(logging.INFO, "Service A completed", ctx)
+        except Exception as e:
+            # Wrap with step + operation context, keep correlation ID
+            ctx.step = "service_a_failure"
+            raise RequestError(
+                f"Service A failed at step '{ctx.step}' for operation '{ctx.operation}' "
+                f"(correlation_id={ctx.correlation_id}): {e}",
+                ctx,
+            ) from e
+
+    def _call_service_b(self, ctx: RequestContext, outbound_headers: Dict[str, str]) -> None:
+        svc_b = ServiceB()
+        svc_b.handle({"payload": "data"}, outbound_headers, ctx.correlation_id)
+
+
+# ---------------------------------------------------------------------------
+# Service B — downstream
+# ---------------------------------------------------------------------------
+class ServiceB:
+    def handle(self, request: Dict[str, object], inbound_headers: Dict[str, str], correlation_id: str) -> None:
+        # Trust the inbound correlation ID — never generate a new one.
+        ctx = RequestContext(
+            correlation_id=correlation_id,
+            operation="request_flow",
+            step="service_b_entry",
+            metadata={"source": "svc_b"},
+        )
+        log_with_context(logging.INFO, "Service B received request", ctx)
+
+        try:
+            self._do_work(ctx)
+            ctx.step = "service_b_done"
+            log_with_context(logging.INFO, "Service B completed", ctx)
+        except Exception as e:
+            ctx.step = "service_b_failure"
+            raise RequestError(
+                f"Service B failed at step '{ctx.step}' for operation '{ctx.operation}' "
+                f"(correlation_id={ctx.correlation_id}): {e}",
+                ctx,
+            ) from e
+
+    def _do_work(self, ctx: RequestContext) -> None:
+        # Simulate business logic
+        raise ValueError("simulated failure")  # for demo
+
+
+# ---------------------------------------------------------------------------
+# Error type carrying full context — what the operator sees
+# ---------------------------------------------------------------------------
+class RequestError(Exception):
+    """Exception with context so the operator can trace the failing request.
+
+    - Always includes correlation_id (same across both services)
+    - Always includes operation and failing step
+    - Never includes sensitive data (only generic metadata keys)
+    """
+
+    def __init__(self, message: str, ctx: RequestContext):
+        super().__init__(message)
+        self.correlation_id = ctx.correlation_id
+        self.operation = ctx.operation
+        self.step = ctx.step
+        self.context = ctx.as_dict()
+
+    def __str__(self) -> str:
+        return (
+            f"RequestError(correlation_id={self.correlation_id}, "
+            f"operation={self.operation}, step={self.step}, msg={super().__str__()})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Central error handler — one place to log/format for the operator
+# ---------------------------------------------------------------------------
+def handle_error(exc: Exception, ctx: Optional[RequestContext] = None) -> Dict[str, str]:
+    """Central handler: log full context and return a structured error for operator.
+
+    - If RequestError, we already have correlation_id/operation/step.
+    - If bare Exception with no ctx, log at ERROR with whatever we have, but
+      note that correlation_id is missing so the operator knows it's incomplete.
+    """
+    if isinstance(exc, RequestError):
+        # Everything we need is on the exception
+        error_context = {
+            "correlation_id": exc.correlation_id,
+            "operation": exc.operation,
+            "step": exc.step,
+            "error_type": "RequestError",
+        }
+        logger.error(
+            "Request failed: %s", exc,
+            extra={"context": {**exc.context, **error_context}},
+        )
+        return {**exc.context, **error_context}
+
+    # Bare exception — we don't have context; log clearly so operator knows
+    logger.error(
+        "Unhandled exception (no correlation context attached): %s", exc,
+        extra={"context": {"correlation_id": "UNKNOWN", "operation": "unknown", "step": "unknown"}},
+    )
+    return {
+        "correlation_id": "UNKNOWN",
+        "operation": "unknown",
+        "step": "unknown",
+        "error_type": type(exc).__name__,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Demo (example usage)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    svc_a = ServiceA()
+    try:
+        svc_a.handle({"example": True}, inbound_headers={})  # no inbound ID → generate
+    except RequestError as e:
+        handle_error(e)
+    # Now operator can grep logs for correlation_id=... to see both services
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A random hex ID generated at Service A entry if none provided; accepted from inbound header otherwise. Created in ServiceA.handle."
+          location: "src/handler.py:38-46, ServiceA.handle:64"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed in the X-Correlation-ID header to ServiceB, which reads it and never regenerates; both services use the same RequestContext object."
+          location: "src/handler.py:76 (outbound_headers), ServiceB.handle:94"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes. log_with_context always adds correlation_id, operation, step. RequestError carries it and handle_error logs it."
+          location: "src/handler.py:50-57, handle_error:150-160"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new uuid4 hex is generated; it becomes the one ID for the entire flow, never regenerated downstream."
+          location: "src/handler.py:44-46"
+      unanswered:
+        - question: "What value identifies one logical request, and where is it created?"
+          reason: "Already answered above."
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes. RequestError message includes operation and step; context dict also carries both for structured logging."
+          location: "src/handler.py:136-140, handle_error:150-160"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes. Correlation ID is in the message and in structured context; operator greps logs by correlation_id to see both services."
+          location: "src/handler.py:143-147, handle_error:155"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes. Only metadata keys explicitly added are included; no request payload or credentials are logged. validate in tests."
+          location: "src/handler.py:127-129, context.as_dict"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached before wrapping — ctx is updated with failing step, then RequestError is raised with that ctx."
+          location: "src/handler.py:81-86"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "Not applicable in this sync handler; retries are external. On failure, RequestError propagates and handle_error logs it permanently."
+          location: "src/handler.py:150-160"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Not applicable here — this is request/response, not messaging. No DLQ is used; errors are logged for human review."
+          location: "not-applicable"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Not applicable; errors are logged with correlation ID so operator can trace via log search during replay."
+          location: "not-applicable"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Not applicable; in this handler, replay means re-invoking the request, which generates a new correlation ID if absent."
+          location: "not-applicable"
+      unanswered:
+        - question: "What happens after the last retry attempt?"
+          reason: "Retries are outside this handler's scope; it only deals with final exception handling, not retry budgets."
+        - question: "What identifies a message as dead, and where does it go?"
+          reason: "No messaging/queue involved — direct synchronous service calls only."
+        - question: "How is a dead letter surfaced to an operator?"
+          reason: "Surfacing is via structured error logs with correlation ID, not a DLQ monitor."
+        - question: "Can a dead letter be reprocessed safely?"
+          reason: "Reprocessing here means re-sending the original request, which the operator can do manually."
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any exception from ServiceB counts as failure; window is per-request — no aggregate window defined in this handler."
+          location: "src/handler.py:104-111 (ServiceB raising)"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Not implemented here — circuit breaker is out of scope for a simple two-service sync handler; failure propagates immediately."
+          location: "not-applicable"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not applicable — no circuit breaker state machine in this artifact."
+          location: "not-applicable"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller (ServiceA) fails fast with RequestError; no retry or alternative path defined."
+          location: "src/handler.py:78-86"
+      unanswered:
+        - question: "What counts as a failure, and over what window?"
+          reason: "This handler is about error handling, not failure counting; failure semantics are defined by the business layer."
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          reason: "Circuit breaker is an architectural concern beyond error handler responsibilities; require a separate component."
+        - question: "How does the half-open state test recovery?"
+          reason: "Not applicable — no circuit breaker implemented in this snippet."
+        - question: "What does the caller do while the circuit is open?"
+          reason: "In this handler, there is no circuit state; failure always propagates to operator via RequestError."
+  not_applied: []
+```

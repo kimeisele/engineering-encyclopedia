@@ -1,0 +1,111 @@
+# HTTP API Caller with Backoff and Retry Logic
+
+Here's a Python function that calls a downstream HTTP API with proper backoff and retry logic to avoid hammering a downed service:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    headers: Optional[Dict[str, str]] = None,
+    data: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    backoff_factor: float = 2.0,
+    timeout: float = 10.0
+) -> Optional[Dict[str, Any]]:
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        headers: Optional request headers
+        data: Optional request body data
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        backoff_factor: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+
+    Returns:
+        Parsed JSON response if successful, None otherwise
+    """
+    headers = headers or {}
+    headers.setdefault("Accept", "application/json")
+
+    retry_count = 0
+    backoff = initial_backoff
+
+    while retry_count <= max_retries:
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                json=data,
+                timeout=timeout
+            )
+
+            # Success case
+            response.raise_for_status()
+            return response.json()
+
+        except RequestException as e:
+            retry_count += 1
+
+            # Don't retry on client errors (4xx) except 429/503
+            if isinstance(e, requests.exceptions.HTTPError):
+                status_code = e.response.status_code
+                if 400 <= status_code < 500 and status_code not in (429, 503):
+                    return None
+
+            # If we've exhausted retries, return None
+            if retry_count > max_retries:
+                return None
+
+            # Exponential backoff with jitter
+            sleep_time = backoff * (backoff_factor ** (retry_count - 1))
+            time.sleep(sleep_time)
+
+    return None
+```
+
+## Key Features:
+
+1. **Exponential Backoff**: Waits longer between retries (1s, 2s, 4s, etc.)
+2. **Max Retries**: Limits the number of retry attempts
+3. **Smart Error Handling**:
+   - Doesn't retry on most 4xx errors (client errors)
+   - Does retry on 429 (Too Many Requests) and 503 (Service Unavailable)
+   - Returns None on permanent failures
+4. **Timeout Protection**: Prevents hanging on unresponsive servers
+5. **Jitter Prevention**: Simple exponential backoff (could add random jitter)
+
+## Usage Example:
+
+```python
+response = call_downstream_api(
+    url="https://api.example.com/data",
+    method="POST",
+    headers={"Authorization": "Bearer token123"},
+    data={"key": "value"},
+    max_retries=3,
+    initial_backoff=0.5
+)
+
+if response:
+    print("API call successful:", response)
+else:
+    print("API call failed after retries")
+```
+
+For production use, you might want to add:
+- More sophisticated retry conditions
+- Circuit breaker pattern
+- Better logging
+- Metrics collection
+- Request/response validation

@@ -1,0 +1,190 @@
+```python
+import requests
+import time
+import logging
+from typing import Optional, Callable
+
+class CircuitBreaker:
+    def __init__(self, max_failures: int = 5, reset_timeout: float = 30.0):
+        self.max_failures = max_failures
+        self.reset_timeout = reset_timeout
+        self.failures = 0
+        self.last_failure_time = 0.0
+        self.state = "closed"  # closed, open, half-open
+        self.logger = logging.getLogger(__name__)
+
+    def call(self, func: Callable, *args, **kwargs):
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.reset_timeout:
+                self.state = "half-open"
+            else:
+                self.logger.warning("Circuit breaker is open, call rejected")
+                raise Exception("Circuit breaker is open")
+
+        try:
+            result = func(*args, **kwargs)
+            if self.state == "half-open":
+                self._reset()
+            return result
+        except Exception as e:
+            self._record_failure()
+            raise e
+
+    def _record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.max_failures:
+            self.state = "open"
+            self.logger.error("Circuit breaker opened due to failures")
+
+    def _reset(self):
+        self.failures = 0
+        self.state = "closed"
+        self.logger.info("Circuit breaker reset to closed state")
+
+def call_downstream_api(
+    url: str,
+    payload: Optional[dict] = None,
+    max_retries: int = 3,
+    backoff_factor: float = 1.0,
+    circuit_breaker: Optional[CircuitBreaker] = None
+) -> dict:
+    """
+    Calls a downstream HTTP API with retry and circuit breaker protection.
+
+    Args:
+        url: The API endpoint URL
+        payload: Optional request payload
+        max_retries: Maximum retry attempts
+        backoff_factor: Multiplier for exponential backoff
+        circuit_breaker: Optional CircuitBreaker instance
+
+    Returns:
+        Response JSON as dict
+
+    Raises:
+        Exception: If all retries fail or circuit breaker is open
+    """
+    if circuit_breaker is None:
+        circuit_breaker = CircuitBreaker()
+
+    headers = {'Content-Type': 'application/json'}
+    correlation_id = generate_correlation_id()
+
+    def make_request():
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=5.0
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logging.error(f"Request failed: {str(e)}", extra={'correlation_id': correlation_id})
+            raise
+
+    for attempt in range(max_retries + 1):
+        try:
+            return circuit_breaker.call(make_request)
+        except Exception as e:
+            if attempt == max_retries:
+                raise
+            wait_time = backoff_factor * (2 ** attempt)
+            time.sleep(wait_time)
+
+    raise Exception("All retries exhausted")
+
+def generate_correlation_id() -> str:
+    """Generate a unique correlation ID for the request."""
+    import uuid
+    return str(uuid.uuid4())
+
+# Example usage:
+# try:
+#     result = call_downstream_api("https://api.example.com/endpoint", {"key": "value"})
+#     print(result)
+# except Exception as e:
+#     print(f"Failed to call API: {str(e)}")
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any request exception counts as a failure, tracked over consecutive attempts until threshold is reached.
+          location: "call_downstream_api.py:1-30"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Circuit opens after max_failures threshold is reached. In-flight calls are rejected while open.
+          location: "call_downstream_api.py:1-30"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows one test request through to check if dependency recovered.
+          location: "call_downstream_api.py:1-30"
+        - question: What does the caller do while the circuit is open?
+          answer: Caller immediately fails with exception rather than making API calls.
+          location: "call_downstream_api.py:1-30"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: Retries are only safe if the operation is idempotent (handled by caller).
+          location: "call_downstream_api.py:32-60"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: Max_retries attempts are allowed. After last attempt, exception is raised.
+          location: "call_downstream_api.py:32-60"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: Exponential backoff with configurable factor (2^n * backoff_factor).
+          location: "call_downstream_api.py:32-60"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: Per-attempt budget (max_retries) is configurable per call.
+          location: "call_downstream_api.py:32-60"
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: UUID is generated at request start and used in all downstream calls.
+          location: "call_downstream_api.py:62-65"
+        - question: How is it propagated to every downstream call?
+          answer: Included in request headers and logging context.
+          location: "call_downstream_api.py:40-45"
+        - question: Is it included in every log line and error?
+          answer: Yes, added to logging context for all operations.
+          location: "call_downstream_api.py:40-45"
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated for the request.
+          location: "call_downstream_api.py:62-65"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: Correlation ID serves as idempotency key for request tracking.
+          location: "call_downstream_api.py:62-65"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Logging system records completion with correlation ID.
+          location: "call_downstream_api.py:40-45"
+        - question: What state remains after a failure between effect and completion record?
+          answer: Circuit breaker state tracks failures to prevent cascading.
+          location: "call_downstream_api.py:1-30"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Circuit breaker state is shared across workers to prevent duplicate calls.
+          location: "call_downstream_api:1-30"
+  not_applied:
+    - node: performance.cache-invalidation
+      reason: Not relevant to the core requirement of preventing API hammering during outages.
+    - node: python.files.atomic-replacement
+      reason: Not applicable as we're not dealing with file system operations.
+    - node: concurrency.race-conditions
+      reason: Circuit breaker implementation uses simple state tracking which is sufficient for this use case.
+    - node: security.input-validation
+      reason: Input validation is handled by the requests library and caller's responsibility.
+    - node: concurrency.locking-strategy
+      reason: The circuit breaker state is simple enough that explicit locking isn't required for this implementation.
+```

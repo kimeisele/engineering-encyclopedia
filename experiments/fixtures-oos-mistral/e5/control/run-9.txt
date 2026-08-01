@@ -1,0 +1,270 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request as it flows between two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured logging with request context
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection for observability
+
+## Implementation (Python Example)
+
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+import time
+import json
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("cross_service_tracer")
+
+@dataclass
+class ServiceContext:
+    """Holds context about a service's involvement in a request"""
+    service_name: str
+    request_id: str
+    correlation_id: str
+    timestamp: float
+    additional_metadata: Dict[str, Any] = None
+
+class CrossServiceError(Exception):
+    """Custom exception for cross-service errors"""
+    def __init__(self, message: str, context: ServiceContext, original_exception: Optional[Exception] = None):
+        super().__init__(message)
+        self.context = context
+        self.original_exception = original_exception
+        self.timestamp = time.time()
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert error to serializable dict for logging"""
+        return {
+            "error": str(self),
+            "context": {
+                "service": self.context.service_name,
+                "request_id": self.context.request_id,
+                "correlation_id": self.context.correlation_id,
+                "timestamp": self.context.timestamp,
+                "error_timestamp": self.timestamp
+            },
+            "original_exception": str(self.original_exception) if self.original_exception else None
+        }
+
+class CrossServiceErrorHandler:
+    """Handles errors across service boundaries with tracing capabilities"""
+
+    def __init__(self):
+        self.metrics = {
+            "total_errors": 0,
+            "service_errors": {},
+            "error_types": {}
+        }
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for request tracing"""
+        return str(uuid.uuid4())
+
+    def create_service_context(self, service_name: str, correlation_id: str = None) -> ServiceContext:
+        """Create context for the current service's involvement in a request"""
+        return ServiceContext(
+            service_name=service_name,
+            request_id=str(uuid.uuid4()),
+            correlation_id=correlation_id or self.generate_correlation_id(),
+            timestamp=time.time(),
+            additional_metadata={}
+        )
+
+    def log_service_error(self, error: CrossServiceError, severity: str = "ERROR"):
+        """Log an error with full context for tracing"""
+        self.metrics["total_errors"] += 1
+        self.metrics["service_errors"][error.context.service_name] = self.metrics["service_errors"].get(error.context.service_name, 0) + 1
+        self.metrics["error_types"][type(error).__name__] = self.metrics["error_types"].get(type(error).__name__, 0) + 1
+
+        log_method = getattr(logger, severity.lower())
+        log_method(json.dumps(error.to_dict(), indent=2))
+
+    def handle_service_call(
+        self,
+        service_name: str,
+        operation: str,
+        callable_func,
+        correlation_id: str = None,
+        **kwargs
+    ) -> Any:
+        """
+        Execute a service call with error handling and tracing
+
+        Args:
+            service_name: Name of the service being called
+            operation: Description of the operation being performed
+            callable_func: The function to call
+            correlation_id: Existing correlation ID (for chained requests)
+            **kwargs: Arguments to pass to the callable
+
+        Returns:
+            Result of the callable function
+
+        Raises:
+            CrossServiceError: If the call fails
+        """
+        context = self.create_service_context(service_name, correlation_id)
+
+        logger.info(f"Starting {operation} in {service_name}", extra={
+            "correlation_id": context.correlation_id,
+            "request_id": context.request_id,
+            "service": service_name
+        })
+
+        try:
+            result = callable_func(**kwargs)
+            logger.info(f"Completed {operation} in {service_name}", extra={
+                "correlation_id": context.correlation_id,
+                "request_id": context.request_id,
+                "service": service_name
+            })
+            return result
+        except Exception as e:
+            error = CrossServiceError(
+                message=f"Error in {operation} for {service_name}: {str(e)}",
+                context=context,
+                original_exception=e
+            )
+            self.log_service_error(error)
+            raise error
+
+    def handle_chained_request(
+        self,
+        first_service: str,
+        second_service: str,
+        first_operation: str,
+        second_operation: str,
+        first_callable,
+        second_callable,
+        **kwargs
+    ) -> Any:
+        """
+        Handle a request that spans two services with full tracing
+
+        Args:
+            first_service: Name of first service
+            second_service: Name of second service
+            first_operation: Description of first operation
+            second_operation: Description of second operation
+            first_callable: Function to call in first service
+            second_callable: Function to call in second service
+            **kwargs: Arguments to pass to both callables
+
+        Returns:
+            Combined result from both services
+
+        Raises:
+            CrossServiceError: If either service call fails
+        """
+        # First service call
+        first_result = self.handle_service_call(
+            service_name=first_service,
+            operation=first_operation,
+            callable_func=first_callable,
+            **kwargs
+        )
+
+        # Pass correlation ID to second service
+        correlation_id = kwargs.get('correlation_id', None)
+
+        # Second service call
+        second_result = self.handle_service_call(
+            service_name=second_service,
+            operation=second_operation,
+            callable_func=second_callable,
+            correlation_id=correlation_id,
+            **kwargs
+        )
+
+        return {
+            "first_service_result": first_result,
+            "second_service_result": second_result,
+            "correlation_id": correlation_id
+        }
+
+    def get_tracing_info(self, correlation_id: str) -> Dict[str, Any]:
+        """Retrieve all logged information for a specific correlation ID"""
+        # In a real implementation, this would query your logging system
+        # This is a simplified version
+        return {
+            "correlation_id": correlation_id,
+            "metrics": self.metrics,
+            "related_logs": []  # Would contain actual log entries in real implementation
+        }
+```
+
+## Usage Example
+
+```python
+# Example services
+def service_a_operation(data: dict) -> dict:
+    # Simulate some work
+    if data.get("fail", False):
+        raise ValueError("Service A encountered an error")
+    return {"status": "success", "data": data}
+
+def service_b_operation(data: dict) -> dict:
+    # Simulate some work
+    if data.get("fail", False):
+        raise RuntimeError("Service B encountered an error")
+    return {"status": "success", "processed_data": data}
+
+# Initialize error handler
+error_handler = CrossServiceErrorHandler()
+
+try:
+    # Execute a chained request across two services
+    result = error_handler.handle_chained_request(
+        first_service="ServiceA",
+        second_service="ServiceB",
+        first_operation="Data Processing",
+        second_operation="Data Enrichment",
+        first_callable=service_a_operation,
+        second_callable=service_b_operation,
+        data={"key": "value"},
+        fail=True  # Uncomment to simulate failure
+    )
+except CrossServiceError as e:
+    print(f"Request failed: {e}")
+    print("Full error context:")
+    print(json.dumps(e.to_dict(), indent=2))
+
+    # Get all tracing info for this correlation ID
+    tracing_info = error_handler.get_tracing_info(e.context.correlation_id)
+    print("\nTracing information:")
+    print(json.dumps(tracing_info, indent=2))
+```
+
+## Key Features
+
+1. **Correlation IDs**: Each request gets a unique ID that propagates through both services
+2. **Structured Logging**: All logs include the correlation ID for easy filtering
+3. **Error Context**: Errors carry full context about where they occurred
+4. **Metrics Collection**: Tracks error rates by service and error type
+5. **Chained Request Handling**: Specialized method for two-service operations
+6. **Tracing Information**: Ability to retrieve all logs related to a specific request
+
+## Integration with Observability Tools
+
+For production use, you would want to:
+
+1. Replace the simple logging with a proper logging system (ELK, Splunk, etc.)
+2. Add metrics collection (Prometheus, Datadog, etc.)
+3. Integrate with distributed tracing systems (Jaeger, Zipkin, etc.)
+4. Add health check endpoints that can query error rates
+5. Implement alerting based on error patterns
+
+This implementation provides a solid foundation for tracing requests across service boundaries while maintaining good error handling practices.

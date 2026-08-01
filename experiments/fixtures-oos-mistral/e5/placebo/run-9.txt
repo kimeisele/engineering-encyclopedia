@@ -1,0 +1,122 @@
+```python
+import logging
+from typing import Dict, Any, Optional
+import uuid
+
+# Configure structured logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("cross_service_trace")
+
+class CrossServiceError(Exception):
+    """Base error class for cross-service operations with tracing context."""
+    def __init__(self, message: str, context: Dict[str, Any]):
+        self.context = context
+        super().__init__(message)
+
+class ServiceAError(CrossServiceError):
+    """Error specific to Service A operations."""
+    pass
+
+class ServiceBError(CrossServiceError):
+    """Error specific to Service B operations."""
+    pass
+
+def trace_request(service_a_request_id: str, service_b_request_id: str) -> None:
+    """
+    Trace a request across Service A and Service B with unified error handling.
+
+    Args:
+        service_a_request_id: Unique identifier for the request in Service A
+        service_b_request_id: Unique identifier for the request in Service B
+    """
+    try:
+        # Simulate Service A operation
+        try:
+            # ... Service A processing ...
+            if something_fails_in_a():
+                raise ServiceAError(
+                    "Service A processing failed during data validation",
+                    {
+                        "request_id": service_a_request_id,
+                        "step": "data_validation",
+                        "service": "A",
+                        "state": {"records_processed": 42}
+                    }
+                )
+        except ServiceAError as e:
+            # Enrich context with cross-service correlation
+            e.context.update({
+                "correlated_request_id": service_b_request_id,
+                "trace_id": str(uuid.uuid4())
+            })
+            raise
+
+        # Simulate Service B operation
+        try:
+            # ... Service B processing ...
+            if something_fails_in_b():
+                raise ServiceBError(
+                    "Service B processing failed during external API call",
+                    {
+                        "request_id": service_b_request_id,
+                        "step": "external_api_call",
+                        "service": "B",
+                        "state": {"api_response_time": "5.2s"}
+                    }
+                )
+        except ServiceBError as e:
+            # Enrich context with cross-service correlation
+            e.context.update({
+                "correlated_request_id": service_a_request_id,
+                "trace_id": str(uuid.uuid4())
+            })
+            raise
+
+    except CrossServiceError as e:
+        # Unified error handler that preserves all context
+        logger.error(
+            "Cross-service operation failed: %s",
+            str(e),
+            extra={
+                "error_type": type(e).__name__,
+                "context": e.context,
+                "message": str(e)
+            }
+        )
+        raise
+
+# Example usage
+if __name__ == "__main__":
+    try:
+        trace_request("req_a_12345", "req_b_67890")
+    except Exception:
+        pass  # Error already logged with full context
+---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, each error includes the service, operation step, and request ID."
+          location: "cross_service_trace.py:25,45"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, both service-specific and correlated request IDs are included."
+          location: "cross_service_trace.py:27,47"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, only operational state is included, no PII or secrets."
+          location: "cross_service_trace.py:25-47"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at raise time and preserved through wrapping."
+          location: "cross_service_trace.py:33-53"
+  not_applied:
+    - node: observability.error-context
+      reason: "Duplicate node in context pack - already applied"
+    - node: observability.error-context
+      reason: "Duplicate node in context pack - already applied"
+    - node: observability.error-context
+      reason: "Duplicate node in context pack - already applied"
+```

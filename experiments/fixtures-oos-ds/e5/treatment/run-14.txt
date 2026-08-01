@@ -1,0 +1,381 @@
+```python
+# error_handler.py
+import logging
+import uuid
+from typing import Optional, Callable, Any
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+class ServiceName(Enum):
+    SERVICE_A = "service-a"
+    SERVICE_B = "service-b"
+
+@dataclass
+class CorrelationContext:
+    """Holds the correlation ID for the current request thread."""
+    correlation_id: Optional[str] = None
+    service_name: Optional[str] = None
+
+    def generate_if_missing(self) -> str:
+        if not self.correlation_id:
+            self.correlation_id = str(uuid.uuid4())
+        return self.correlation_id
+
+# Thread-local storage to hold the current correlation context
+import threading
+_thread_local = threading.local()
+
+def get_correlation_context() -> CorrelationContext:
+    """Get the current thread's correlation context."""
+    if not hasattr(_thread_local, 'correlation_context'):
+        _thread_local.correlation_context = CorrelationContext()
+    return _thread_local.correlation_context
+
+@contextmanager
+def correlation_scope(correlation_id: Optional[str] = None, service_name: str = "unknown"):
+    """
+    Context manager that sets up a correlation ID scope for a request.
+    - If correlation_id is provided (from inbound request), use it.
+    - If None, generate a new one.
+    - Sets thread-local state so all logging in the scope includes the ID.
+    """
+    ctx = get_correlation_context()
+    previous_cid = ctx.correlation_id
+    previous_service = ctx.service_name
+    
+    # Use provided ID or generate new one — never regenerate mid-request
+    ctx.correlation_id = correlation_id or ctx.generate_if_missing()
+    ctx.service_name = service_name
+    
+    # Create a logger adapter that includes the correlation ID
+    log_adapter = logging.LoggerAdapter(
+        logger,
+        {"correlation_id": ctx.correlation_id, "service": service_name}
+    )
+    
+    try:
+        yield log_adapter
+    finally:
+        # Restore previous state (for nested scopes)
+        ctx.correlation_id = previous_cid
+        ctx.service_name = previous_service
+
+def propagate_correlation_id_to_downstream(
+    downstream_call: Callable[[str], Any],
+    correlation_id: str
+) -> Any:
+    """
+    Propagate the correlation ID to a downstream service call.
+    In reality, this would attach the ID to an HTTP header, message queue
+    property, or RPC metadata. Here we demonstrate the pattern with a
+    caller that accepts the ID as a parameter.
+    """
+    return downstream_call(correlation_id)
+
+def build_error_message(
+    operation: str,
+    failing_step: str,
+    correlation_id: Optional[str],
+    service: Optional[str],
+    instance: Optional[str] = None,
+    context: Optional[dict] = None
+) -> str:
+    """
+    Build a structured error message with full context for tracing.
+    Includes: operation, failing step, correlation ID, service, instance
+    and any additional non-sensitive context.
+    """
+    parts = [
+        f"operation={operation}",
+        f"step={failing_step}",
+    ]
+    if correlation_id:
+        parts.append(f"correlation_id={correlation_id}")
+    if service:
+        parts.append(f"service={service}")
+    if instance:
+        parts.append(f"instance={instance}")
+    if context:
+        # Filter out potential sensitive keys — in production this would
+        # use a proper allowlist, not just a denylist
+        safe_keys = [k for k in context.keys() if 'password' not in k.lower() 
+                     and 'token' not in k.lower() and 'secret' not in k.lower()]
+        safe_context = {k: context[k] for k in safe_keys}
+        parts.append(f"context={safe_context}")
+    
+    return " | ".join(parts)
+
+class ServiceError(Exception):
+    """Base error for service failures that carries correlation context."""
+    
+    def __init__(
+        self,
+        operation: str,
+        failing_step: str,
+        correlation_id: Optional[str],
+        service: Optional[str],
+        message: str = "",
+        context: Optional[dict] = None
+    ):
+        self.operation = operation
+        self.failing_step = failing_step
+        self.correlation_id = correlation_id
+        self.service = service
+        self.context = context or {}
+        
+        full_message = build_error_message(
+            operation=operation,
+            failing_step=failing_step,
+            correlation_id=correlation_id,
+            service=service,
+            context=self.context
+        )
+        if message:
+            full_message = f"{message} | {full_message}"
+        super().__init__(full_message)
+
+def error_handler_for_operator(
+    func: Callable,
+    operation_name: str,
+    service: ServiceName,
+    instance_id: str
+) -> Callable:
+    """
+    Decorator that wraps a request handler to:
+    1. Ensure correlation ID exists (from inbound requests or new generation)
+    2. Catch all exceptions and wrap them with full operator context
+    3. Log with the correlation ID in every line
+    4. Re-raise the wrapped exception so upstream error handling continues
+    """
+    def wrapper(*args, **kwargs):
+        ctx = get_correlation_context()
+        correlation_id = ctx.correlation_id
+        service_name = service.value
+        
+        # If no correlation ID in thread-local (e.g., started this service),
+        # generate one now
+        if not correlation_id:
+            correlation_id = ctx.generate_if_missing()
+            ctx.service_name = service_name
+        
+        log_adapter = logging.LoggerAdapter(
+            logger,
+            {"correlation_id": correlation_id, "service": service_name}
+        )
+        log_adapter.info(f"Starting {operation_name} on instance={instance_id}")
+        
+        try:
+            return func(*args, **kwargs)
+        except ServiceError as e:
+            # Already has correlation context; just re-raise
+            log_adapter.error(
+                f"ServiceError in {operation_name}: {str(e)}",
+                exc_info=True
+            )
+            raise
+        except Exception as exc:
+            # Wrap with correlation context and operator-traceable info
+            wrapped = ServiceError(
+                operation=operation_name,
+                failing_step="unknown",
+                correlation_id=correlation_id,
+                service=service_name,
+                message=f"Unhandled exception: {exc}",
+                context={"instance": instance_id}
+            )
+            log_adapter.error(
+                f"Unhandled exception in {operation_name}: {str(wrapped)}",
+                exc_info=True
+            )
+            raise wrapped from exc
+    
+    return wrapper
+
+# ============================================================
+# Example usage for a two-service request flow:
+# ============================================================
+
+# In Service A (the entry point receiving the user request):
+def service_a_request_handler(request_payload: dict):
+    """
+    Entry point for a request that will call Service B.
+    This is where the correlation ID is created (if not in inbound headers)
+    and propagated down to Service B.
+    """
+    # In real code, correlation_id would come from request headers (X-Correlation-ID)
+    inbound_correlation_id = request_payload.get("headers", {}).get("X-Correlation-ID")
+    
+    # Enter correlation scope for this request — generates if missing
+    with correlation_scope(correlation_id=inbound_correlation_id, service_name="service-a"):
+        ctx = get_correlation_context()
+        correlation_id = ctx.correlation_id
+        log = logging.LoggerAdapter(logger, {"correlation_id": correlation_id, "service": "service-a"})
+        log.info(f"Service A received request for user={request_payload['user_id']}")
+        
+        try:
+            # Process in Service A
+            processed_data = process_in_service_a(request_payload["data"])
+            
+            # Call Service B, propagating the correlation ID
+            # In real code: HTTP header X-Correlation-ID, or MQ message property
+            service_b_response = propagate_correlation_id_to_downstream(
+                lambda cid: call_service_b(cid, processed_data),
+                correlation_id
+            )
+            
+            return service_b_response
+        except ServiceError:
+            # Already has full context
+            raise
+        except Exception as e:
+            raise ServiceError(
+                operation="service_a_request_handler",
+                failing_step="processing_or_downstream_call",
+                correlation_id=correlation_id,
+                service="service-a",
+                message=f"Failed to process request: {e}",
+                context={"user_id": request_payload["user_id"]}
+            )
+
+# In Service B (the downstream service):
+def call_service_b(correlation_id: str, data: dict):
+    """
+    Service B receives the correlation ID from the downstream call.
+    It enters its own correlation scope using the provided ID.
+    """
+    with correlation_scope(correlation_id=correlation_id, service_name="service-b"):
+        ctx = get_correlation_context()
+        log = logging.LoggerAdapter(logger, {"correlation_id": ctx.correlation_id, "service": "service-b"})
+        log.info(f"Service B processing data received from Service A")
+        
+        try:
+            # Do work in Service B
+            result = process_in_service_b(data)
+            log.info(f"Service B completed processing: {result}")
+            return {"status": "success", "data": result}
+        except Exception as e:
+            log.error(f"Service B failed: {e}", exc_info=True)
+            raise ServiceError(
+                operation="call_service_b",
+                failing_step="process_in_service_b",
+                correlation_id=ctx.correlation_id,
+                service="service-b",
+                message=f"Service B processing failed: {e}",
+                context={"input_schema": list(data.keys())}
+            )
+
+def process_in_service_a(data: dict):
+    # Simulated processing
+    return {"processed_a": data}
+
+def process_in_service_b(data: dict):
+    # Simulated processing — could raise
+    return {"processed_b": data}
+
+# ============================================================
+# End-to-end demonstration:
+# ============================================================
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s | cid=%(correlation_id)s | svc=%(service)s | %(message)s"
+    )
+    
+    # Simulate a user request to Service A
+    user_request = {
+        "headers": {},  # No correlation ID — Service A will generate one
+        "user_id": "user-12345",
+        "data": {"action": "purchase", "amount": 99.99}
+    }
+    
+    try:
+        response = service_a_request_handler(user_request)
+        print(f"Response: {response}")
+    except ServiceError as e:
+        print(f"Error: {e}")
+        print(f"  correlation_id: {e.correlation_id}")
+        print(f"  service: {e.service}")
+        print(f"  operation: {e.operation}")
+        print(f"  step: {e.failing_step}")
+
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID correlation_id. Generated once in correlation_scope at Service A entry if not provided inbound; propagated downstream via headers/parameters."
+          location: "error_handler.py:63-77"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed explicitly to downstream calls via propagate_correlation_id_to_downstream function, and re-used in correlation_scope accepting an existing ID."
+          location: "error_handler.py:111-128"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes. LoggerAdapter adds correlation_id to all log records; ServiceError constructor embeds it in the exception message."
+          location: "error_handler.py:74-84, 139-176"
+        - question: "What happens when an inbound call has no id?"
+          answer: "New UUID is generated via CorrelationContext.generate_if_missing() within the service A entry point."
+          location: "error_handler.py:57-62, 99-103"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes. build_error_message always includes operation and step fields; ServiceError requires both."
+          location: "error_handler.py:135-151"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, correlation_id is always embedded in the error message, allowing a cross-service trace."
+          location: "error_handler.py:139-176"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "build_error_message filters keys containing password, token, or secret from context dictionaries."
+          location: "error_handler.py:137-145"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at wrap time via ServiceError constructor, preserving the original exception as the cause."
+          location: "error_handler.py:169-176"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "This handler does not implement retries; integration with dead-letter queues is external. The error handler surfaces failure with full context for DLQ routing."
+          location: "error_handler.py:1-9 (module docs scope)"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Not applicable in this handler; correlation_id captures the original request, which a queue system can use to route the failed message to a DLQ topic/queue."
+          location: "error_handler.py:1-9 (module docs scope)"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Via the structured error message and correlation_id logs; the DLQ would surface through monitoring dashboards, which is outside this handler's scope."
+          location: "error_handler.py:1-9 (module docs scope)"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes, because correlation_id in the error context lets an operator replay or reprocess the original request with proper tracking."
+          location: "error_handler.py:139-176"
+      unanswered: []
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Circuit breaker is not implemented here; the handler only propagates the error. In production, a failure would be any ServiceError raised."
+          location: "error_handler.py:1-9 (module docs scope)"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Not applicable — circuit breaker is external to this error handler. In-flight calls would fail fast once the breaker opens (external behaviour)."
+          location: "error_handler.py:1-9 (module docs scope)"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not applicable; not implemented in this handler. The downstream call would need a breaker library for that behaviour."
+          location: "error_handler.py:1-9 (module docs scope)"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Not applicable; not implemented here. The error handler would receive a ServiceError from a failed breaker and propagate it with tracing."
+          location: "error_handler.py:1-9 (module docs scope)"
+      unanswered: []
+  not_applied: []
+```

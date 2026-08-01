@@ -1,0 +1,143 @@
+```python
+import time
+import threading
+from collections import deque
+from typing import Callable, Any, Optional
+
+
+def circuit_breaker_call(
+    http_call: Callable[[], Any],
+    max_failures: int = 3,
+    cooldown_seconds: float = 30.0,
+    min_retry_interval: float = 1.0,
+) -> Any:
+    """
+    Calls a downstream HTTP API with circuit breaker pattern to avoid
+    hammering it while it's down.
+
+    The function tracks consecutive failures. After `max_failures`
+    consecutive failures, it enters an open state (circuit open) where
+    it refuses to call the API for `cooldown_seconds`. After the cooldown,
+    it transitions to half-open state, allowing a single attempt. If that
+    attempt succeeds, the circuit closes; if it fails, it reopens.
+
+    While the circuit is open, the function raises a `CircuitOpenError`
+    immediately (no network call is made).
+
+    Args:
+        http_call: A callable that performs the actual HTTP call.
+                   Should raise an exception on failure.
+        max_failures: Number of consecutive failures before circuit opens.
+        cooldown_seconds: How long to wait before trying again (in seconds).
+        min_retry_interval: Minimum time between calls even when circuit
+                            is closed, to avoid bursts.
+
+    Returns:
+        The result of http_call.
+
+    Raises:
+        CircuitOpenError: When the circuit is open.
+        The original exception from http_call when the circuit is closed
+        or in half-open state and the call fails.
+    """
+    state_lock = threading.Lock()
+    failure_count = 0
+    circuit_open_until = 0.0  # timestamp when circuit will be half-open
+    last_call_time = 0.0
+
+    # We use mutable closure variables
+    def call():
+        nonlocal failure_count, circuit_open_until, last_call_time
+
+        with state_lock:
+            now = time.monotonic()
+
+            # Check circuit state
+            if failure_count >= max_failures:
+                if now < circuit_open_until:
+                    # Circuit is open
+                    raise CircuitOpenError(
+                        f"Circuit open, refusing call. "
+                        f"Will retry after {circuit_open_until - now:.1f}s"
+                    )
+                else:
+                    # Circuit is half-open: allow one trial
+                    failure_count = max_failures - 1  # to re-open easily
+                    # Don't reset failure_count to 0 yet
+                    pass
+            else:
+                # Circuit closed: respect min retry interval
+                wait_time = last_call_time + min_retry_interval - now
+                if wait_time > 0:
+                    time.sleep(wait_time)
+
+        # Perform the actual call (outside lock)
+        try:
+            result = http_call()
+        except Exception as e:
+            with state_lock:
+                failure_count += 1
+                if failure_count >= max_failures:
+                    circuit_open_until = time.monotonic() + cooldown_seconds
+                last_call_time = time.monotonic()
+            # Re-raise the original exception with context
+            raise
+        else:
+            with state_lock:
+                failure_count = 0
+                circuit_open_until = 0.0
+                last_call_time = time.monotonic()
+            return result
+
+    return call()
+
+
+class CircuitOpenError(Exception):
+    """Raised when circuit is open and we refuse to call downstream."""
+
+
+# --- usage example -------------------------------------------------------
+if __name__ == "__main__":
+    # Simulated flaky API
+    failures = 0
+    def flaky_api():
+        global failures
+        failures += 1
+        if failures <= 5:
+            raise ConnectionError("Service down")
+        return {"status": "ok"}
+
+    for i in range(10):
+        try:
+            result = circuit_breaker_call(flaky_api)
+            print(f"Call {i+1}: success {result}")
+        except Exception as e:
+            print(f"Call {i+1}: {type(e).__name__}: {e}")
+        time.sleep(0.2)
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 78f8ed3b745d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes - CircuitOpenError names the operation (circuit breaker) and the failing step (the call refused while open)."
+          location: "circuit_breaker_call:73"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Message includes state (circuit open, retry wait). Operator can correlate by context of the caller. Included in exception text."
+          location: "circuit_breaker_call:74"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes - no request payload, headers, or credentials are included in the error message. Only circuit state and timing."
+          location: "circuit_breaker_call:78"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the point of failure (circuit check) before the exception propagates. Original exception raised on failure without wrapping."
+          location: "circuit_breaker_call:84"
+      unanswered: []
+  not_applied: []
+```

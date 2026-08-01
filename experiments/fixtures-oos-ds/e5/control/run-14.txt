@@ -1,0 +1,367 @@
+Here's a comprehensive error handler with request tracing across two services:
+
+```python
+import uuid
+import logging
+import json
+from datetime import datetime
+from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+from enum import Enum
+
+class ServiceName(Enum):
+    SERVICE_A = "service-a"
+    SERVICE_B = "service-b"
+
+class ErrorSeverity(Enum):
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+@dataclass
+class RequestContext:
+    """Context object to track a request across services"""
+    trace_id: str
+    request_id: str
+    service_name: ServiceName
+    start_time: datetime = field(default_factory=datetime.now)
+    correlation_data: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "request_id": self.request_id,
+            "service_name": self.service_name.value,
+            "start_time": self.start_time.isoformat(),
+            "correlation_data": self.correlation_data,
+            "duration_ms": (datetime.now() - self.start_time).total_seconds() * 1000
+        }
+
+class ErrorHandler:
+    """Centralized error handler for multi-service request tracing"""
+    
+    def __init__(self, service_name: str, log_level: str = "INFO"):
+        self.service_name = service_name
+        self.logger = self._setup_logger(service_name, log_level)
+        self.active_contexts = {}  # Store active request contexts
+        
+    def _setup_logger(self, service_name: str, log_level: str):
+        """Configure structured logging"""
+        logger = logging.getLogger(f"error-handler-{service_name}")
+        logger.setLevel(getattr(logging, log_level))
+        
+        # JSON formatter for structured logs
+        formatter = logging.Formatter(
+            '{"timestamp": "%(asctime)s", "service": "%(name)s", "level": "%(levelname)s", "message": %(message)s}'
+        )
+        
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        return logger
+    
+    def create_context(self, service_name: ServiceName, correlation_data: Optional[Dict] = None) -> RequestContext:
+        """Create a new request context with trace ID"""
+        trace_id = uuid.uuid4().hex
+        request_id = uuid.uuid4().hex[:8]
+        
+        context = RequestContext(
+            trace_id=trace_id,
+            request_id=request_id,
+            service_name=service_name,
+            correlation_data=correlation_data or {}
+        )
+        
+        # Store context for active requests
+        self.active_contexts[request_id] = context
+        
+        self._log_event(
+            level="INFO",
+            event="REQUEST_START",
+            message=f"New request started in {service_name.value}",
+            context=context
+        )
+        
+        return context
+    
+    def get_context(self, request_id: str) -> Optional[RequestContext]:
+        """Retrieve an active context by request ID"""
+        return self.active_contexts.get(request_id)
+    
+    def propagate_context(self, context: RequestContext, target_service: ServiceName) -> Dict[str, str]:
+        """Generate headers/keys to propagate context to the next service"""
+        propagation_data = {
+            "X-Trace-ID": context.trace_id,
+            "X-Request-ID": context.request_id,
+            "X-Origin-Service": context.service_name.value,
+            "X-Target-Service": target_service.value
+        }
+        
+        # Transfer correlation data
+        context.correlation_data["propagated_to"] = target_service.value
+        context.correlation_data["propagated_at"] = datetime.now().isoformat()
+        
+        return propagation_data
+    
+    def handle_error(
+        self,
+        context: Optional[RequestContext],
+        error: Exception,
+        service_name: ServiceName,
+        fallback_context: Optional[Dict] = None,
+        severity: ErrorSeverity = ErrorSeverity.ERROR
+    ) -> Dict[str, Any]:
+        """Handle an error with full context for tracing"""
+        
+        # Create context if not provided
+        if not context:
+            context = self.create_context(service_name, fallback_context)
+        
+        error_data = {
+            "type": error.__class__.__name__,
+            "message": str(error),
+            "module": error.__module__,
+            "line": error.__traceback__.tb_lineno if error.__traceback__ else None
+        }
+        
+        # Build complete error envelope
+        error_envelope = {
+            "timestamp": datetime.now().isoformat(),
+            "severity": severity.value,
+            "service": service_name.value,
+            "trace_id": context.trace_id,
+            "request_id": context.request_id,
+            "error": error_data,
+            "correlation": context.correlation_data,
+            "request_timeline": {
+                "start": context.start_time.isoformat(),
+                "end": datetime.now().isoformat(),
+                "duration_ms": (datetime.now() - context.start_time).total_seconds() * 1000
+            }
+        }
+        
+        # Log the error
+        self.logger.error(
+            json.dumps(error_envelope, indent=2)
+        )
+        
+        # Clean up context if this is a terminal error
+        if severity in [ErrorSeverity.ERROR, ErrorSeverity.CRITICAL]:
+            self.complete_request(context, success=False)
+        
+        return error_envelope
+    
+    def handle_success(self, context: RequestContext, data: Dict[str, Any] = None) -> None:
+        """Handle successful request completion"""
+        context.correlation_data["result"] = data or {}
+        context.correlation_data["status"] = "success"
+        
+        self._log_event(
+            level="INFO",
+            event="REQUEST_COMPLETE",
+            message=f"Request completed successfully in {context.service_name.value}",
+            context=context
+        )
+        
+        self.complete_request(context, success=True)
+    
+    def complete_request(self, context: RequestContext, success: bool) -> None:
+        """Mark request as complete and remove from active contexts"""
+        if context.request_id in self.active_contexts:
+            del self.active_contexts[context.request_id]
+        
+        self._log_event(
+            level="INFO" if success else "WARNING",
+            event="REQUEST_END",
+            message=f"Request ended in {context.service_name.value}",
+            context=context
+        )
+    
+    def _log_event(self, level: str, event: str, message: str, context: RequestContext) -> None:
+        """Log an event with full context"""
+        event_data = {
+            "event": event,
+            "message": message,
+            "context": context.to_dict(),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        self.logger.log(getattr(logging, level), json.dumps(event_data))
+    
+    def get_request_summary(self, trace_id: str) -> Dict[str, Any]:
+        """Get summary of a request by trace ID (for operator queries)"""
+        # In production, this would query a distributed tracing system
+        return {
+            "trace_id": trace_id,
+            "service_calls": [
+                {"service": "service-a", "status": "completed"},
+                {"service": "service-b", "status": "failed"}
+            ],
+            "total_duration_ms": 1250,
+            "has_error": True
+        }
+
+
+# ============== EXAMPLE USAGE ==============
+
+def example_service_a_call():
+    """Example of processing in Service A that calls Service B"""
+    
+    # Initialize error handlers for both services
+    handler_a = ErrorHandler("service-a")
+    handler_b = ErrorHandler("service-b")
+    
+    # Start request in Service A
+    context_a = handler_a.create_context(
+        service_name=ServiceName.SERVICE_A,
+        correlation_data={"customer_id": "CUST-001"}
+    )
+    
+    try:
+        # Simulate some processing
+        # Call Service B with propagated context
+        propagation_data = handler_a.propagate_context(context_a, ServiceName.SERVICE_B)
+        
+        # Simulate API call to Service B
+        # ... HTTP request with propagation_data headers
+        
+        # Service B receives the request
+        context_b = handler_b.create_context(
+            service_name=ServiceName.SERVICE_B,
+            correlation_data={
+                "trace_id": propagation_data["X-Trace-ID"],
+                "parent_request_id": context_a.request_id
+            }
+        )
+        
+        try:
+            # Simulate Service B processing
+            # Here's where an error might occur
+            if True:  # Simulate an error
+                raise ValueError("Service B failed to process request")
+            
+            # If successful
+            handler_b.handle_success(context_b, {"processed": True})
+            
+        except Exception as e:
+            # Error in Service B
+            error_b = handler_b.handle_error(
+                context_b,
+                e,
+                ServiceName.SERVICE_B,
+                severity=ErrorSeverity.ERROR
+            )
+            
+            # Propagate error back to Service A
+            handler_a.handle_error(
+                context_a,
+                RuntimeError(f"Service B error: {str(e)}"),
+                ServiceName.SERVICE_A,
+                fallback_context={"service_b_trace_id": context_b.trace_id},
+                severity=ErrorSeverity.ERROR
+            )
+            
+            # Return the error envelope for the operator
+            print("=== ERROR TRACE ===")
+            print(json.dumps({
+                "trace_id": context_a.trace_id,
+                "request_id": context_a.request_id,
+                "service_a_error": error_b,
+                "service_b_error": error_b
+            }, indent=2))
+            
+            return error_b
+    
+    except Exception as e:
+        # Catch-all for Service A errors
+        error = handler_a.handle_error(
+            context_a,
+            e,
+            ServiceName.SERVICE_A,
+            severity=ErrorSeverity.CRITICAL
+        )
+        return error
+    
+    finally:
+        handler_a.complete_request(context_a, success=True)
+
+
+# ============== OPERATOR TOOL ==============
+
+class OperatorTracer:
+    """Tool for operators to trace requests across services"""
+    
+    def __init__(self, handlers: Dict[str, ErrorHandler]):
+        self.handlers = handlers
+        
+    def trace_request(self, trace_id: str) -> None:
+        """Display full trace for an operator"""
+        print(f"\n{'='*60}")
+        print(f"REQUEST TRACE: {trace_id}")
+        print(f"{'='*60}")
+        
+        # In production, this would query distributed tracing
+        summary = self.handlers["service-a"].get_request_summary(trace_id)
+        
+        print(f"Route: {summary['service_calls']}")
+        print(f"Total Duration: {summary['total_duration_ms']}ms")
+        print(f"Status: {'ERROR' if summary['has_error'] else 'SUCCESS'}")
+        
+        # Display individual service contexts if available
+        for name, handler in self.handlers.items():
+            print(f"\n--- {name.upper()} ---")
+            # Query logs by trace_id in production
+            contexts = [c for c in handler.active_contexts.values() if c.trace_id == trace_id]
+            for ctx in contexts:
+                print(f"Request: {ctx.request_id}")
+                print(f"Started: {ctx.start_time}")
+                print(f"Correlation: {json.dumps(ctx.correlation_data, indent=2)}")
+
+
+if __name__ == "__main__":
+    # Run the example
+    handlers = {
+        "service-a": ErrorHandler("service-a"),
+        "service-b": ErrorHandler("service-b")
+    }
+    
+    # Simulate the request
+    error = example_service_a_call()
+    
+    # Operator could use this to trace
+    tracer = OperatorTracer(handlers)
+    # In real usage, you'd get the trace_id from the error response
+    print("\n\nOperator tracing example:")
+    print("Trace ID available in error response above")
+```
+
+## Key Features:
+
+1. **Unified Trace ID**: Every request gets a unique trace ID that propagates across services
+2. **Structured Logging**: All logs include the full context (trace_id, request_id, timing)
+3. **Context Propagation**: Header generation for passing context between services
+4. **Error Envelope**: Complete error information with full request timeline
+5. **Operator Tools**: Methods to query and display request traces
+
+## Usage in Production:
+
+```python
+# Service A to Service B call
+def service_a_call(handler, payload):
+    context = handler.create_context(ServiceName.SERVICE_A, payload)
+    propagation_headers = handler.propagate_context(context, ServiceName.SERVICE_B)
+    
+    # Make HTTP call with headers
+    response = requests.post(
+        "http://service-b/process",
+        headers=propagation_headers
+    )
+    
+    if not response.ok:
+        # Error handling with context
+        handler.handle_error(context, Exception("Service B failed"), ServiceName.SERVICE_A)
+```
+
+The operator can then query by trace_id to see the complete journey of a request across both services, including where it failed and the exact timings.

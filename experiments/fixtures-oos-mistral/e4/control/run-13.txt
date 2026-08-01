@@ -1,0 +1,153 @@
+# HTTP API Caller with Backoff and Circuit Breaker
+
+Here's a robust function that calls a downstream HTTP API with protection against hammering a downed service. It implements:
+- Exponential backoff
+- Circuit breaker pattern
+- Maximum retry limits
+- Configurable delays
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Callable, Any
+
+class APICallError(Exception):
+    """Custom exception for API call failures"""
+    pass
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    params: Optional[dict] = None,
+    data: Optional[dict] = None,
+    headers: Optional[dict] = None,
+    max_retries: int = 5,
+    initial_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    circuit_breaker_threshold: int = 3,
+    circuit_breaker_timeout: float = 30.0,
+    timeout: float = 10.0
+) -> Any:
+    """
+    Calls a downstream HTTP API with protection against hammering a downed service.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        params: Query parameters
+        data: Request body data
+        headers: Request headers
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay between retries in seconds
+        backoff_factor: Multiplier for exponential backoff
+        circuit_breaker_threshold: Number of failures to trip the circuit
+        circuit_breaker_timeout: Time to wait before allowing another attempt after tripping
+        timeout: Request timeout in seconds
+
+    Returns:
+        The API response JSON if successful
+
+    Raises:
+        APICallError: If all retries fail or circuit is open
+    """
+    # Circuit breaker state
+    failures = 0
+    last_failure_time = 0.0
+    circuit_open = False
+
+    for attempt in range(max_retries + 1):
+        # Check circuit breaker
+        current_time = time.time()
+        if circuit_open:
+            if current_time - last_failure_time < circuit_breaker_timeout:
+                raise APICallError(
+                    f"Circuit breaker is open. Service unavailable. "
+                    f"Will retry after {circuit_breaker_timeout - (current_time - last_failure_time):.1f}s"
+                )
+            else:
+                # Reset circuit breaker
+                circuit_open = False
+                failures = 0
+
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                params=params,
+                json=data,
+                headers=headers,
+                timeout=timeout
+            )
+
+            # Reset failure count on success
+            failures = 0
+
+            # Check for successful response
+            if response.status_code < 500:  # Treat 4xx as client errors that shouldn't be retried
+                response.raise_for_status()
+                return response.json()
+
+            # Server errors (5xx) should be retried
+            raise RequestException(f"Server error: {response.status_code}")
+
+        except RequestException as e:
+            failures += 1
+
+            # If we've hit the circuit breaker threshold, trip it
+            if failures >= circuit_breaker_threshold:
+                circuit_open = True
+                last_failure_time = current_time
+                raise APICallError(
+                    f"Circuit breaker tripped after {failures} failures. "
+                    f"Service will be unavailable for {circuit_breaker_timeout}s"
+                )
+
+            # Don't retry on client errors (4xx)
+            if isinstance(e, requests.exceptions.HTTPError) and 400 <= e.response.status_code < 500:
+                raise APICallError(f"Client error: {e}")
+
+            # Calculate delay with exponential backoff
+            delay = initial_delay * (backoff_factor ** attempt)
+
+            # Log the failure (in a real app, use proper logging)
+            print(f"Attempt {attempt + 1} failed: {str(e)}. Retrying in {delay:.2f}s...")
+
+            # Wait before retrying
+            time.sleep(delay)
+
+    # If we get here, all retries failed
+    raise APICallError(f"All {max_retries} attempts failed")
+```
+
+## Usage Example
+
+```python
+try:
+    result = call_downstream_api(
+        url="https://api.example.com/data",
+        method="GET",
+        params={"key": "value"},
+        max_retries=3,
+        initial_delay=0.5,
+        backoff_factor=1.5
+    )
+    print("API call successful:", result)
+except APICallError as e:
+    print("Failed to call API:", str(e))
+```
+
+## Key Features
+
+1. **Exponential Backoff**: Waits longer between each retry attempt (1s, 2s, 4s, etc.)
+2. **Circuit Breaker**: Stops making requests after multiple failures for a timeout period
+3. **Retry Limits**: Configurable maximum number of attempts
+4. **Error Handling**: Differentiates between client errors (4xx) and server errors (5xx)
+5. **Timeout Protection**: Prevents hanging on slow/unresponsive services
+
+You can adjust the parameters based on your specific needs:
+- `max_retries`: How many times to retry before giving up
+- `initial_delay`: Starting delay between retries
+- `backoff_factor`: How much to increase the delay each time
+- `circuit_breaker_threshold`: How many failures before opening the circuit
+- `circuit_breaker_timeout`: How long to keep the circuit open

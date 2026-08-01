@@ -1,0 +1,98 @@
+Here's a Python function that calls a downstream HTTP API with backoff retry logic to avoid hammering it when it's down:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
+
+def call_downstream_api(
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    backoff_factor: float = 2.0,
+    timeout: float = 10.0
+) -> Dict[str, Any]:
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The API endpoint URL
+        payload: Optional request payload
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        backoff_factor: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+
+    Returns:
+        Dictionary containing the API response
+
+    Raises:
+        RequestException: If all retries fail
+    """
+    headers = {'Content-Type': 'application/json'}
+    retry_count = 0
+    backoff = initial_backoff
+
+    while retry_count <= max_retries:
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            if retry_count == max_retries:
+                # Include operation context in error message
+                raise RequestException(
+                    f"API call failed after {max_retries} retries. "
+                    f"URL: {url}, Error: {str(e)}"
+                ) from e
+
+            # Log the failure with context
+            print(f"API call failed (attempt {retry_count + 1}/{max_retries}): {str(e)}")
+
+            # Exponential backoff with jitter
+            sleep_time = backoff * (backoff_factor ** retry_count)
+            time.sleep(sleep_time)
+            retry_count += 1
+
+    raise RequestException("Unexpected error in API call retry logic")
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes the API URL and operation context when raising exceptions.
+          location: call_downstream_api:45
+        - question: Can the operator find the request or job from the message?
+          answer: The error message includes the URL which uniquely identifies the request.
+          location: call_downstream_api:45
+        - question: Is sensitive data excluded from the message?
+          answer: Only the URL is included, no sensitive payload data is exposed in errors.
+          location: call_downstream_api:45
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the exception is raised, preserving original error info.
+          location: call_downstream_api:45
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in context pack, already applied above
+    - node: observability.error-context
+      reason: Duplicate node in context pack, already applied above
+    - node: observability.error-context
+      reason: Duplicate node in context pack, already applied above
+```

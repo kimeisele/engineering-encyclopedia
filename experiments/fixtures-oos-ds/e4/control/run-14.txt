@@ -1,0 +1,316 @@
+Here's a comprehensive solution with multiple approaches to handle this scenario:
+
+## 1. **Circuit Breaker Pattern** (Recommended)
+
+```python
+import time
+import requests
+import threading
+from enum import Enum
+from typing import Optional, Callable
+from datetime import datetime, timedelta
+
+class CircuitState(Enum):
+    CLOSED = "CLOSED"      # Normal operation, requests allowed
+    OPEN = "OPEN"          # Circuit is open, requests blocked
+    HALF_OPEN = "HALF_OPEN" # Test if service is back
+
+class CircuitBreaker:
+    def __init__(self, 
+                 failure_threshold: int = 5, 
+                 recovery_timeout: int = 30,
+                 half_open_max_calls: int = 1):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = None
+        self.is_half_open_called = False
+        self._lock = threading.Lock()
+        
+    def allow_request(self) -> bool:
+        """Determine if the request should be allowed"""
+        with self._lock:
+            if self.state == CircuitState.CLOSED:
+                return True
+                
+            elif self.state == CircuitState.OPEN:
+                # Check if recovery period has passed
+                if self.last_failure_time and \
+                   datetime.now() - self.last_failure_time > timedelta(seconds=self.recovery_timeout):
+                    # Switch to half-open
+                    self.state = CircuitState.HALF_OPEN
+                    self.is_half_open_called = False
+                    return True
+                return False
+                
+            elif self.state == CircuitState.HALF_OPEN:
+                # Limit calls in half-open state
+                if not self.is_half_open_called or self.success_count < self.half_open_max_calls:
+                    self.is_half_open_called = True
+                    return True
+                return False
+        
+    def record_success(self):
+        """Record a successful call"""
+        with self._lock:
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.half_open_max_calls:
+                    # Service is back, reset to closed
+                    self.state = CircuitState.CLOSED
+                    self.failure_count = 0
+                    self.success_count = 0
+                    self.is_half_open_called = False
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count = 0
+                
+    def record_failure(self):
+        """Record a failure"""
+        with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = datetime.now()
+            
+            if self.failure_count >= self.failure_threshold:
+                # Trip the circuit
+                self.state = CircuitState.OPEN
+                self.failure_count = 0
+                self.success_count = 0
+            elif self.state == CircuitState.HALF_OPEN:
+                # Failures in half-open state immediately trip the circuit
+                self.state = CircuitState.OPEN
+                self.failure_count = 0
+                self.success_count = 0
+
+class APICaller:
+    def __init__(self, base_url: str, circuit_breaker: CircuitBreaker):
+        self.base_url = base_url
+        self.circuit_breaker = circuit_breaker
+        self.session = requests.Session()
+        
+    def call_api(self, endpoint: str, **kwargs) -> Optional[dict]:
+        # Check if circuit breaker allows the request
+        if not self.circuit_breaker.allow_request():
+            print(f"Circuit is {self.circuit_breaker.state.value}, request blocked")
+            return None
+        
+        try:
+            response = self.session.get(
+                f"{self.base_url}/{endpoint}",
+                timeout=5,
+                **kwargs
+            )
+            response.raise_for_status()
+            
+            # Record success
+            self.circuit_breaker.record_success()
+            return response.json()
+            
+        except (requests.Timeout, requests.ConnectionError, 
+                requests.HTTPError) as e:
+            print(f"API call failed: {e}")
+            # Record failure
+            self.circuit_breaker.record_failure()
+            return None
+
+# Usage example
+breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=30)
+api = APICaller("https://api.example.com", breaker)
+
+# Example usage
+result = api.call_api("users/1")
+```
+
+## 2. **Simple Rate Limiting with Backoff**
+
+```python
+import time
+import requests
+from typing import Optional
+
+class BackoffRateLimiter:
+    def __init__(self, 
+                 initial_backoff: float = 1.0,
+                 max_backoff: float = 60.0,
+                 backoff_factor: float = 2.0,
+                 max_retries: int = 5):
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.backoff_factor = backoff_factor
+        self.max_retries = max_retries
+        self.current_backoff = initial_backoff
+        
+    def call_with_backoff(self, func, *args, **kwargs):
+        retries = 0
+        
+        while retries < self.max_retries:
+            try:
+                result = func(*args, **kwargs)
+                # Reset backoff on success
+                self.current_backoff = self.initial_backoff
+                return result
+                
+            except (requests.ConnectionError, requests.Timeout) as e:
+                retries += 1
+                if retries >= self.max_retries:
+                    print(f"Max retries reached: {e}")
+                    return None
+                
+                print(f"Attempt {retries} failed, waiting {self.current_backoff}s")
+                time.sleep(self.current_backoff)
+                self.current_backoff = min(
+                    self.current_backoff * self.backoff_factor,
+                    self.max_backoff
+                )
+        return None
+
+# Usage
+limiter = BackoffRateLimiter(initial_backoff=2, max_backoff=32)
+result = limiter.call_with_backoff(
+    requests.get, 
+    "https://api.example.com/users/1",
+    timeout=5
+)
+```
+
+## 3. **Full Production Example with Retry, Backoff, and Circuit Breaker**
+
+```python
+import time
+import logging
+import requests
+from typing import Optional, Dict, Any
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class RobustAPIClient:
+    def __init__(self, 
+                 base_url: str,
+                 max_retries: int = 3,
+                 backoff_multiplier: float = 1.5,
+                 initial_backoff: float = 0.5,
+                 max_backoff: float = 10.0,
+                 circuit_breaker_enabled: bool = True,
+                 failure_threshold: int = 5,
+                 recovery_timeout: int = 30):
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.max_retries = max_retries
+        
+        # Circuit breaker
+        if circuit_breaker_enabled:
+            self.circuit_breaker = CircuitBreaker(
+                failure_threshold=failure_threshold,
+                recovery_timeout=recovery_timeout
+            )
+        else:
+            self.circuit_breaker = None
+            
+        # Backoff parameters
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.backoff_multiplier = backoff_multiplier
+        
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=10),
+        retry=retry_if_exception_type(
+            (requests.ConnectionError, requests.Timeout)
+        )
+    )
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+        url = f"{self.base_url}/{endpoint}"
+        response = self.session.request(method, url, timeout=5, **kwargs)
+        response.raise_for_status()
+        return response
+        
+    def call_api(self, method: str, endpoint: str, **kwargs) -> Optional[Dict]:
+        """Robust API call with circuit breaker and retry logic"""
+        
+        # Check circuit breaker
+        if self.circuit_breaker and not self.circuit_breaker.allow_request():
+            logger.warning(f"Circuit breaker {self.circuit_breaker.state.value}, request blocked")
+            return None
+            
+        retries = 0
+        backoff = self.initial_backoff
+        
+        while retries <= self.max_retries:
+            try:
+                response = self._make_request(method, endpoint, **kwargs)
+                
+                # Record success
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_success()
+                    
+                logger.info(f"Success: {method.upper()} {endpoint}")
+                return response.json()
+                
+            except (requests.ConnectionError, requests.Timeout) as e:
+                logger.warning(f"Network error: {e}")
+                retries += 1
+                
+                if self.circuit_breaker:
+                    self.circuit_breaker.record_failure()
+                    
+                if retries > self.max_retries:
+                    logger.error("Max retries exceeded")
+                    return None
+                    
+                # Exponential backoff
+                delay = min(backoff, self.max_backoff)
+                logger.info(f"Retrying in {delay}s (attempt {retries}/{self.max_retries})")
+                time.sleep(delay)
+                backoff *= self.backoff_multiplier
+                
+            except requests.HTTPError as e:
+                # Non-retryable HTTP errors
+                logger.error(f"HTTP error: {e}")
+                if response.status_code == 503:  # Service unavailable
+                    if self.circuit_breaker:
+                        self.circuit_breaker.record_failure()
+                return None
+                
+        return None
+
+# Usage
+client = RobustAPIClient(
+    base_url="https://api.example.com",
+    max_retries=3,
+    circuit_breaker_enabled=True,
+    failure_threshold=5,
+    recovery_timeout=30
+)
+
+# Example calls
+result = client.call_api("GET", "users/1")
+print(result)
+```
+
+## Key Features:
+
+1. **Circuit Breaker**: Prevents hammering a down service by opening the circuit after consecutive failures
+2. **Exponential Backoff**: Increases wait time between retries
+3. **Half-Open State**: Periodically tests if the service has recovered
+4. **Configurable**: Both failure thresholds and timeouts are configurable
+5. **Thread-Safe**: Uses locks for concurrent access
+6. **Logging**: Comprehensive logging for debugging
+7. **Retry Logic**: Configurable retry attempts
+
+## Best Practices Implemented:
+
+- **Fail Fast**: Don't waste time on requests when service is clearly down
+- **Self-Healing**: Automatically test and recover when service returns
+- **Predictable Load**: Backoff prevents request surge after recovery
+- **Graceful Degradation**: Return `None` or default values when service is unavailable
+- **Monitoring**: Log all attempts and decisions
+
+Choose the approach based on your needs:
+- **Simple**: Use approach #2 for basic rate limiting
+- **Production**: Use approach #3 with circuit breaker for robust fault tolerance
+- **Microservice**: Implement as part of your API gateway or service mesh

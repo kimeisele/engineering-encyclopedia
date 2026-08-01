@@ -1,0 +1,404 @@
+Here's a comprehensive error handler design that enables cross-service tracing for a two-service request:
+
+## Core Components
+
+### 1. Trace Context Definition
+
+```python
+# trace_context.py
+from dataclasses import dataclass
+from datetime import datetime
+from uuid import uuid4
+import json
+
+@dataclass
+class TraceContext:
+    trace_id: str
+    service_name: str
+    span_id: str
+    parent_span_id: str = None
+    start_time: datetime = None
+    end_time: datetime = None
+    
+    def to_dict(self):
+        return {
+            'trace_id': self.trace_id,
+            'service_name': self.service_name,
+            'span_id': self.span_id,
+            'parent_span_id': self.parent_span_id,
+            'start_time': self.start_time.isoformat() if self.start_time else None,
+            'end_time': self.end_time.isoformat() if self.end_time else None
+        }
+```
+
+### 2. Unified Error Class
+
+```python
+# unified_error.py
+class ServiceRequestError(Exception):
+    def __init__(self, message, http_status=500, error_code='SERVICE_ERROR',
+                 trace_context=None, original_exception=None, retryable=False):
+        self.message = message
+        self.http_status = http_status
+        self.error_code = error_code
+        self.trace_context = trace_context or TraceContext(
+            trace_id=uuid4().hex,
+            service_name='unknown',
+            span_id=uuid4().hex[:16]
+        )
+        self.original_exception = original_exception
+        self.retryable = retryable
+        self.timestamp = datetime.now()
+        
+        # Log the error with full context
+        self.log_error()
+        
+    def log_error(self):
+        log_data = {
+            'event': 'service_error',
+            'trace_id': self.trace_context.trace_id,
+            'span_id': self.trace_context.span_id,
+            'service_name': self.trace_context.service_name,
+            'error_code': self.error_code,
+            'message': self.message,
+            'http_status': self.http_status,
+            'retryable': self.retryable,
+            'timestamp': self.timestamp.isoformat(),
+            'original_exception': str(self.original_exception) if self.original_exception else None
+        }
+        print(f"ERROR_TRACE: {json.dumps(log_data)}", flush=True)
+    
+    def to_dict(self):
+        return {
+            'error': True,
+            'error_code': self.error_code,
+            'message': self.message,
+            'http_status': self.http_status,
+            'trace_id': self.trace_context.trace_id,
+            'span_id': self.trace_context.span_id,
+            'service': self.trace_context.service_name,
+            'retryable': self.retryable,
+            'timestamp': self.timestamp.isoformat()
+        }
+```
+
+### 3. Service Request Handler
+
+```python
+# service_handler.py
+import requests
+import time
+from contextlib import contextmanager
+
+class ServiceClient:
+    def __init__(self, service_name, base_url):
+        self.service_name = service_name
+        self.base_url = base_url
+        self.session = requests.Session()
+    
+    def make_request(self, endpoint, method='GET', trace_context=None, **kwargs):
+        # Create new span for this request
+        span_id = uuid4().hex[:16]
+        request_context = TraceContext(
+            trace_id=trace_context.trace_id if trace_context else uuid4().hex,
+            service_name=self.service_name,
+            span_id=span_id,
+            parent_span_id=trace_context.span_id if trace_context else None,
+            start_time=datetime.now()
+        )
+        
+        # Add trace headers to outgoing request
+        headers = kwargs.get('headers', {})
+        headers.update({
+            'X-Trace-ID': request_context.trace_id,
+            'X-Span-ID': span_id,
+            'X-Parent-Span-ID': request_context.parent_span_id or 'root',
+            'X-Service-Name': self.service_name
+        })
+        kwargs['headers'] = headers
+        
+        try:
+            response = self.session.request(
+                method=method,
+                url=f"{self.base_url}/{endpoint}",
+                **kwargs
+            )
+            
+            request_context.end_time = datetime.now()
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.HTTPError as e:
+            request_context.end_time = datetime.now()
+            raise ServiceRequestError(
+                message=f"Service {self.service_name} returned {response.status_code}",
+                http_status=response.status_code,
+                error_code=f"HTTP_{response.status_code}",
+                trace_context=request_context,
+                original_exception=e,
+                retryable=response.status_code in [500, 502, 503, 504]
+            )
+        except requests.exceptions.ConnectionError as e:
+            request_context.end_time = datetime.now()
+            raise ServiceRequestError(
+                message=f"Connection error to {self.service_name}",
+                http_status=503,
+                error_code='CONNECTION_ERROR',
+                trace_context=request_context,
+                original_exception=e,
+                retryable=True
+            )
+        except requests.exceptions.Timeout as e:
+            request_context.end_time = datetime.now()
+            raise ServiceRequestError(
+                message=f"Timeout connecting to {self.service_name}",
+                http_status=504,
+                error_code='TIMEOUT',
+                trace_context=request_context,
+                original_exception=e,
+                retryable=True
+            )
+        except Exception as e:
+            request_context.end_time = datetime.now()
+            raise ServiceRequestError(
+                message=f"Unexpected error in {self.service_name}",
+                http_status=500,
+                error_code='INTERNAL_ERROR',
+                trace_context=request_context,
+                original_exception=e,
+                retryable=False
+            )
+```
+
+### 4. Two-Service Orchestrator
+
+```python
+# two_service_orchestrator.py
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+
+class TwoServiceHandler:
+    def __init__(self, service_a_client, service_b_client):
+        self.service_a = service_a_client
+        self.service_b = service_b_client
+        self.error_collector = []
+    
+    def process_request(self, request_data):
+        # Create root span
+        root_context = TraceContext(
+            trace_id=uuid4().hex,
+            service_name='orchestrator',
+            span_id=uuid4().hex[:16],
+            start_time=datetime.now()
+        )
+        
+        request_id = request_data.get('request_id')
+        print(f"Starting request {request_id} with trace_id: {root_context.trace_id}")
+        
+        try:
+            # Step 1: Call Service A
+            print(f"[TRACE] {root_context.trace_id} Calling Service A")
+            service_a_result = self.service_a.make_request(
+                '/api/process',
+                method='POST',
+                trace_context=root_context,
+                json=request_data.get('payload_a')
+            )
+            
+            # Step 2: Call Service B with dependency on A's result
+            print(f"[TRACE] {root_context.trace_id} Calling Service B")
+            payload_b = self._prepare_payload_b(request_data, service_a_result)
+            service_b_result = self.service_b.make_request(
+                '/api/transform',
+                method='POST',
+                trace_context=root_context,
+                json=payload_b
+            )
+            
+            # Step 3: Process results
+            final_result = self._combine_results(service_a_result, service_b_result)
+            
+            root_context.end_time = datetime.now()
+            return {
+                'success': True,
+                'trace_id': root_context.trace_id,
+                'data': final_result,
+                'timings': {
+                    'service_a': service_a_result.get('timing_ms'),
+                    'service_b': service_b_result.get('timing_ms'),
+                    'total_ms': (root_context.end_time - root_context.start_time).total_seconds() * 1000
+                }
+            }
+            
+        except ServiceRequestError as e:
+            root_context.end_time = datetime.now()
+            return self._handle_failure(e, root_context)
+        except Exception as e:
+            root_context.end_time = datetime.now()
+            error = ServiceRequestError(
+                message=str(e),
+                trace_context=root_context,
+                original_exception=e
+            )
+            return self._handle_failure(error, root_context)
+    
+    def _prepare_payload_b(self, request_data, service_a_result):
+        # Business logic to combine data
+        return {
+            'original': request_data.get('payload_b'),
+            'augmented': service_a_result.get('data')
+        }
+    
+    def _combine_results(self, result_a, result_b):
+        return {
+            'service_a_output': result_a.get('data'),
+            'service_b_output': result_b.get('data')
+        }
+    
+    def _handle_failure(self, error, root_context):
+        # Always log the full error chain
+        error_details = [
+            {
+                'service': error.trace_context.service_name,
+                'span_id': error.trace_context.span_id,
+                'error_code': error.error_code,
+                'message': error.message,
+                'retryable': error.retryable
+            }
+        ]
+        
+        # Check if there was a previous error in collection
+        if hasattr(self, 'last_error'):
+            error_details.append(self.last_error)
+        
+        self.last_error = error_details[0]
+        
+        return {
+            'success': False,
+            'trace_id': root_context.trace_id,
+            'error': {
+                'orchestrator_error': {
+                    'http_status': error.http_status,
+                    'error_code': error.error_code,
+                    'message': error.message
+                },
+                'error_chain': error_details,
+                'retryable': error.retryable,
+                'suggestion': 'Retry the request' if error.retryable else 'Contact support with trace_id'
+            },
+            'timings': {
+                'total_ms': (root_context.end_time - root_context.start_time).total_seconds() * 1000
+            }
+        }
+```
+
+### 5. Trace Viewer API
+
+```python
+# trace_viewer.py
+class TraceViewer:
+    def __init__(self):
+        self.traces = {}
+        self.error_log = []
+    
+    def register_error(self, error_data):
+        """Store error data for trace lookup"""
+        trace_id = error_data.get('trace_id')
+        if trace_id not in self.traces:
+            self.traces[trace_id] = []
+        self.traces[trace_id].append(error_data)
+        self.error_log.append(error_data)
+    
+    def get_trace_by_id(self, trace_id):
+        """Retrieve complete error chain for a trace"""
+        if trace_id not in self.traces:
+            return None
+        
+        events = self.traces[trace_id]
+        
+        # Build timeline view
+        timeline = []
+        for event in events:
+            timeline.append({
+                'timestamp': event.get('timestamp'),
+                'service': event.get('service'),
+                'span_id': event.get('span_id'),
+                'parent_span_id': event.get('parent_span_id'),
+                'error_code': event.get('error_code'),
+                'message': event.get('message'),
+                'http_status': event.get('http_status'),
+                'retryable': event.get('retryable'),
+                'original_exception': event.get('original_exception')
+            })
+        
+        return {
+            'trace_id': trace_id,
+            'total_events': len(events),
+            'services_involved': list(set(e.get('service') for e in events)),
+            'timeline': timeline,
+            'status': 'ERROR' if any(e for e in events if e.get('http_status') >= 400) else 'SUCCESS'
+        }
+```
+
+### 6. Usage Example
+
+```python
+# main_usage.py
+if __name__ == "__main__":
+    # Initialize services
+    service_a = ServiceClient('ServiceA', 'http://service-a:8080')
+    service_b = ServiceClient('ServiceB', 'http://service-b:8081')
+    
+    handler = TwoServiceHandler(service_a, service_b)
+    viewer = TraceViewer()
+    
+    # Process a request
+    request_data = {
+        'request_id': 'req-123',
+        'payload_a': {'customer_id': 'cust-456'},
+        'payload_b': {'product_id': 'prod-789'}
+    }
+    
+    result = handler.process_request(request_data)
+    
+    if not result['success']:
+        # Store in viewer for operator lookup
+        viewer.register_error(result['error'])
+        
+        # Operator can now trace by trace_id
+        trace_id = result['trace_id']
+        trace_details = viewer.get_trace_by_id(trace_id)
+        print(json.dumps(trace_details, indent=2))
+```
+
+## Key Features
+
+1. **Trace ID Propagation**: Same trace_id flows through both services via headers
+2. **Span Hierarchy**: Parent-child relationships between service calls
+3. **Complete Error Chain**: All errors recorded with context
+4. **Operator-Friendly**: Single trace_id to look up entire flow
+5. **Timing Information**: Duration of each service call
+6. **Retry Support**: Marks retryable errors for operator action
+7. **Structured Logging**: Consistent JSON format for log aggregation
+
+## Integration with Monitoring
+
+```python
+# Optional integration with metrics/monitoring
+def send_metrics(trace_data):
+    """Send trace data to monitoring system"""
+    metrics = {
+        'trace_id': trace_data['trace_id'],
+        'status': trace_data['success'],
+        'total_duration_ms': trace_data.get('timings', {}).get('total_ms'),
+        'error_code': trace_data.get('error', {}).get('orchestrator_error', {}).get('error_code')
+    }
+    # Send to your monitoring system (e.g., Datadog, Prometheus)
+    print(f"METRIC: {json.dumps(metrics)}")
+```
+
+This design provides operators with:
+- A single trace_id to search across logs of both services
+- Complete timeline of events and failures
+- Ability to identify which service failed and why
+- Correlation across services for debugging sessions

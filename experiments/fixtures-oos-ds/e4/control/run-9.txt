@@ -1,0 +1,255 @@
+Here's a robust solution that implements a circuit breaker pattern with retry logic to avoid hammering a downstream API when it's down:
+
+```python
+import time
+import requests
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Optional, Callable, Any
+from functools import wraps
+import threading
+
+class CircuitState(Enum):
+    CLOSED = "closed"      # Normal operation, requests allowed
+    OPEN = "open"          # Circuit open, requests blocked immediately
+    HALF_OPEN = "half_open"  # Testing if service has recovered
+
+class CircuitBreaker:
+    def __init__(self, 
+                 failure_threshold: int = 5, 
+                 recovery_timeout: float = 30.0,
+                 half_open_timeout: float = 10.0,
+                 max_retry_attempts: int = 3,
+                 retry_delay: float = 1.0):
+        """
+        Circuit breaker to prevent hammering a downstream API.
+        
+        Args:
+            failure_threshold: Number of consecutive failures before opening circuit
+            recovery_timeout: Time (seconds) to wait before allowing test requests
+            half_open_timeout: Time (seconds) to wait between test requests in half-open state
+            max_retry_attempts: Maximum retry attempts for transient failures
+            retry_delay: Base delay (seconds) between retries (exponential backoff)
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_timeout = half_open_timeout
+        self.max_retry_attempts = max_retry_attempts
+        self.retry_delay = retry_delay
+        
+        self.state = CircuitState.CLOSED
+        self.consecutive_failures = 0
+        self.last_failure_time = None
+        self.last_test_time = None
+        
+        # Thread safety
+        self._lock = threading.Lock()
+        
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """
+        Execute the API call with circuit breaker protection.
+        """
+        with self._lock:
+            # Check circuit state
+            if self.state == CircuitState.OPEN:
+                # Check if recovery timeout has elapsed
+                if self.last_failure_time and \
+                   datetime.now() - self.last_failure_time >= timedelta(seconds=self.recovery_timeout):
+                    self.state = CircuitState.HALF_OPEN
+                    self.last_test_time = datetime.now()
+                    print(f"Circuit opening to half-open at {datetime.now()}")
+                else:
+                    print(f"Circuit is OPEN - rejecting call")
+                    raise Exception("Circuit breaker is OPEN - service unavailable")
+            
+            # In half-open state, only allow one test call at a time
+            if self.state == CircuitState.HALF_OPEN:
+                if self.last_test_time and \
+                   datetime.now() - self.last_test_time < timedelta(seconds=self.half_open_timeout):
+                    print(f"Half-open - waiting for test window")
+                    raise Exception("Circuit breaker is in half-open state, test call in progress")
+                self.last_test_time = datetime.now()
+        
+        # Execute with retry logic
+        for attempt in range(self.max_retry_attempts + 1):
+            try:
+                # Attempt the API call
+                result = func(*args, **kwargs)
+                
+                # Success - close the circuit
+                with self._lock:
+                    self.consecutive_failures = 0
+                    self.state = CircuitState.CLOSED
+                    self.last_failure_time = None
+                    print(f"API call successful - circuit closed")
+                
+                return result
+                
+            except Exception as e:
+                # Failure handling
+                with self._lock:
+                    self.consecutive_failures += 1
+                    
+                    # Update last failure time
+                    self.last_failure_time = datetime.now()
+                    
+                    if self.consecutive_failures >= self.failure_threshold:
+                        self.state = CircuitState.OPEN
+                        print(f"Circuit opened after {self.consecutive_failures} failures")
+                    
+                    # If we were in half-open state and it failed, open circuit again
+                    if self.state == CircuitState.HALF_OPEN:
+                        self.state = CircuitState.OPEN
+                        print(f"Half-open call failed - circuit opened again")
+                
+                # Check if we should retry
+                if attempt < self.max_retry_attempts:
+                    # Exponential backoff
+                    wait_time = self.retry_delay * (2 ** attempt)
+                    print(f"Retry {attempt + 1}/{self.max_retry_attempts} after {wait_time}s")
+                    time.sleep(wait_time)
+                else:
+                    raise  # Re-raise the last exception
+
+# Decorator factory for API calls
+def circuit_protected(circuit_breaker: CircuitBreaker):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return circuit_breaker.call(func, *args, **kwargs)
+        return wrapper
+    return decorator
+
+# Example usage with actual HTTP call
+def make_http_call(url: str, timeout: float = 5.0) -> dict:
+    """Example downstream HTTP API call"""
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+# Usage example
+if __name__ == "__main__":
+    # Create circuit breaker with appropriate settings
+    breaker = CircuitBreaker(
+        failure_threshold=3,     # Open after 3 failures
+        recovery_timeout=10.0,   # Try recovery after 10 seconds
+        half_open_timeout=5.0,   # Wait 5 seconds between test calls in half-open
+        max_retry_attempts=2,    # Retry twice per call
+        retry_delay=1.0          # Initial retry delay (1s, then 2s)
+    )
+    
+    # Protect the HTTP call with the circuit breaker
+    @circuit_protected(breaker)
+    def safe_api_call(url):
+        return make_http_call(url)
+    
+    # Test scenario
+    test_urls = [
+        "https://httpbin.org/status/200",  # This should succeed
+        "https://httpbin.org/status/500",  # This will fail
+        "https://httpbin.org/status/503",  # This will fail
+        "https://httpbin.org/status/200"   # Try again after circuit opens
+    ]
+    
+    for url in test_urls:
+        try:
+            print(f"\nAttempting call to: {url}")
+            result = safe_api_call(url)
+            print(f"Success: {result}")
+        except Exception as e:
+            print(f"Failed: {str(e)}")
+        
+        # Show current breaker state
+        print(f"Breaker state: {breaker.state.value}, failures: {breaker.consecutive_failures}")
+        
+        # Wait between calls
+        time.sleep(2)
+```
+
+## Key Features:
+
+1. **Circuit Breaker States**:
+   - **CLOSED**: Normal operation, requests flow through
+   - **OPEN**: Service is down, requests fail immediately
+   - **HALF-OPEN**: Testing if service recovered with limited requests
+
+2. **Retry Logic**: 
+   - Exponential backoff for transient errors
+   - Configurable retry attempts and delays
+
+3. **Thread Safety**: 
+   - Uses `threading.Lock()` to handle concurrent access safely
+
+4. **Configurable Parameters**:
+   - `failure_threshold`: Opens circuit after N failures
+   - `recovery_timeout`: Time to wait before testing recovery
+   - `half_open_timeout`: Time between test requests in half-open state
+
+5. **Easy Integration**: 
+   - Decorator-based usage for any function
+   - Works with any HTTP client
+
+## Alternative Simpler Version (without retries):
+
+```python
+import time
+from datetime import datetime, timedelta
+from enum import Enum
+import requests
+
+class APIBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=30.0):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.open_until = None
+        self.last_attempt = None
+        
+    def make_request(self, url, **kwargs):
+        # If circuit is open, check if we can test recovery
+        if self.open_until:
+            if datetime.now() < self.open_until:
+                raise Exception("API down, please try later")
+            else:
+                # Allow test request
+                self.failures = 0
+                self.open_until = None
+                print("Circuit test - attempting recovery")
+        
+        try:
+            response = requests.get(url, timeout=5, **kwargs)
+            response.raise_for_status()
+            self.failures = 0
+            self.open_until = None
+            return response
+            
+        except (requests.RequestException, Exception) as e:
+            self.failures += 1
+            if self.failures >= self.failure_threshold:
+                if not self.open_until:
+                    self.open_until = datetime.now() + timedelta(seconds=self.recovery_timeout)
+                    print(f"Circuit opened until {self.open_until}")
+                else:
+                    # If in test phase and fails, reopen
+                    self.open_until = datetime.now() + timedelta(seconds=self.recovery_timeout)
+                    print(f"Recovery test failed - circuit remains open")
+            raise e
+
+# Usage
+breaker = APIBreaker(failure_threshold=3, recovery_timeout=15)
+
+def safe_api_call(url):
+    return breaker.make_request(url)
+
+# Test
+try:
+    result = safe_api_call("https://httpbin.org/status/500")
+except Exception as e:
+    print(f"Call failed: {e}")
+```
+
+Both solutions prevent hammering a down API by:
+- Opening the circuit after repeated failures
+- Implementing recovery test windows
+- Using exponential backoff for retries
+- Providing configurable thresholds and timeouts

@@ -1,0 +1,279 @@
+Here's a robust solution that implements a circuit breaker pattern to avoid hammering a downstream API when it's down:
+
+```python
+import time
+import requests
+from datetime import datetime, timedelta
+from threading import Lock
+import logging
+from typing import Optional, Callable, Any
+from enum import Enum
+
+class CircuitState(Enum):
+    CLOSED = "closed"      # Normal operation, requests allowed
+    OPEN = "open"          # Circuit is open, requests blocked (fast fail)
+    HALF_OPEN = "half_open" # Testing with limited requests
+    TRIPPED = "tripped"     # Circuit just tripped, waiting for recovery
+
+class CircuitBreaker:
+    """Circuit breaker for external API calls"""
+    
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: int = 30,
+        half_open_max_requests: int = 1,
+        success_threshold: int = 2
+    ):
+        """
+        Args:
+            failure_threshold: Number of consecutive failures before tripping
+            recovery_timeout: Seconds to wait before testing recovery
+            half_open_max_requests: Max requests allowed in half-open state
+            success_threshold: Successful calls needed to close circuit
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_requests = half_open_max_requests
+        self.success_threshold = success_threshold
+        
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = None
+        self.last_trip_time = None
+        self.half_open_requests = 0
+        self.lock = Lock()
+        self.logger = logging.getLogger(__name__)
+    
+    def _reset_counts(self):
+        """Reset failure/success counters"""
+        self.failure_count = 0
+        self.success_count = 0
+        self.half_open_requests = 0
+    
+    def _state_transition(self, new_state):
+        """Handle state transitions"""
+        old_state = self.state
+        self.state = new_state
+        self.logger.info(f"State transition: {old_state.value} -> {new_state.value}")
+        
+        if new_state == CircuitState.OPEN:
+            self.last_trip_time = datetime.now()
+            self._reset_counts()
+        elif new_state == CircuitState.CLOSED:
+            self._reset_counts()
+        elif new_state == CircuitState.HALF_OPEN:
+            self.half_open_requests = 0
+            self.success_count = 0
+    
+    def _check_preconditions(self) -> bool:
+        """Check if circuit allows making a request"""
+        with self.lock:
+            if self.state == CircuitState.OPEN:
+                # Check if recovery timeout has elapsed
+                if self.last_trip_time and datetime.now() - self.last_trip_time > timedelta(seconds=self.recovery_timeout):
+                    self._state_transition(CircuitState.HALF_OPEN)
+                    self.half_open_requests = 0
+                    return True
+                return False
+            
+            elif self.state == CircuitState.HALF_OPEN:
+                # Limit requests in half-open state
+                if self.half_open_requests >= self.half_open_max_requests:
+                    return False
+                self.half_open_requests += 1
+                return True
+            
+            return True
+    
+    def _record_success(self):
+        """Record a successful call"""
+        with self.lock:
+            self.failure_count = 0
+            
+            if self.state == CircuitState.HALF_OPEN:
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    self._state_transition(CircuitState.CLOSED)
+    
+    def _record_failure(self):
+        """Record a failed call"""
+        with self.lock:
+            self.last_failure_time = datetime.now()
+            
+            if self.state == CircuitState.HALF_OPEN:
+                # Failure in half-open state means circuit opens again immediately
+                self._state_transition(CircuitState.OPEN)
+            elif self.state == CircuitState.CLOSED:
+                self.failure_count += 1
+                if self.failure_count >= self.failure_threshold:
+                    self._state_transition(CircuitState.OPEN)
+    
+    def call(self, func: Callable, *args, **kwargs) -> Optional[Any]:
+        """
+        Execute a function with circuit breaker protection
+        
+        Args:
+            func: The function to call
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+            
+        Returns:
+            The function result or None if circuit is open
+        
+        Raises:
+            Exception: If the underlying function raises an exception
+        """
+        # Check if we should make the call
+        if not self._check_preconditions():
+            self.logger.warning(f"Circuit is {self.state.value}, skipping API call")
+            raise CircuitOpenError("Circuit is open, not making API call")
+        
+        try:
+            result = func(*args, **kwargs)
+            self._record_success()
+            return result
+        except Exception as e:
+            self._record_failure()
+            self.logger.error(f"API call failed: {str(e)}", exc_info=True)
+            raise
+
+class CircuitOpenError(Exception):
+    """Raised when circuit is open and API call is skipped"""
+    pass
+
+# Example usage:
+
+class APIClient:
+    """Example API client with circuit breaker"""
+    
+    def __init__(self, base_url: str, max_retries: int = 3):
+        self.base_url = base_url
+        self.circuit_breaker = CircuitBreaker()
+        self.session = requests.Session()
+        self.max_retries = max_retries
+    
+    def _make_request(self, endpoint: str, method: str = 'GET', **kwargs) -> dict:
+        """Actual HTTP request with retries"""
+        url = f"{self.base_url}/{endpoint}"
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = self.session.request(method, url, **kwargs)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as e:
+                if attempt == self.max_retries - 1:
+                    raise
+                time.sleep(2 ** attempt)  # Exponential backoff
+    
+    def api_wrapper(self, endpoint: str, method: str = 'GET', **kwargs) -> dict:
+        """
+        Wrapper that uses circuit breaker for API calls
+        """
+        # This is the function that will be protected by the circuit breaker
+        def make_call():
+            return self._make_request(endpoint, method, **kwargs)
+        
+        try:
+            return self.circuit_breaker.call(make_call)
+        except CircuitOpenError:
+            # Return cached/fallback data if available
+            return self._get_fallback_data(endpoint)
+        except Exception as e:
+            # Handle other errors
+            self._log_error(endpoint, e)
+            return self._get_fallback_data(endpoint)
+    
+    def _get_fallback_data(self, endpoint: str) -> dict:
+        """Return cached or fallback data when API is unavailable"""
+        # In production, you'd implement caching here
+        return {'error': 'API unavailable', 'endpoint': endpoint, 'cached': True}
+    
+    def _log_error(self, endpoint: str, error: Exception):
+        """Log API errors"""
+        logging.error(f"API call to {endpoint} failed: {str(error)}")
+
+# Alternative implementation with automatic timeout
+
+class ResilientAPIClient:
+    """API client with circuit breaker and connection timeouts"""
+    
+    def __init__(self, base_url: str, timeout: int = 5):
+        self.base_url = base_url
+        self.timeout = timeout
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=3,  # Trip after 3 failures
+            recovery_timeout=30,    # Wait 30 seconds before trying again
+            half_open_max_requests=2,  # Allow 2 test requests
+            success_threshold=2    # Need 2 successes to consider it recovered
+        )
+    
+    def call_api(self, path: str, **kwargs) -> dict:
+        """Protected API call with circuit breaker"""
+        
+        def make_request():
+            url = f"{self.base_url}/{path}"
+            response = requests.get(url, timeout=self.timeout, **kwargs)
+            response.raise_for_status()
+            return response.json()
+        
+        try:
+            return self.circuit_breaker.call(make_request)
+        except CircuitOpenError:
+            # Circuit is open - use cached data or return graceful degradation
+            return {
+                'status': 'degraded',
+                'message': 'Service temporarily unavailable',
+                'data': None
+            }
+        except requests.Timeout:
+            # Timeout is considered a failure
+            print(f"Request to {path} timed out")
+            raise
+        except requests.RequestException as e:
+            # Network errors are failures
+            print(f"Request failed: {e}")
+            raise
+
+# Usage example:
+
+def main():
+    # Initialize logger
+    logging.basicConfig(level=logging.INFO)
+    
+    # Create API client
+    client = ResilientAPIClient("https://api.example.com")
+    
+    # Simulate multiple calls
+    for i in range(50):
+        try:
+            result = client.call_api("users/123")
+            print(f"Call {i}: Success - {result}")
+        except Exception as e:
+            print(f"Call {i}: Failed - {e}")
+        
+        # Simulate time between calls
+        time.sleep(0.1)
+
+if __name__ == "__main__":
+    main()
+```
+
+Key features of this solution:
+
+1. **Circuit Breaker Pattern**: Three states (CLOSED, OPEN, HALF-OPEN) to control API access
+2. **Failure Threshold**: Trips after N consecutive failures
+3. **Recovery Timeout**: Waits a configurable period before testing recovery
+4. **Half-Open Testing**: Sends limited test requests in half-open state
+5. **Thread Safety**: Uses locks for concurrent access
+6. **Configurable Parameters**: All thresholds are configurable
+7. **Graceful Degradation**: Returns fallback/cached data when API is down
+8. **Exponential Backoff**: Combined with retry logic for transient failures
+
+The solution prevents hammering by:
+- Automatically stopping requests when the circuit is open
+- Only allowing a limited number of test requests during recovery
+- Waiting for a recovery timeout before attempting recovery
+- Implementing proper state transitions to prevent rapid retry loops

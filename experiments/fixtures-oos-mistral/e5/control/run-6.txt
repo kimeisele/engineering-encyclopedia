@@ -1,0 +1,201 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request across two services. This implementation includes correlation IDs, structured logging, and error propagation between services.
+
+## Implementation (Python Example)
+
+```python
+import uuid
+import logging
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s - [trace_id=%(trace_id)s, span_id=%(span_id)s]'
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ServiceError(Exception):
+    """Custom error class for service failures with tracing context"""
+    message: str
+    original_error: Optional[Exception] = None
+    trace_id: str = ""
+    service_name: str = ""
+    related_request_id: Optional[str] = None
+
+    def __str__(self):
+        base = f"{self.service_name} error: {self.message}"
+        if self.related_request_id:
+            base += f" (related request: {self.related_request_id})"
+        if self.original_error:
+            base += f" - Original: {str(self.original_error)}"
+        return base
+
+class CrossServiceErrorHandler:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.logger = logger.getChild(service_name)
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for tracing"""
+        return str(uuid.uuid4())
+
+    def log_request_start(self, request_id: str, operation: str, metadata: Optional[Dict] = None):
+        """Log the start of a request with tracing context"""
+        self.logger.info(
+            f"Starting {operation}",
+            extra={
+                'trace_id': request_id,
+                'span_id': self.generate_correlation_id(),
+                **(metadata or {})
+            }
+        )
+
+    def log_request_end(self, request_id: str, operation: str, success: bool, metadata: Optional[Dict] = None):
+        """Log the completion of a request with tracing context"""
+        level = logging.INFO if success else logging.ERROR
+        self.logger.log(
+            level,
+            f"Completed {operation}",
+            extra={
+                'trace_id': request_id,
+                'span_id': self.generate_correlation_id(),
+                **(metadata or {})
+            }
+        )
+
+    def handle_service_error(
+        self,
+        operation: str,
+        error: Exception,
+        request_id: str,
+        related_request_id: Optional[str] = None,
+        metadata: Optional[Dict] = None
+    ) -> ServiceError:
+        """Create a structured error with tracing context"""
+        error_context = ServiceError(
+            message=f"{operation} failed",
+            original_error=error,
+            trace_id=request_id,
+            service_name=self.service_name,
+            related_request_id=related_request_id
+        )
+
+        self.logger.error(
+            str(error_context),
+            extra={
+                'trace_id': request_id,
+                'span_id': self.generate_correlation_id(),
+                'error_type': type(error).__name__,
+                'error_details': str(error),
+                **(metadata or {})
+            }
+        )
+
+        return error_context
+
+    def propagate_error(
+        self,
+        error: ServiceError,
+        next_service: str,
+        request_id: str,
+        metadata: Optional[Dict] = None
+    ) -> ServiceError:
+        """Propagate an error to another service with updated context"""
+        propagated_error = ServiceError(
+            message=f"Error propagated from {self.service_name} to {next_service}",
+            original_error=error,
+            trace_id=request_id,
+            service_name=next_service,
+            related_request_id=error.trace_id
+        )
+
+        self.logger.error(
+            str(propagated_error),
+            extra={
+                'trace_id': request_id,
+                'span_id': self.generate_correlation_id(),
+                'propagated_from': self.service_name,
+                'original_trace_id': error.trace_id,
+                **(metadata or {})
+            }
+        )
+
+        return propagated_error
+```
+
+## Usage Example
+
+```python
+# Service A
+service_a_handler = CrossServiceErrorHandler("ServiceA")
+
+def service_a_operation(request_data: Dict) -> Dict:
+    request_id = service_a_handler.generate_correlation_id()
+    service_a_handler.log_request_start(request_id, "process_data", {"input": request_data})
+
+    try:
+        # Call Service B
+        service_b_response = call_service_b(request_data, request_id)
+        service_a_handler.log_request_end(request_id, "process_data", True)
+        return service_b_response
+    except Exception as e:
+        error = service_a_handler.handle_service_error(
+            "process_data",
+            e,
+            request_id,
+            metadata={"input_size": len(request_data)}
+        )
+        raise service_a_handler.propagate_error(error, "ServiceB", request_id)
+
+# Service B
+service_b_handler = CrossServiceErrorHandler("ServiceB")
+
+def call_service_b(data: Dict, parent_request_id: str) -> Dict:
+    request_id = service_b_handler.generate_correlation_id()
+    service_b_handler.log_request_start(request_id, "process_data", {"input": data})
+
+    try:
+        # Business logic here
+        result = {"status": "success", "data": data}
+        service_b_handler.log_request_end(request_id, "process_data", True)
+        return result
+    except Exception as e:
+        error = service_b_handler.handle_service_error(
+            "process_data",
+            e,
+            request_id,
+            related_request_id=parent_request_id,
+            metadata={"input_size": len(data)}
+        )
+        raise error
+```
+
+## Key Features
+
+1. **Correlation IDs**: Each request gets a unique trace ID that follows it through both services
+2. **Structured Logging**: All logs include the trace ID for easy correlation
+3. **Error Propagation**: Errors include context about their origin and related requests
+4. **Service-Specific Context**: Each service maintains its own error handling but preserves cross-service context
+5. **Metadata Preservation**: Additional context can be attached to both logs and errors
+
+## Operator Guidance
+
+To trace a request across services:
+
+1. **Find the trace ID**: Look for the `trace_id` in any log entry from either service
+2. **Search across services**: Use the trace ID to find all related log entries in both services
+3. **Error correlation**: If an error occurs, the `related_request_id` field shows the original request that led to the error
+4. **Timeline reconstruction**: The timestamps and span IDs help reconstruct the exact sequence of events
+
+## Deployment Considerations
+
+1. **Log Aggregation**: Ensure your logging system can handle structured logs with the trace_id field
+2. **Distributed Tracing**: For more advanced scenarios, consider integrating with tools like Jaeger or Zipkin
+3. **Error Monitoring**: Configure your error monitoring system to group errors by trace_id
+4. **Documentation**: Document this tracing approach in your service documentation
+
+This implementation provides a solid foundation for cross-service request tracing that can be adapted to most programming languages and frameworks.

@@ -1,0 +1,93 @@
+```python
+import logging
+import uuid
+from contextlib import contextmanager
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+class RequestTrace:
+    """Holder for trace ID shared across services."""
+    def __init__(self, trace_id: Optional[str] = None):
+        self.trace_id = trace_id or uuid.uuid4().hex
+
+@contextmanager
+def trace_request(trace: RequestTrace, service_name: str):
+    """Context manager to attach trace context to all logs within the block."""
+    old_factory = logging.getLogRecordFactory()
+    def record_factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        record.trace_id = trace.trace_id
+        record.service_name = service_name
+        return record
+    logging.setLogRecordFactory(record_factory)
+    try:
+        yield
+    finally:
+        logging.setLogRecordFactory(old_factory)
+
+def handle_two_service_error(trace: RequestTrace, service_name: str, operation: str, step: str, error: Exception):
+    """Standard error handler for cross-service request tracing."""
+    logger.error(
+        "Cross-service request failed | trace_id=%s | service=%s | operation=%s | step=%s | error=%s",
+        trace.trace_id,
+        service_name,
+        operation,
+        step,
+        str(error),
+        exc_info=True  # Keeps stack trace
+    )
+    # Log which service the error came from for cross-service correlation
+    logger.error(
+        "Trace propagation | trace_id=%s | originating_service=%s | error_type=%s",
+        trace.trace_id,
+        service_name,
+        type(error).__name__
+    )
+
+# Example usage
+def service_a_request(trace: RequestTrace):
+    with trace_request(trace, "service_a"):
+        try:
+            # Simulate service A processing
+            result = service_b_call(trace)
+            return result
+        except Exception as e:
+            handle_two_service_error(trace, "service_a", "handle_user_request", "call_service_b", e)
+            raise
+
+def service_b_call(trace: RequestTrace):
+    with trace_request(trace, "service_b"):
+        try:
+            # Simulate service B processing
+            raise ValueError("Database connection failed")
+        except Exception as e:
+            handle_two_service_error(trace, "service_b", "process_data", "query_database", e)
+            raise
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes - handler includes operation and step parameters in log message."
+          location: "handle_two_service_error:34-39"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes - trace_id is included in every log entry via trace_request context."
+          location: "trace_request:20-24 and handle_two_service_error:34-39"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes - only error type and string are logged, no request payloads or credentials."
+          location: "handle_two_service_error:34-39"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at exception catch time before re-raising, preserving original error."
+          location: "service_a_request:51-55 and service_b_call:62-66"
+      unanswered: []
+  not_applied: []
+```

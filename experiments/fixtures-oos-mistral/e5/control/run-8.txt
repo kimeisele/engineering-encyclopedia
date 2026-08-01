@@ -1,0 +1,254 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request across two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured logging
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection
+
+## Implementation (Python Example)
+
+```python
+import uuid
+import logging
+from functools import wraps
+from typing import Optional, Dict, Any
+import time
+import json
+from dataclasses import dataclass
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('service_errors.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ServiceError:
+    """Container for error information with correlation tracking"""
+    service_name: str
+    error_type: str
+    message: str
+    correlation_id: str
+    request_id: str
+    timestamp: float
+    context: Optional[Dict[str, Any]] = None
+    stack_trace: Optional[str] = None
+
+class CrossServiceErrorHandler:
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.metrics = {
+            'total_errors': 0,
+            'service_errors': {},
+            'error_types': {}
+        }
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for request tracing"""
+        return str(uuid.uuid4())
+
+    def log_error(self, error: ServiceError):
+        """Log error with correlation context"""
+        # Update metrics
+        self.metrics['total_errors'] += 1
+        self.metrics['service_errors'][self.service_name] = self.metrics['service_errors'].get(self.service_name, 0) + 1
+        self.metrics['error_types'][error.error_type] = self.metrics['error_types'].get(error.error_type, 0) + 1
+
+        # Structured logging with correlation context
+        log_entry = {
+            'timestamp': error.timestamp,
+            'correlation_id': error.correlation_id,
+            'request_id': error.request_id,
+            'service': self.service_name,
+            'error_type': error.error_type,
+            'message': error.message,
+            'context': error.context or {},
+            'stack_trace': error.stack_trace
+        }
+
+        logger.error(json.dumps(log_entry))
+
+    def handle_service_error(self, error: Exception, correlation_id: str, request_id: str,
+                           context: Optional[Dict] = None) -> ServiceError:
+        """Convert exceptions to structured ServiceError objects"""
+        error_type = type(error).__name__
+
+        # Get stack trace if available
+        stack_trace = None
+        if hasattr(error, '__traceback__'):
+            import traceback
+            stack_trace = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+
+        service_error = ServiceError(
+            service_name=self.service_name,
+            error_type=error_type,
+            message=str(error),
+            correlation_id=correlation_id,
+            request_id=request_id,
+            timestamp=time.time(),
+            context=context or {},
+            stack_trace=stack_trace
+        )
+
+        self.log_error(service_error)
+        return service_error
+
+    def propagate_error(self, error: ServiceError, next_service_url: str) -> None:
+        """Propagate error information to the next service"""
+        # In a real implementation, this would make an HTTP request to the next service
+        # with the error details in the headers or body
+        logger.info(f"Propagating error to {next_service_url} with correlation_id {error.correlation_id}")
+
+        # Example of what might be sent:
+        error_data = {
+            'correlation_id': error.correlation_id,
+            'error_type': error.error_type,
+            'message': error.message,
+            'timestamp': error.timestamp,
+            'context': error.context
+        }
+
+        # In practice, you would use requests.post(next_service_url, json=error_data)
+        # or similar to send this to the next service
+
+def trace_request(func):
+    """Decorator to add correlation and request IDs to service methods"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Extract correlation_id from headers if present, otherwise generate new one
+        correlation_id = kwargs.get('correlation_id') or str(uuid.uuid4())
+        request_id = kwargs.get('request_id') or str(uuid.uuid4())
+
+        # Add to context if not already present
+        if 'context' not in kwargs:
+            kwargs['context'] = {}
+        kwargs['context']['correlation_id'] = correlation_id
+        kwargs['context']['request_id'] = request_id
+
+        return func(*args, **kwargs)
+    return wrapper
+
+# Example usage in Service A
+class ServiceA:
+    def __init__(self):
+        self.error_handler = CrossServiceErrorHandler("ServiceA")
+
+    @trace_request
+    def call_service_b(self, payload: Dict, correlation_id: str = None, request_id: str = None) -> Dict:
+        try:
+            # Simulate calling Service B
+            response = self._make_request_to_service_b(payload, correlation_id, request_id)
+            return response
+        except Exception as e:
+            error = self.error_handler.handle_service_error(
+                e, correlation_id, request_id,
+                context={'service_a_payload': payload}
+            )
+            self.error_handler.propagate_error(error, "http://service-b/api")
+            raise  # Re-raise if needed
+
+    def _make_request_to_service_b(self, payload: Dict, correlation_id: str, request_id: str) -> Dict:
+        # In a real implementation, this would make an HTTP request
+        # For simulation, we'll just return a mock response
+        return {"status": "success", "data": "processed"}
+
+# Example usage in Service B
+class ServiceB:
+    def __init__(self):
+        self.error_handler = CrossServiceErrorHandler("ServiceB")
+
+    @trace_request
+    def process_data(self, payload: Dict, correlation_id: str = None, request_id: str = None) -> Dict:
+        try:
+            # Simulate processing
+            if payload.get('invalid'):
+                raise ValueError("Invalid payload received")
+
+            return {"status": "processed", "result": "success"}
+        except Exception as e:
+            error = self.error_handler.handle_service_error(
+                e, correlation_id, request_id,
+                context={'service_b_payload': payload}
+            )
+            # No propagation needed here as this is the last service
+            raise
+
+# Example of how to use this in a request flow
+def handle_user_request():
+    service_a = ServiceA()
+    service_b = ServiceB()
+
+    try:
+        # Start with a new correlation ID
+        correlation_id = service_a.error_handler.generate_correlation_id()
+        request_id = str(uuid.uuid4())
+
+        # Call Service A
+        payload = {"data": "test", "invalid": True}  # Set to False to see success path
+        response = service_a.call_service_b(payload, correlation_id, request_id)
+
+        # Call Service B (in a real flow, this would be called by Service A)
+        response = service_b.process_data(payload, correlation_id, request_id)
+
+        return {"status": "success", "data": response}
+
+    except Exception as e:
+        logger.error(f"Request failed: {str(e)}")
+        return {"status": "error", "message": str(e)}
+```
+
+## Key Features
+
+1. **Correlation IDs**:
+   - Unique IDs generated at the start of each request
+   - Propagated through all service calls
+   - Allows tracing a single request across multiple services
+
+2. **Structured Error Handling**:
+   - Consistent error format across services
+   - Includes timestamps, service names, and context
+   - Stack traces preserved for debugging
+
+3. **Error Propagation**:
+   - Errors from one service can be sent to the next service
+   - Maintains correlation context throughout the call chain
+
+4. **Observability**:
+   - Metrics collection for error rates by service and type
+   - Centralized logging with correlation context
+   - File and console logging for redundancy
+
+5. **Decorators**:
+   - `@trace_request` decorator automatically adds correlation context
+   - Reduces boilerplate code in service methods
+
+## Deployment Considerations
+
+1. **Header Propagation**:
+   - In HTTP-based services, include correlation ID in headers:
+     ```
+     X-Correlation-ID: <correlation_id>
+     X-Request-ID: <request_id>
+     ```
+
+2. **Log Aggregation**:
+   - Configure your logging system to index by `correlation_id`
+   - Tools like ELK Stack, Splunk, or Datadog can help with this
+
+3. **Metrics Dashboard**:
+   - Expose the metrics endpoint for monitoring
+   - Track error rates and types over time
+
+4. **Alerting**:
+   - Set up alerts for high error rates
+   - Alert on specific error types that need immediate attention
+
+This implementation provides a solid foundation for tracing requests across multiple services while maintaining good observability and error handling practices.

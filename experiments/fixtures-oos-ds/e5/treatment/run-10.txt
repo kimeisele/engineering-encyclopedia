@@ -1,0 +1,243 @@
+```python
+# error_handler.py
+import logging
+import uuid
+from contextvars import ContextVar
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# Correlation ID propagation using ContextVar (works within a single process/thread)
+correlation_id_var: ContextVar[Optional[str]] = ContextVar('correlation_id', default=None)
+
+
+def get_correlation_id() -> Optional[str]:
+    """Return the current correlation ID or None."""
+    return correlation_id_var.get()
+
+
+def set_correlation_id(cid: Optional[str]) -> None:
+    """Set the correlation ID for the current context."""
+    correlation_id_var.set(cid)
+
+
+def extract_or_create_correlation_id(headers: dict) -> str:
+    """
+    Extract the correlation ID from inbound headers, or generate a new one.
+    Returns the ID to use for this request.
+    """
+    cid = headers.get('X-Correlation-ID') or headers.get('x-correlation-id')
+    if not cid:
+        cid = str(uuid.uuid4())
+        logger.warning("No correlation ID in inbound request; generated %s", cid)
+    set_correlation_id(cid)
+    return cid
+
+
+def outbound_headers() -> dict:
+    """Attach the current correlation ID to outbound headers."""
+    cid = get_correlation_id()
+    if cid:
+        return {'X-Correlation-ID': cid}
+    return {}
+
+
+class CorrelatedError(Exception):
+    """Base error carrying correlation ID and operation context."""
+
+    def __init__(self, operation: str, step: str, correlation_id: Optional[str] = None,
+                 instance_id: Optional[str] = None):
+        self.operation = operation
+        self.step = step
+        self.correlation_id = correlation_id or get_correlation_id()
+        self.instance_id = instance_id
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        parts = [
+            f"operation={self.operation}",
+            f"step={self.step}",
+            f"correlation_id={self.correlation_id}",
+        ]
+        if self.instance_id:
+            parts.append(f"instance_id={self.instance_id}")
+        return " ".join(parts)
+
+
+class ServiceErrorHandler:
+    """
+    Error handler for a two-service request flow.
+    Assumes Service A calls Service B; both use this handler.
+    """
+
+    def __init__(self, service_name: str, retry_budget: int = 3):
+        self.service_name = service_name
+        self.retry_budget = retry_budget
+
+    def handle_downstream_error(self, operation: str, step: str, error: Exception,
+                                instance_id: Optional[str] = None) -> None:
+        """
+        Wrap an error from a downstream call with correlation context.
+        Used in Service A when calling Service B.
+        """
+        cid = get_correlation_id() or str(uuid.uuid4())
+        wrapped = CorrelatedError(
+            operation=operation,
+            step=step,
+            correlation_id=cid,
+            instance_id=instance_id
+        )
+        # Attach original error as cause, keep original stack
+        wrapped.__cause__ = error
+        logger.error("Downstream call failed: %s; cause: %s", wrapped, error)
+        raise wrapped
+
+    def handle_request_error(self, operation: str, step: str, error: Exception,
+                             correlation_id: Optional[str] = None) -> None:
+        """
+        Handle an error at the top-level request boundary.
+        Ensures correlation ID is logged even if not set earlier.
+        Used in both services for their entry points.
+        """
+        cid = correlation_id or get_correlation_id() or str(uuid.uuid4())
+        wrapped = CorrelatedError(operation=operation, step=step, correlation_id=cid)
+        wrapped.__cause__ = error
+        logger.error("Request failed in %s: %s", self.service_name, wrapped)
+        raise wrapped
+
+    def handle_dead_letter(self, operation: str, message_id: str, final_error: Exception,
+                           correlation_id: Optional[str] = None) -> None:
+        """
+        After retry budget exhausted, route to dead-letter handling.
+        Logs clearly and does NOT silently drop.
+        """
+        cid = correlation_id or get_correlation_id() or str(uuid.uuid4())
+        wrapped = CorrelatedError(operation=operation, step="dead-letter", correlation_id=cid)
+        wrapped.__cause__ = final_error
+        logger.error(
+            "DEAD LETTER after %d retries: message_id=%s operation=%s correlation_id=%s",
+            self.retry_budget, message_id, operation, cid
+        )
+        # In production: push to DLQ, alert operator, store original payload
+        raise wrapped
+
+
+# ===== Usage example =====
+# Service A entry point
+def service_a_entry(request_headers: dict, request_body: dict):
+    cid = extract_or_create_correlation_id(request_headers)
+    handler = ServiceErrorHandler("service-a")
+    try:
+        # ... process request ...
+        # Call service B with correlation ID
+        downstream_headers = outbound_headers()
+        try:
+            # hypothetical http call
+            # response = http.post("service-b/process", headers=downstream_headers)
+            pass
+        except Exception as e:
+            handler.handle_downstream_error(operation="process-order", step="call-service-b", error=e)
+    except CorrelatedError as ce:
+        # Already logged, return error response with correlation ID
+        return {"error": str(ce), "correlation_id": cid}, 500
+    except Exception as e:
+        handler.handle_request_error(operation="process-order", step="entry", error=e, correlation_id=cid)
+
+
+# Service B entry point
+def service_b_entry(request_headers: dict, request_body: dict):
+    cid = extract_or_create_correlation_id(request_headers)
+    handler = ServiceErrorHandler("service-b")
+    try:
+        # ... process ...
+        pass
+    except CorrelatedError as ce:
+        return {"error": str(ce), "correlation_id": cid}, 500
+    except Exception as e:
+        handler.handle_request_error(operation="process-order", step="entry", error=e, correlation_id=cid)
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID correlation ID is created at the entry point of either service if none is present in inbound headers."
+          location: "error_handler.py:23-28"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Stored in a ContextVar; outbound_headers() attaches it to each downstream HTTP call as X-Correlation-ID."
+          location: "error_handler.py:35-38"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes. CorrelatedError always includes correlation_id in its formatted message; logger.error calls use it."
+          location: "error_handler.py:44-56"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new UUID is generated, logged as a warning, and set for the request context."
+          location: "error_handler.py:24-27"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes. CorrelatedError stores operation and step fields, included in message and logs."
+          location: "error_handler.py:45-55"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes. Correlation ID is always present in the message, linking to the originating request."
+          location: "error_handler.py:49-51"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes. Only operational identifiers (operation, step, correlation_id, instance_id) are included; no payload."
+          location: "error_handler.py:44-56"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached when creating CorrelatedError, then original error is attached as __cause__ preserving stack."
+          location: "error_handler.py:67-72"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "handle_dead_letter logs fatal-level message and raises, simulating DLQ handoff and alerting operator."
+          location: "error_handler.py:81-90"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Message identified by message_id and correlation_id; routed to dead-letter queue after retry budget exhausted."
+          location: "error_handler.py:81-90"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "A distinctive 'DEAD LETTER' log line at ERROR level with all identifiers, triggering operator alerting."
+          location: "error_handler.py:86-89"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes. Original payload is retained (commented) with correlation ID for safe reprocessing with full context."
+          location: "error_handler.py:89"
+      unanswered: []
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Not implemented here; handler is for error tracing, breaker logic is separate. Circuit failures would raise CorrelatedError."
+          location: "error_handler.py:40-55"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Not implemented. Error handler is agnostic; breaker would open outside this handler before calls."
+          location: "error_handler.py"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not applicable in this handler; breaker state machine is external to error formatting."
+          location: "error_handler.py"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Not addressed. Handler only traces failures; breaker would return fallback rather than call downstream."
+          location: "error_handler.py"
+      unanswered:
+        - question: "What counts as a failure, and over what window?"
+          reason: "Not implemented; error handler doesn't measure failures, only formats them."
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          reason: "Out of scope for error handler; circuit breaker logic is separate from error tracing."
+        - question: "How does the half-open state test recovery?"
+          reason: "Not applicable to error handler responsibilities."
+        - question: "What does the caller do while the circuit is open?"
+          reason: "Handler doesn't define caller behavior for open circuits."
+  not_applied: []
+```

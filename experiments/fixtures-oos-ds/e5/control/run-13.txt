@@ -1,0 +1,381 @@
+Here's a comprehensive error handler for tracing requests across two services:
+
+## Core Implementation
+
+```python
+import uuid
+import logging
+import json
+from datetime import datetime
+from typing import Dict, Any, Optional
+from functools import wraps
+import traceback
+
+class RequestTracer:
+    """Centralized tracing system for multi-service requests"""
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.trace_store = {}  # In-memory store; use Redis/DB in production
+        
+    def generate_trace_id(self) -> str:
+        """Generate a unique trace ID for the request"""
+        return f"TRC-{uuid.uuid4().hex[:16].upper()}"
+    
+    def start_trace(self, service_name: str, operation: str, 
+                   payload: Optional[Dict] = None) -> Dict:
+        """Initialize a new trace context"""
+        trace_id = self.generate_trace_id()
+        trace_data = {
+            'trace_id': trace_id,
+            'service_name': service_name,
+            'operation': operation,
+            'start_time': datetime.utcnow().isoformat(),
+            'status': 'INITIATED',
+            'payload': payload or {},
+            'steps': [],
+            'errors': [],
+            'end_time': None
+        }
+        self.trace_store[trace_id] = trace_data
+        return trace_data
+    
+    def add_step(self, trace_id: str, service_name: str, 
+                operation: str, status: str, 
+                details: Optional[Dict] = None):
+        """Add a step to the trace"""
+        if trace_id in self.trace_store:
+            self.trace_store[trace_id]['steps'].append({
+                'timestamp': datetime.utcnow().isoformat(),
+                'service': service_name,
+                'operation': operation,
+                'status': status,
+                'details': details or {}
+            })
+            self.trace_store[trace_id]['status'] = status
+    
+    def record_error(self, trace_id: str, service_name: str, 
+                    error: Exception, context: str = ""):
+        """Record an error in the trace"""
+        if trace_id in self.trace_store:
+            error_info = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'service': service_name,
+                'error_type': type(error).__name__,
+                'error_message': str(error),
+                'context': context,
+                'stack_trace': traceback.format_exc()
+            }
+            self.trace_store[trace_id]['errors'].append(error_info)
+            self.trace_store[trace_id]['status'] = 'ERROR'
+    
+    def end_trace(self, trace_id: str, status: str = 'COMPLETED'):
+        """Mark trace as complete"""
+        if trace_id in self.trace_store:
+            self.trace_store[trace_id]['end_time'] = datetime.utcnow().isoformat()
+            self.trace_store[trace_id]['status'] = status
+            
+    def get_trace(self, trace_id: str) -> Optional[Dict]:
+        """Retrieve a trace by ID"""
+        return self.trace_store.get(trace_id)
+    
+    def trace_request(self, func):
+        """Decorator to automatically trace service requests"""
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Try to get existing trace ID from context
+            trace_id = kwargs.pop('trace_id', None) or args[0].get('trace_id') if args else None
+            
+            if not trace_id:
+                # Start new trace
+                trace = self.start_trace(
+                    service_name=func.__module__,
+                    operation=func.__name__
+                )
+                trace_id = trace['trace_id']
+            
+            try:
+                result = func(*args, **kwargs, trace_id=trace_id)
+                self.add_step(trace_id, func.__module__, func.__name__, 
+                            'SUCCESS', {'result': str(result)[:200]})
+                return result
+            except Exception as e:
+                self.record_error(trace_id, func.__module__, e, 
+                                f"Error in {func.__name__}")
+                self.end_trace(trace_id, 'ERROR')
+                # Re-raise or handle error
+                raise
+            finally:
+                # Only end trace if it originated here
+                if trace_id and trace_id not in args[0].get('trace_id', '') if args else True:
+                    pass  # Let the orchestrator end the trace
+        return wrapper
+
+class TwoServiceErrorHandler:
+    """Error handler for requests spanning two services"""
+    
+    def __init__(self, tracer: RequestTracer):
+        self.tracer = tracer
+        self.logger = logging.getLogger(__name__)
+    
+    def handle_cross_service_request(self, service1_func, service2_func, 
+                                    request_data: Dict) -> Dict:
+        """Handle a request that spans two services"""
+        trace_id = request_data.get('trace_id')
+        
+        # Start trace if not provided
+        if not trace_id:
+            trace = self.tracer.start_trace(
+                service_name='ORCHESTRATOR',
+                operation='cross_service_request',
+                payload=request_data
+            )
+            trace_id = trace['trace_id']
+        
+        result = {
+            'trace_id': trace_id,
+            'success': False,
+            'request_id': request_data.get('request_id', str(uuid.uuid4())),
+            'timeline': [],
+            'errors': [],
+            'data': None
+        }
+        
+        try:
+            # Call Service 1
+            self.tracer.add_step(trace_id, 'SERVICE_1', 'service1_func', 'IN_PROGRESS')
+            try:
+                service1_response = service1_func(request_data, trace_id=trace_id)
+                result['timeline'].append({
+                    'service': 'SERVICE_1',
+                    'status': 'SUCCESS',
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+            except Exception as e:
+                self.tracer.record_error(trace_id, 'SERVICE_1', e, 'Service 1 failed')
+                result['errors'].append({
+                    'service': 'SERVICE_1',
+                    'error_message': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                self._finalize_trace(trace_id, result, 'SERVICE_1_ERROR')
+                return result
+            
+            # Call Service 2 with context from Service 1
+            if not service1_response.get('success'):
+                raise Exception("Service 1 did not return success")
+                
+            self.tracer.add_step(trace_id, 'SERVICE_2', 'service2_func', 'IN_PROGRESS')
+            try:
+                service2_response = service2_func(
+                    request_data, 
+                    service1_context=service1_response,
+                    trace_id=trace_id
+                )
+                result['timeline'].append({
+                    'service': 'SERVICE_2',
+                    'status': 'SUCCESS',
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+            except Exception as e:
+                self.tracer.record_error(trace_id, 'SERVICE_2', e, 'Service 2 failed')
+                result['errors'].append({
+                    'service': 'SERVICE_2',
+                    'error_message': str(e),
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+                self._finalize_trace(trace_id, result, 'SERVICE_2_ERROR')
+                return result
+            
+            # Success case
+            result['success'] = True
+            result['data'] = service2_response
+            result['timeline'].append({
+                'status': 'COMPLETED',
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            self._finalize_trace(trace_id, result, 'COMPLETED')
+            
+        except Exception as e:
+            self.tracer.record_error(trace_id, 'ORCHESTRATOR', e, 
+                                   'Orchestration level error')
+            result['errors'].append({
+                'service': 'ORCHESTRATOR',
+                'error_message': str(e),
+                'timestamp': datetime.utcnow().isoformat()
+            })
+            self._finalize_trace(trace_id, result, 'ORCHESTRATION_ERROR')
+        
+        return result
+    
+    def _finalize_trace(self, trace_id: str, result: Dict, status: str):
+        """Finalize the trace and add diagnostic information"""
+        self.tracer.end_trace(trace_id, status)
+        trace_data = self.tracer.get_trace(trace_id)
+        result['full_trace'] = trace_data
+        
+        # Log the complete trace for operator review
+        self.logger.error(f"Cross-service request failed: {trace_id}")
+        self.logger.error(json.dumps(trace_data, indent=2, default=str))
+    
+    def get_operator_view(self, trace_id: str) -> Dict:
+        """Generate operator-friendly view of the trace"""
+        trace = self.tracer.get_trace(trace_id)
+        if not trace:
+            return {'error': 'Trace not found'}
+        
+        # Create human-readable timeline
+        timeline = []
+        for step in trace['steps']:
+            timeline.append(f"{step['timestamp']} | {step['service']} | "
+                          f"{step['operation']} | {step['status']}")
+        
+        return {
+            'trace_id': trace_id,
+            'request_start': trace['start_time'],
+            'request_end': trace['end_time'],
+            'final_status': trace['status'],
+            'timeline': timeline,
+            'errors_summary': [e['error_message'] for e in trace['errors']],
+            'full_details': trace
+        }
+
+# Example usage with context propagation
+class ServiceWorker:
+    def __init__(self, service_name: str, tracer: RequestTracer):
+        self.service_name = service_name
+        self.tracer = tracer
+    
+    @tracer.trace_request
+    def process(self, data, trace_id=None, **kwargs):
+        """Simulated service function with tracing"""
+        # Simulate work
+        if data.get('simulate_error'):
+            raise ValueError(f"Error in {self.service_name}")
+        
+        return {
+            'success': True,
+            'service': self.service_name,
+            'processed_data': data,
+            'trace_id': trace_id
+        }
+
+# Logging configuration
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+# Export/Retrieval endpoints
+class TraceAPI:
+    def __init__(self, tracer: RequestTracer):
+        self.tracer = tracer
+    
+    def export_trace(self, trace_id: str):
+        """Export trace for external monitoring system"""
+        trace = self.tracer.get_trace(trace_id)
+        if trace:
+            # Convert to JSON for external systems
+            return json.dumps(trace, indent=2, default=str)
+        return None
+    
+    def search_traces(self, service_name: str = None, 
+                     status: str = None, 
+                     time_range: tuple = None):
+        """Search traces for operator analysis"""
+        results = []
+        for trace_id, trace in self.tracer.trace_store.items():
+            if service_name and trace['service_name'] != service_name:
+                continue
+            if status and trace['status'] != status:
+                continue
+            if time_range:
+                start_time = datetime.fromisoformat(trace['start_time'])
+                if not (time_range[0] <= start_time <= time_range[1]):
+                    continue
+            results.append(trace)
+        return results
+
+# Real-world usage example
+def run_example():
+    setup_logging()
+    tracer = RequestTracer()
+    handler = TwoServiceErrorHandler(tracer)
+    
+    # Create service workers
+    service1 = ServiceWorker('SERVICE_1', tracer)
+    service2 = ServiceWorker('SERVICE_2', tracer)
+    
+    # Successful request
+    request = {
+        'request_id': str(uuid.uuid4()),
+        'data': {'amount': 100},
+        'simulate_error': False
+    }
+    
+    result = handler.handle_cross_service_request(
+        service1.process,
+        service2.process,
+        request
+    )
+    
+    print("=" * 50)
+    print("SUCCESSFUL REQUEST RESULT:")
+    print(json.dumps(result, indent=2, default=str))
+    
+    # Error case
+    error_request = {
+        'request_id': str(uuid.uuid4()),
+        'data': {'amount': 200},
+        'simulate_error': True
+    }
+    
+    error_result = handler.handle_cross_service_request(
+        service1.process,
+        service2.process,
+        error_request
+    )
+    
+    print("\n" + "=" * 50)
+    print("ERROR REQUEST RESULT:")
+    print(json.dumps(error_result, indent=2, default=str))
+    
+    # Operator view
+    trace_view = handler.get_operator_view(error_result['trace_id'])
+    print("\n" + "=" * 50)
+    print("OPERATOR VIEW:")
+    for key, value in trace_view.items():
+        print(f"\n{key}: {value}")
+
+if __name__ == "__main__":
+    run_example()
+```
+
+## Key Features
+
+1. **Unified Trace ID**: Single trace ID propagates through both services
+2. **Timeline Recording**: Every step in both services is timestamped
+3. **Error Context**: Full error details with service attribution
+4. **Operator Dashboard**: Human-readable timeline for troubleshooting
+5. **Trace Propagation**: Context passes automatically between services
+6. **Export/Retrieval**: APIs for external monitoring systems
+7. **Search Capabilities**: Filter traces by service, status, or time
+
+## Operator Usage
+
+```python
+# Check specific trace
+trace = handler.get_operator_view(trace_id)
+
+# Search for errors in last hour
+recent_traces = trace_api.search_traces(
+    status='ERROR',
+    time_range=(datetime.utcnow() - timedelta(hours=1), datetime.utcnow())
+)
+
+# Export for external tools
+json_output = trace_api.export_trace(trace_id)
+```
+
+This solution provides complete visibility into cross-service requests, making it easy for operators to trace and diagnose issues across both services.

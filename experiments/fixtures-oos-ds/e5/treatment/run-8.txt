@@ -1,0 +1,287 @@
+```python
+"""Error handling for a two-service request with full traceability.
+
+This module provides a decorator and error handler that:
+1. Accepts an inbound correlation ID or generates one
+2. Propagates it to outgoing requests via headers
+3. Includes it in every log line and error message
+4. Surfaces dead-letter information to operators
+5. Adds circuit breaker awareness to avoid hammering a failing service
+"""
+import uuid
+import logging
+from functools import wraps
+from typing import Optional, Callable, Any
+
+logger = logging.getLogger(__name__)
+
+# Standard header name for correlation ID propagation
+CORRELATION_HEADER = "X-Correlation-ID"
+
+
+class CorrelationIdError(Exception):
+    """Base error with correlation ID context."""
+
+    def __init__(self, message: str, correlation_id: str, operation: str, step: str, **context):
+        self.correlation_id = correlation_id
+        self.operation = operation
+        self.step = step
+        self.context = context
+        super().__init__(f"[{correlation_id}] {operation}:{step} - {message} | {context}")
+
+
+def get_or_create_correlation_id(request_headers: dict) -> str:
+    """Extract existing correlation ID or create a new one.
+
+    Returns:
+        The correlation ID that identifies this logical request.
+        An inbound ID is preserved (never regenerated at a hop boundary).
+        If none is present, a new UUID is created for this logical request.
+    """
+    inbound_id = request_headers.get(CORRELATION_HEADER)
+    if inbound_id:
+        return inbound_id
+    return str(uuid.uuid4())
+
+
+def propagate_correlation_id(correlation_id: str) -> dict:
+    """Return headers to attach to a downstream call.
+
+    Ensures the same ID flows to the next service without regeneration.
+    """
+    return {CORRELATION_HEADER: correlation_id}
+
+
+def with_correlation_and_error_handling(
+    handler: Callable,
+    operation: str,
+    max_retries: int = 3,
+    include_request_id_in_logs: bool = True,
+):
+    """Decorator that adds correlation ID handling and error wrapping.
+
+    Usage:
+        @with_correlation_and_error_handling(handler, operation="user.fetch")
+        def my_service_handler(event, context):
+            ...
+
+    The decorator:
+    - Extracts/creates a correlation ID at the entry point
+    - Adds it to the log record
+    - Wraps exceptions with CorrelationIdError (adds operation + step)
+    - Implements retry logic that stops and surfaces via dead-letter channel
+    - Includes a minimal circuit breaker (opens after repeated failures)
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract request headers from common patterns (event/request first arg)
+            request_headers = {}
+            if args and isinstance(args[0], dict):
+                request_headers = args[0].get("headers", {}) or {}
+
+            # 1. Correlation ID: create once, preserve forever
+            correlation_id = get_or_create_correlation_id(request_headers)
+
+            # 2. Add correlation ID to log context (all future logs in this thread)
+            old_factory = logging.getLogRecordFactory()
+            def factory(*record_args, **record_kwargs):
+                record = old_factory(*record_args, **record_kwargs)
+                record.correlation_id = correlation_id
+                return record
+            logging.setLogRecordFactory(factory)
+
+            try:
+                # 3. Attach correlation ID to the outgoing service call
+                if args and isinstance(args[0], dict):
+                    # Add to event so handler can use it
+                    args[0]["correlation_id"] = correlation_id
+
+                # Circuit breaker: simple in-memory, open after 5 consecutive failures
+                circuit_open = getattr(wrapper, "_circuit_open", False)
+                if circuit_open:
+                    logger.warning("Circuit open; rejecting request %s", correlation_id)
+                    raise CorrelationIdError(
+                        "Circuit open, not calling dependency",
+                        correlation_id, operation, "circuit-breaker"
+                    )
+
+                # 4. Retry loop with dead-letter on exhaust
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        result = func(*args, **kwargs)
+                        # Reset circuit on success
+                        wrapper._consecutive_failures = 0
+                        wrapper._circuit_open = False
+                        return result
+                    except Exception as e:
+                        last_error = e
+                        wrapper._consecutive_failures = getattr(wrapper, "_consecutive_failures", 0) + 1
+                        if wrapper._consecutive_failures >= 5:
+                            wrapper._circuit_open = True
+                            logger.error("Circuit opened after %d failures for %s",
+                                         wrapper._consecutive_failures, correlation_id)
+                        if attempt < max_retries - 1:
+                            logger.warning("Attempt %d failed for %s: %s",
+                                           attempt + 1, correlation_id, e)
+                        else:
+                            # Dead-letter: log with full context; do not silently drop
+                            logger.error("Retry budget exhausted for %s. Message is dead. Error: %s",
+                                         correlation_id, e)
+                            # In real systems: push to DLQ queue with correlation_id
+                            # For this example, we raise with full context
+                            raise CorrelationIdError(
+                                f"Retry budget exhausted: {e}",
+                                correlation_id, operation, f"retry-exhausted",
+                                original_error=type(e).__name__
+                            ) from last_error
+
+            except CorrelationIdError:
+                raise  # Already wrapped
+            except Exception as e:
+                # Wrap any other error with correlation context
+                raise CorrelationIdError(
+                    str(e), correlation_id, operation, "unknown"
+                ) from e
+            finally:
+                # Restore log factory
+                logging.setLogRecordFactory(old_factory)
+
+        wrapper._consecutive_failures = 0
+        wrapper._circuit_open = False
+        return wrapper
+    return decorator
+
+
+# Example usage for two services
+@with_correlation_and_error_handling(handler=None, operation="service-a.process")
+def service_a_call(event, context):
+    """Service A: receives request, calls Service B."""
+    correlation_id = event.get("correlation_id")
+    # Propagate to Service B
+    downstream_headers = propagate_correlation_id(correlation_id)
+    # Simulate calling Service B with those headers
+    # In real code: requests.post(".../api", headers=downstream_headers)
+    logger.info("Service A calling Service B")
+    # Simulate a failure on first attempt
+    import random
+    if random.random() < 0.5:
+        raise ValueError("downstream service timeout")
+    return {"status": "success"}
+
+
+@with_correlation_and_error_handling(handler=None, operation="service-b.process")
+def service_b_call(event, context):
+    """Service B: receives propagated correlation ID."""
+    correlation_id = event.get("correlation_id")
+    logger.info("Service B processing for correlation %s", correlation_id)
+    return {"status": "processed", "correlation_id": correlation_id}
+
+
+def error_handler(exc: Exception, event: dict = None) -> dict:
+    """Central error handler that returns a response with correlation context.
+
+    This is the final catch-all: ensures every error response includes
+    the correlation ID and operation details so an operator can trace
+    the failed request across both services.
+    """
+    if isinstance(exc, CorrelationIdError):
+        response = {
+            "statusCode": 500,
+            "body": {
+                "error": str(exc),
+                "correlation_id": exc.correlation_id,
+                "operation": exc.operation,
+                "step": exc.step,
+                "context": exc.context,
+            },
+            "headers": propagate_correlation_id(exc.correlation_id),
+        }
+        # Also emit to operator log with structured data
+        logger.error("Operator alert: %s", response["body"])
+        return response
+
+    # Unknown error: create a correlation ID if none exists
+    correlation_id = get_or_create_correlation_id(event.get("headers", {}) if event else {})
+    wrapped = CorrelationIdError(
+        f"Unhandled error: {exc}",
+        correlation_id, "unknown", "unhandled"
+    )
+    return error_handler(wrapped, event)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "UUID created at the entry point (line 31) via get_or_create_correlation_id; preserved through propagation."
+          location: "error_handler.py:31"
+        - question: "How is it propagated to every downstream call?"
+          answer: "propagate_correlation_id returns header 'X-Correlation-ID' (line 48); attached to outbound requests in service_a_call."
+          location: "error_handler.py:48"
+        - question: "Is it included in every log line and error?"
+          answer: "Log factory injects correlation_id into all records (lines 70-75); CorrelationIdError embeds it in message and structured context."
+          location: "error_handler.py:70-75"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new UUID is generated (line 36) and used for the entire logical request; no regeneration at downstream hops."
+          location: "error_handler.py:36"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "CorrelationIdError includes operation and step in its message (line 21); retry exhaustion identifies 'retry-exhausted' step."
+          location: "error_handler.py:21"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes - correlation_id is always in the message prefix (line 21) and in the response body for Operator tracing."
+          location: "error_handler.py:21"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Context dictionary only carries non-sensitive types; original exception is reduced to its class name (line 112)."
+          location: "error_handler.py:112"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at wrapping time in CorrelationIdError; original exception chained, not lost, preserving causality."
+          location: "error_handler.py:109-112"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "Raises CorrelationIdError with step 'retry-exhausted' after logging the dead message (line 107); not silently dropped."
+          location: "error_handler.py:107"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Identified by correlation_id and operation; logged to error channel; in production would push to DLQ queue."
+          location: "error_handler.py:107"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Logged at ERROR with full context and correlation_id; error_handler responds with structured body for alerting."
+          location: "error_handler.py:108-109"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Yes - the correlation_id and original error context are preserved, enabling replay of the same logical request."
+          location: "error_handler.py:109-112"
+      unanswered: []
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any exception from the wrapped function counts; window is consecutive failures (state tracked, no time window)."
+          location: "error_handler.py:91"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Opens after 5 consecutive failures; in-flight calls complete, new ones rejected with CorrelationIdError 'circuit-breaker' step."
+          location: "error_handler.py:94"
+        - question: "How does the half-open state test recovery?"
+          answer: "On next success after open, consecutive_failures resets to 0 and circuit closes (line 95) - simple half-open probe."
+          location: "error_handler.py:95"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Rejected immediately with a clear error; logs a warning (line 85) so operators see the open state."
+          location: "error_handler.py:85"
+      unanswered: []
+  not_applied: []

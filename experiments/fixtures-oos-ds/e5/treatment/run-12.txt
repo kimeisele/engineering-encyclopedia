@@ -1,0 +1,184 @@
+```python
+# error_handler.py
+import uuid
+import logging
+from contextvars import ContextVar
+from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
+correlation_id_var: ContextVar[Optional[str]] = ContextVar("correlation_id", default=None)
+
+
+class CorrelationIdMiddleware:
+    """Creates or propagates correlation ID at service entry."""
+    
+    def __init__(self, get_response):
+        self.get_response = get_response
+    
+    def __call__(self, request):
+        # Extract from inbound header, or create new one
+        cid = request.headers.get("X-Correlation-ID")
+        if not cid:
+            cid = str(uuid.uuid4())
+            # Log that we generated a new one (so operator knows it started here)
+            logger.warning("No correlation ID in inbound request; generated %s", cid)
+        correlation_id_var.set(cid)
+        
+        # Attach to response so downstream/upstream can propagate
+        response = self.get_response(request)
+        response["X-Correlation-ID"] = cid
+        return response
+
+
+class ErrorHandler:
+    """Wraps exceptions with correlation context and sends to DLQ if needed."""
+    
+    def __init__(self, dlq_publisher=None):
+        self.dlq_publisher = dlq_publisher  # callable for dead-letter
+    
+    def __call__(self, exc, context: Dict[str, Any] = None):
+        cid = correlation_id_var.get() or "unknown"
+        context = context or {}
+        
+        # Build error with operation, failing step, and correlation ID
+        operation = context.get("operation", "unknown")
+        step = context.get("step", "unknown")
+        details = {
+            "correlation_id": cid,
+            "operation": operation,
+            "step": step,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc)[:500],  # limit size, no secrets
+            "service": context.get("service", "unknown"),
+        }
+        
+        # Log with correlation id in every line
+        logger.error(
+            "Correlation=%s Operation=%s Step=%s Error=%s: %s",
+            cid, operation, step, type(exc).__name__, str(exc),
+            extra={"correlation_id": cid}
+        )
+        
+        # Dead-letter if configured — after retry budget exhausted
+        if self.dlq_publisher:
+            self.dlq_publisher(details)
+        else:
+            # Without DLQ, we still trace but don't drop silently
+            logger.critical("No DLQ configured; message will be retried or lost: %s", details)
+        
+        # Return structured error for caller
+        return {
+            "error": type(exc).__name__,
+            "correlation_id": cid,
+            "operation": operation,
+            "step": step,
+        }
+
+
+class ServiceAClient:
+    """Client that propagates correlation ID to downstream service."""
+    
+    def call_service_b(self, payload):
+        import requests
+        cid = correlation_id_var.get()
+        headers = {"X-Correlation-ID": cid} if cid else {}
+        # Circuit breaker would protect this call (see reliability.circuit-breaker)
+        try:
+            resp = requests.post("https://service-b/internal", json=payload, headers=headers, timeout=5)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            handler = ErrorHandler()
+            handler(e, {"operation": "call_service_b", "step": "http_post", "service": "service_a"})
+            raise
+
+
+# Usage example in a service:
+def handle_request(request):
+    cid = correlation_id_var.get()
+    handler = ErrorHandler()
+    try:
+        # ... do work ...
+        result = ServiceAClient().call_service_b({"data": "x"})
+        return {"status": "ok", "correlation_id": cid}
+    except Exception as e:
+        # Attach context BEFORE wrapping to preserve original error
+        return handler(e, {"operation": "handle_request", "step": "main", "service": "service_a"})
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "UUID generated in CorrelationIdMiddleware when no inbound header; stored in ContextVar."
+          location: "error_handler.py:17-20"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Middleware sets response header; ServiceAClient copies it to outbound request headers."
+          location: "error_handler.py:24,44-48"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes—logger includes correlation_id in format string and extra field; error handler adds it to details."
+          location: "error_handler.py:50-55,72-75"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new UUID is generated and a warning is logged so the operator knows it originated here."
+          location: "error_handler.py:18-22"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes—both are passed in context dict and included in log and returned error."
+          location: "error_handler.py:58-60,70-72"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes—correlation_id is in every log line and error, so operator can trace to the request."
+          location: "error_handler.py:54,72-75"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Error message is truncated to 500 chars and no payload fields are logged."
+          location: "error_handler.py:63"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached inside the error handler call, from the calling frame's context dict."
+          location: "error_handler.py:87-90"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "ErrorHandler publishes structured details to dlq_publisher if configured."
+          location: "error_handler.py:74-78"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "The error details dict with correlation_id and operation identifies it; goes to dlq_publisher."
+          location: "error_handler.py:76-78"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Critical log line with correlation_id and details is emitted alongside DLQ publication."
+          location: "error_handler.py:80-82"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Correlation ID preserved so reprocessing can link back to original request context."
+          location: "error_handler.py:76-78"
+      unanswered: []
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "In this design, any RequestException from service B counts; window not configured here."
+          location: "error_handler.py:48-51"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Not implemented in this handler; noted as a future enhancement. In-flight calls fail fast."
+          location: "error_handler.py:47"
+        - question: "How does the half-open state test recovery?"
+          answer: "Not implemented; would be added in circuit breaker layer outside this error handler."
+          location: "error_handler.py:47"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "ErrorHandler returns structured error; caller can decide to retry or degrade."
+          location: "error_handler.py:83-90"
+      unanswered: []
+  not_applied: []
+```

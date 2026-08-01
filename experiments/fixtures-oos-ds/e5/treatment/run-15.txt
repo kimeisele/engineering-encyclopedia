@@ -1,0 +1,181 @@
+```python
+# errors.py
+import logging
+import uuid
+from functools import wraps
+from typing import Callable
+
+logger = logging.getLogger(__name__)
+
+class ServiceError(Exception):
+    """Base service error with correlation context."""
+
+    def __init__(self, message: str, correlation_id: str, service: str, operation: str, step: str):
+        super().__init__(message)
+        self.correlation_id = correlation_id
+        self.service = service
+        self.operation = operation
+        self.step = step
+        self.message = message
+
+    def to_dict(self) -> dict:
+        return {
+            "error": self.message,
+            "correlation_id": self.correlation_id,
+            "service": self.service,
+            "operation": self.operation,
+            "step": self.step,
+        }
+
+
+def correlation_id_middleware(get_response: Callable):
+    """Extract or create correlation id, propagate to downstream."""
+    @wraps(get_response)
+    def middleware(request):
+        correlation_id = request.headers.get("X-Correlation-Id")
+        if not correlation_id:
+            correlation_id = str(uuid.uuid4())
+        request.correlation_id = correlation_id
+        response = get_response(request)
+        response["X-Correlation-Id"] = correlation_id
+        return response
+    return middleware
+
+
+def error_handler(fn: Callable) -> Callable:
+    """Wrap a service function to catch exceptions, attach correlation context."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ServiceError as e:
+            logger.error(
+                "Service error: %s correlation=%s service=%s operation=%s step=%s",
+                e.message, e.correlation_id, e.service, e.operation, e.step
+            )
+            raise
+        except Exception as e:
+            correlation_id = getattr(kwargs.get('request', None), 'correlation_id', "unknown")
+            logger.exception(
+                "Unhandled error: %s correlation=%s",
+                str(e), correlation_id
+            )
+            raise ServiceError(
+                message=str(e),
+                correlation_id=correlation_id,
+                service=fn.__module__.split('.')[-1],
+                operation=fn.__name__,
+                step="unknown"
+            ) from e
+    return wrapper
+
+
+# service_a.py
+class ServiceA:
+    @correlation_id_middleware
+    def handle(self, request):
+        correlation_id = request.correlation_id
+        try:
+            # Step 1: validate request
+            self._validate(request)
+            # Step 2: call Service B with correlation id propagated
+            response = self._call_service_b(correlation_id, request.payload)
+            return response
+        except Exception:
+            raise
+
+    @error_handler
+    def _validate(self, request):
+        if not request.payload.get("id"):
+            raise ServiceError(
+                message="Missing required field 'id'",
+                correlation_id=request.correlation_id,
+                service="service-a",
+                operation="validate",
+                step="validation"
+            )
+
+    @error_handler
+    def _call_service_b(self, correlation_id: str, payload: dict):
+        # In real code: make HTTP call with X-Correlation-Id header
+        import requests
+        headers = {"X-Correlation-Id": correlation_id}
+        try:
+            resp = requests.post(
+                "http://service-b/api/process",
+                json=payload,
+                headers=headers,
+                timeout=5
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            raise ServiceError(
+                message=f"Downstream call failed: {str(e)}",
+                correlation_id=correlation_id,
+                service="service-a",
+                operation="call_service_b",
+                step="http_call"
+            ) from e
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "X-Correlation-Id header; created in middleware if absent as UUID, propagated via headers."
+          location: "errors.py:22-29"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed as HTTP header X-Correlation-Id in _call_service_b; response echoes it back."
+          location: "errors.py:62-63"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes; logged in error_handler as correlation=%s and embedded in ServiceError.to_dict()."
+          location: "errors.py:35-41, 45-50"
+        - question: "What happens when an inbound call has no id?"
+          answer: "Middleware generates new UUID; never regenerates if header present."
+          location: "errors.py:25-27"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes; ServiceError carries service, operation, step fields set at raise site."
+          location: "errors.py:8-14, 47-50"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes; correlation_id embedded in every ServiceError and log line."
+          location: "errors.py:12, 44-46"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes; only error message and identifiers are logged, no payloads."
+          location: "errors.py:34-38"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context attached when ServiceError is first raised; wrapper preserves it."
+          location: "errors.py:47-50"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "Not implemented; errors propagate to caller for handling, no DLQ yet."
+          location: "errors.py:44-50"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Not addressed; error handler raises, caller decides whether to drop."
+          location: "errors.py:44-50"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Not addressed; would require DLQ mechanism beyond this scope."
+          location: "errors.py:44-50"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Not addressed; requires explicit DLQ implementation."
+          location: "errors.py:44-50"
+      unanswered: []
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "No circuit breaker logic implemented; error handler only, not call-routing logic."
+---APPLICATION_REPORT---

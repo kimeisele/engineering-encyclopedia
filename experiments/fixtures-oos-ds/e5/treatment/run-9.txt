@@ -1,0 +1,382 @@
+```python
+"""
+Error handler for a two-service request that preserves a correlation ID across
+both services so an operator can trace a single logical request.
+
+Design decisions (from the knowledge pack):
+- The correlation ID is created ONCE at the entry point (the API gateway or
+  the first service's ingress). It is NOT regenerated per service.
+- The ID is propagated to every downstream call via the request header
+  `X-Correlation-ID`. If the inbound request has no ID, we generate one and
+  log that fact (so we don't silently lose traceability).
+- EVERY log line and error message includes the correlation ID as a
+  structured field. No log path is allowed to omit it.
+- The error handler attaches operation context (service, step, and the
+  correlation ID) at the point where the failure is known—NOT a generic
+  catch-all that strips context.
+- We do NOT use the idempotency key as the correlation ID; they are distinct
+  concepts. The idempotency key is for retries; the correlation ID is for
+  tracing.
+"""
+
+import logging
+import uuid
+from functools import wraps
+from typing import Callable, Optional
+
+# --- Logging setup ----------------------------------------------------------
+# Use a structured formatter so every log line carries `correlation_id`.
+# This is the single place that guarantees the ID is in every log.
+class CorrelationIdFilter(logging.Filter):
+    """Injects the current correlation ID into every log record."""
+    def __init__(self):
+        super().__init__()
+        self.correlation_id = "NO_CORRELATION_ID"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.correlation_id = self.correlation_id
+        return True
+
+
+# A thread-local (or context-var) is the right way to carry the ID
+# through the call stack without passing it as a parameter everywhere.
+import contextvars
+current_correlation_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_correlation_id", default=None
+)
+
+logger = logging.getLogger("two_service_trace")
+logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler()
+_formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | corr_id=%(correlation_id)s | %(message)s"
+)
+_handler.setFormatter(_formatter)
+logger.addHandler(_handler)
+_corr_filter = CorrelationIdFilter()
+logger.addFilter(_corr_filter)
+
+
+def _set_log_filter(correlation_id: str) -> None:
+    """Link the contextvar to the logging filter."""
+    _corr_filter.correlation_id = correlation_id
+
+
+def get_or_create_correlation_id(inbound_id: Optional[str] = None) -> str:
+    """
+    Returns the inbound correlation ID if present, otherwise generates a new one.
+    A missing inbound ID is logged (not silently ignored) so the operator
+    knows the trace started here.
+    """
+    if inbound_id:
+        return inbound_id
+    new_id = f"gen-{uuid.uuid4().hex[:16]}"
+    logger.warning(
+        "No inbound correlation ID; generated %s. Inbound trace is incomplete.",
+        new_id,
+    )
+    return new_id
+
+
+def propagation_header() -> dict[str, str]:
+    """
+    Header to attach to ANY downstream HTTP call (service A → service B).
+    This is the ONLY way the ID crosses the service boundary.
+    """
+    cid = current_correlation_id.get() or "UNKNOWN"
+    return {"X-Correlation-ID": cid}
+
+
+def traced_handler(correlation_id: str):
+    """
+    Decorator that sets the correlation ID context for the duration of the
+    handler, ensuring the logging filter emits it and the contextvar is set
+    for downstream propagation.
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            token = current_correlation_id.set(correlation_id)
+            _set_log_filter(correlation_id)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                current_correlation_id.reset(token)
+        return wrapper
+    return decorator
+
+
+# --- Error handler (the core of the request) -------------------------------
+class TracedError(Exception):
+    """
+    Raised when a request fails. Carries the operation, the failing step,
+    the service, and the correlation ID. The message names the instance
+    (e.g., order-123) AND the operation, so the operator can find the
+    actual request.
+    """
+    def __init__(self, operation: str, step: str, service: str,
+                 instance_id: str, cause: Exception):
+        self.operation = operation
+        self.step = step
+        self.service = service
+        self.instance_id = instance_id
+        self.correlation_id = current_correlation_id.get() or "UNKNOWN"
+        # Message must identify: what failed, where, with which state.
+        message = (
+            f"{service} failed at '{step}' for {operation} "
+            f"instance={instance_id} corr={self.correlation_id}: {cause}"
+        )
+        super().__init__(message)
+        self.__cause__ = cause  # preserve the original stack trace context
+
+
+def trace_error(operation: str, service_name: str) -> Callable:
+    """
+    Decorator that wraps a service-call function and converts ANY exception
+    into a TracedError with full context. This is applied at each service's
+    call boundary, so the error carries both the local service name and the
+    operation, and it NEVER strips the correlation ID.
+    """
+    def decorator(func: Callable):
+        @wraps(func)
+        def wrapper(instance_id: str, *args, **kwargs):
+            try:
+                return func(instance_id, *args, **kwargs)
+            except Exception as e:
+                # Attach context at the point of failure, not above.
+                raise TracedError(
+                    operation=operation,
+                    step=func.__name__,
+                    service=service_name,
+                    instance_id=instance_id,
+                    cause=e,
+                ) from e
+        return wrapper
+    return decorator
+
+
+# --- Concrete two-service flow --------------------------------------------
+# Service A: receives the inbound request (entry point).
+@traced_handler(correlation_id="inbound-will-be-set")
+def service_a_entry(inbound_request: dict) -> dict:
+    """
+    Entry point for Service A. Creates/validates correlation ID ONCE,
+    sets it for the whole request, then calls Service B.
+    """
+    # Step 0: create or reuse the correlation ID — this must happen FIRST.
+    corr_id = get_or_create_correlation_id(inbound_request.get("headers", {}).get("X-Correlation-ID"))
+    # Re-enter the traced context with the actual ID (the decorator above
+    # used a placeholder; we replace it here).
+    current_correlation_id.set(corr_id)
+    _set_log_filter(corr_id)
+
+    logger.info("Service A received request for order %s", inbound_request["order_id"])
+
+    # Call Service B with the propagation header.
+    try:
+        service_b_result = call_service_b(
+            order_id=inbound_request["order_id"],
+        )
+        return {"service_b": service_b_result, "correlation_id": corr_id}
+    except TracedError as e:
+        # The error already has the correlation ID. We log it here with
+        # the full TracedError message so the operator sees one trace.
+        logger.error("Request failed: %s", e)
+        # Re-raise so the API layer returns an error response with the corr ID.
+        raise
+    except Exception as e:
+        # Defense-in-depth: any exception not already wrapped gets wrapped.
+        raise TracedError(
+            operation="create_order",
+            step="service_a_entry",
+            service="service-a",
+            instance_id=inbound_request["order_id"],
+            cause=e,
+        ) from e
+
+
+@trace_error(operation="create_order", service_name="service-b")
+def service_b_call_impl(order_id: str) -> dict:
+    """
+    The actual work of Service B. The @trace_error decorator ensures that
+    ANY failure here becomes a TracedError with the correlation ID from
+    the current context and the service name/step.
+    """
+    # This function receives the correlation ID implicitly via the
+    # contextvar — no need to thread it as a parameter.
+    logger.info("Service B processing order %s", order_id)
+    # Simulate a downstream call that can fail.
+    if order_id == "fail-now":
+        raise ValueError("Service B processing failed")
+    return {"processed": True, "order_id": order_id}
+
+
+def call_service_b(order_id: str) -> dict:
+    """
+    The actual HTTP call from Service A to Service B. This is where we
+    attach the propagation header. In a real system this would be an
+    HTTP client call; here we do it in-process but demonstrate the header.
+    """
+    headers = propagation_header()
+    # Log that we are sending the header, so the operator sees the hop.
+    logger.info("Calling Service B with headers: X-Correlation-ID=%s", headers["X-Correlation-ID"])
+    # In a real system you'd make the HTTP call with these headers.
+    return service_b_call_impl(order_id)
+
+
+# --- API-level error handler (what the operator sees) ----------------------
+def api_error_response(e: Exception, inbound_corr_id: Optional[str] = None) -> dict:
+    """
+    The last-resort error handler at the API boundary. Ensures that
+    EVERY error response includes the correlation ID, even if the
+    exception was not a TracedError (shouldn't happen, but we're safe).
+
+    This is what the operator uses to find the request in the logs.
+    """
+    corr_id = current_correlation_id.get() or inbound_corr_id or "UNKNOWN"
+    if isinstance(e, TracedError):
+        # e.correlation_id is already set and equals corr_id.
+        response = {
+            "status": 500,
+            "error": "internal_error",
+            "message": f"Operation {e.operation} failed at {e.step} in {e.service}",
+            "instance_id": e.instance_id,
+            "correlation_id": e.correlation_id,
+        }
+    else:
+        # Generic wrapper — but we still attach the corr ID.
+        response = {
+            "status": 500,
+            "error": "unexpected_error",
+            "message": str(e),
+            "correlation_id": corr_id,
+        }
+    logger.error("Returning error response: %s", response)
+    return response
+
+
+# --- Demonstration / test ---------------------------------------------------
+if __name__ == "__main__":
+    # Test 1: successful flow
+    result = service_a_entry({
+        "headers": {"X-Correlation-ID": "trace-abc-123"},
+        "order_id": "order-1",
+    })
+    print("SUCCESS RESULT:", result)
+
+    print("\n--- Failure flow (no inbound correlation ID) ---")
+    try:
+        # This will generate a new correlation ID and log it.
+        service_a_entry({
+            "headers": {},  # no inbound correlation ID
+            "order_id": "fail-now",
+        })
+    except TracedError as e:
+        error_response = api_error_response(e)
+        print("ERROR RESPONSE:", error_response)
+
+    print("\n--- Failure flow (with inbound correlation ID) ---")
+    try:
+        service_a_entry({
+            "headers": {"X-Correlation-ID": "trace-xyz-987"},
+            "order_id": "fail-now",
+        })
+    except TracedError as e:
+        error_response = api_error_response(e)
+        print("ERROR RESPONSE:", error_response)
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A UUID generated once at service-a entry (get_or_create_correlation_id), NOT per service. Inbound X-Correlation-ID is reused if present."
+          location: "src/error_handler.py:68-78"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Via X-Correlation-ID header in propagation_header(); the contextvar carries it through the call stack; passed to service-b call."
+          location: "src/error_handler.py:80-92"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes: logging filter injects corr_id into every record; TracedError embeds it in message; api_error_response includes it in JSON."
+          location: "src/error_handler.py:35-58, 109-124, 179-194"
+        - question: "What happens when an inbound call has no id?"
+          answer: "Generated a new one and logged a warning that the trace started here, so the operator knows the boundary is incomplete."
+          location: "src/error_handler.py:73-81"
+      unanswered: []
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes: TracedError message includes operation, step, service, and instance_id (e.g., 'create_order failed at ... for order-1')."
+          location: "src/error_handler.py:102-108"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes: correlation_id and instance_id (order ID) are in the message and in the JSON error response."
+          location: "src/error_handler.py:104-106, 145-152"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes: we only include order ID (identifier), not payload contents, headers, or credentials. No PII logged."
+          location: "src/error_handler.py:102-106"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Before: @trace_error decorator catches at the function boundary and attaches service/step/instance/corr BEFORE any upper layer sees it."
+          location: "src/error_handler.py:103-110, 121-132"
+      unanswered: []
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: "What happens after the last retry attempt?"
+          answer: "Not applicable to this request—no retry mechanism. We fail fast and return a 500 with the correlation ID."
+          location: "src/error_handler.py:145-152"
+        - question: "What identifies a message as dead, and where does it go?"
+          answer: "Unanswered: no queue exists in this two-service request handler."
+          location: "N/A"
+        - question: "How is a dead letter surfaced to an operator?"
+          answer: "Unanswered: no DLQ concept in this synchronous two-service handler."
+          location: "N/A"
+        - question: "Can a dead letter be reprocessed safely?"
+          answer: "Unanswered: no reprocessing in this scope."
+          location: "N/A"
+      unanswered:
+        - question: "What identifies a message as dead, and where does it go?"
+          reason: "The request is a synchronous two-service call, not a message queue. No DLQ exists in this architecture."
+        - question: "How is a dead letter surfaced to an operator?"
+          reason: "No message broker in the design; errors are surfaced via HTTP error responses and logs."
+        - question: "Can a dead letter be reprocessed safely?"
+          reason: "Not applicable; there is no queue from which to reprocess."
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Unanswered: no circuit breaker in this simple handler; only direct calls."
+          location: "N/A"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Unanswered: no breaker logic; every call is direct."
+          location: "N/A"
+        - question: "How does the half-open state test recovery?"
+          answer: "Unanswered: no state machine."
+          location: "N/A"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Unanswered: caller always attempts the call; failures are caught and wrapped."
+          location: "N/A"
+      unanswered:
+        - question: "What counts as a failure, and over what window?"
+          reason: "Request scope is only a two-service trace handler; a circuit breaker is a separate reliability concern not requested."
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          reason: "Not in the requirement; the handler does not implement breaker semantics."
+        - question: "How does the half-open state test recovery?"
+          reason: "No breaker states exist in this code."
+        - question: "What does the caller do while the circuit is open?"
+          reason: "No breaker – caller always attempts direct call and wraps failures."
+  not_applied:
+    - node: reliability.dead-letter-queue
+      reason: "The task is a synchronous two-service request handler; DLQ is for async message queues, absent here."
+    - node: reliability.circuit-breaker
+      reason: "The request asks for a traceable error handler, not fault-tolerance; breaker logic is out of scope."
+```

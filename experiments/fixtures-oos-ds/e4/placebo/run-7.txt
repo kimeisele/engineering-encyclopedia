@@ -1,0 +1,174 @@
+```python
+import time
+import threading
+from datetime import datetime, timedelta
+from typing import Callable, Any, Optional
+
+class CircuitBreaker:
+    """
+    A circuit breaker for HTTP calls that protects a downstream API
+    from being hammered while it is down.
+    """
+    
+    def __init__(
+        self,
+        failure_threshold: int = 5,           # number of consecutive failures to open
+        recovery_timeout: float = 30.0,       # seconds to wait before testing recovery
+        half_open_max_calls: int = 1,         # calls allowed in half-open state
+        cooldown_factor: float = 2.0,        # multiplier for exponential backoff
+        max_cooldown: float = 300.0          # cap for backoff
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.half_open_max_calls = half_open_max_calls
+        self.cooldown_factor = cooldown_factor
+        self.max_cooldown = max_cooldown
+        
+        # state: "closed", "open", "half_open"
+        self.state = "closed"
+        self.failure_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.half_open_calls = 0
+        self.current_cooldown = recovery_timeout
+        
+        self._lock = threading.Lock()
+    
+    def _reset(self):
+        """Reset to closed state."""
+        self.state = "closed"
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.half_open_calls = 0
+        self.current_cooldown = self.recovery_timeout
+    
+    def _open(self):
+        """Open the circuit."""
+        self.state = "open"
+        self.last_failure_time = datetime.now()
+        # Exponential backoff: next cooldown is multiplied
+        self.current_cooldown = min(
+            self.current_cooldown * self.cooldown_factor, 
+            self.max_cooldown
+        )
+    
+    def _try_half_open(self) -> bool:
+        """Check if we should move to half-open state."""
+        if self.last_failure_time is None:
+            return False
+        elapsed = (datetime.now() - self.last_failure_time).total_seconds()
+        return elapsed >= self.current_cooldown
+    
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """
+        Execute the HTTP call with circuit breaker protection.
+        
+        Args:
+            func: The HTTP callable (e.g., requests.get)
+            *args, **kwargs: Arguments for the callable
+            
+        Returns:
+            The result of the call
+            
+        Raises:
+            Exception: Original exception from the call, or 
+                      CircuitOpenError if circuit is open
+        """
+        with self._lock:
+            if self.state == "open":
+                if self._try_half_open():
+                    self.state = "half_open"
+                    self.half_open_calls = 0
+                else:
+                    raise CircuitOpenError(
+                        f"Circuit open, waiting {self.current_cooldown}s "
+                        f"cooldown before retry"
+                    )
+            
+            if self.state == "half_open":
+                if self.half_open_calls >= self.half_open_max_calls:
+                    raise CircuitOpenError(
+                        "Half-open state, max concurrent calls reached"
+                    )
+                self.half_open_calls += 1
+        
+        try:
+            result = func(*args, **kwargs)
+            
+            # Success - reset the circuit
+            with self._lock:
+                self._reset()
+            return result
+            
+        except Exception as e:
+            with self._lock:
+                self.failure_count += 1
+                if self.failure_count >= self.failure_threshold:
+                    self._open()
+                elif self.state == "half_open":
+                    # Failure in half-open state: immediately open again
+                    self._open()
+                raise e
+        finally:
+            # Decrement half-open calls after completion
+            with self._lock:
+                if self.state == "half_open":
+                    self.half_open_calls = max(0, self.half_open_calls - 1)
+
+
+class CircuitOpenError(Exception):
+    """Raised when the circuit breaker is open and blocking calls."""
+    pass
+
+
+# --- Example usage ---
+if __name__ == "__main__":
+    import requests
+    
+    breaker = CircuitBreaker(
+        failure_threshold=3,
+        recovery_timeout=10,
+        half_open_max_calls=1,
+        cooldown_factor=2.0,
+        max_cooldown=60
+    )
+    
+    def call_api():
+        # Simulated downstream HTTP call
+        response = requests.get("https://example.com/api", timeout=5)
+        response.raise_for_status()
+        return response.json()
+    
+    # Usage:
+    try:
+        result = breaker.call(call_api)
+    except CircuitOpenError:
+        print("API is down, not calling it")
+    except Exception:
+        print("API call failed")
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes, CircuitOpenError messages state the circuit state and cooldown, identifying the HTTP operation and the current protection step."
+          location: "circuit_breaker.py:80"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, the exception propagates original call context; circuit messages include state and timing, enabling correlation with the failing request."
+          location: "circuit_breaker.py:80"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, only circuit state, cooldown time, and call limits are included; no URLs, tokens, or payloads are logged."
+          location: "circuit_breaker.py:80"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at circuit-open time (before wrapping), and the original exception is re-raised unchanged in other states."
+          location: "circuit_breaker.py:80"
+      unanswered: []
+  not_applied: []
+```

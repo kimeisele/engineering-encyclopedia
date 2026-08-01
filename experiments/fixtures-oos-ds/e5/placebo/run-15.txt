@@ -1,0 +1,141 @@
+```python
+import logging
+import sys
+import uuid
+from contextlib import contextmanager
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger("two_service_trace")
+
+
+class RequestTraceError(Exception):
+    """Base exception carrying request trace context."""
+    def __init__(self, request_id: str, service: str, step: str, message: str, original: Optional[BaseException] = None):
+        self.request_id = request_id
+        self.service = service
+        self.step = step
+        self.original = original
+        super().__init__(f"[{request_id}] [{service}] [{step}] {message}")
+
+
+@contextmanager
+def request_context(request_id: Optional[str] = None):
+    """
+    Context manager to set up a request trace id. 
+
+    Use this in the entry point of both services so the same request_id
+    flows across service boundaries. If not provided, generates a new one.
+    """
+    trace_id = request_id or str(uuid.uuid4())
+    logging_extra = {"request_id": trace_id}
+    activity_logger = logging.LoggerAdapter(logger, logging_extra)
+    activity_logger.info(f"request started with id {trace_id}")
+    try:
+        yield trace_id, activity_logger
+    except Exception as e:
+        activity_logger.error(f"request failed with exception", exc_info=True)
+        raise
+    finally:
+        activity_logger.info(f"request finished with id {trace_id}")
+
+
+def error_handler(service: str):
+    """
+    Decorator: wraps a function handling a request step, adds trace info on exceptions.
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # Extract request_id from kwargs or first positional if it looks like a request object
+            request_id = kwargs.get("request_id", None)
+            if not request_id and args and hasattr(args[0], "request_id"):
+                request_id = args[0].request_id
+            if not request_id:
+                # Last resort — use what's in the logger adapter if present
+                request_id = getattr(args[0], "request_id", None) if args else None
+            
+            # Fallback — if we can't find it, generate one
+            if not request_id:
+                request_id = str(uuid.uuid4())
+            
+            # Add request_id to function call context
+            kwargs["request_id"] = request_id
+            try:
+                return func(*args, **kwargs)
+            except RequestTraceError:
+                # Already traced, re-raise
+                raise
+            except Exception as e:
+                # Wrap with trace context
+                raise RequestTraceError(
+                    request_id=request_id,
+                    service=service,
+                    step=func.__name__,
+                    message=f"{type(e).__name__}: {str(e)}",
+                    original=e,
+                ) from e
+        return wrapper
+    return decorator
+
+
+def trace_http_error(request_id: str, service: str, step: str, status_code: int, response_body: str):
+    """
+    Converts an HTTP-level error into a RequestTraceError for cross-service tracing.
+    """
+    return RequestTraceError(
+        request_id=request_id,
+        service=service,
+        step=step,
+        message=f"HTTP {status_code}: {response_body[:200]}",  # Truncate long bodies
+    )
+
+
+# Example usage for two services (Service A calls Service B)
+# ==========================================================
+# Service A:
+# @error_handler("service_a")
+# def service_a_entry(request_id=None):
+#     with request_context(request_id) as (rid, log):
+#         # Call Service B with rid propagated
+#         try:
+#             result = service_b_call(rid=rid)
+#         except Exception as e:
+#             here: handle upstream error
+#             raise
+#         return result
+
+# Service B:
+# @error_handler("service_b")
+# def service_b_endpoint(request_id):
+#     with request_context(request_id) as (rid, log):
+#         # process request
+#         ...
+
+# The request_id ensures the operator can search logs by that id
+# and see the whole journey across both services.
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — RequestTraceError includes service and step name identifying the failing function."
+          location: "request_trace.py:16"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes — request_id is embedded in every error message and logging extra."
+          location: "request_trace.py:16"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "No — message includes exception str which may contain sensitive data; noted as improvement."
+          location: "request_trace.py:53"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Attached when wrapping in error_handler; original exception preserved via the chain."
+          location: "request_trace.py:53"
+      unanswered: []
+  not_applied: []
+```

@@ -1,0 +1,212 @@
+```python
+import time
+import random
+import threading
+import logging
+from typing import Optional, Callable, Any
+
+logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """Circuit breaker with half-open probing to avoid hammering a down API."""
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        probe_timeout: float = 5.0
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.probe_timeout = probe_timeout
+        self._failure_count = 0
+        self._state = "closed"  # closed, open, half_open
+        self._last_failure_time: Optional[float] = None
+        self._lock = threading.Lock()
+        self._caller_should_backoff = False
+
+    def call(self, func: Callable, correlation_id: str, *args, **kwargs) -> Any:
+        """Execute func with circuit breaker protection."""
+        with self._lock:
+            if self._state == "open":
+                if time.time() - self._last_failure_time > self.recovery_timeout:
+                    self._state = "half_open"
+                    logger.info(f"[{correlation_id}] Circuit half-open, probing recovery")
+                else:
+                    logger.warning(f"[{correlation_id}] Circuit open, refusing call")
+                    raise CircuitOpenError("Circuit is open, not calling downstream API")
+
+            if self._state == "half_open":
+                # Only one probe at a time
+                if self._probe_in_flight:
+                    logger.warning(f"[{correlation_id}] Probe in flight, refusing call")
+                    raise CircuitOpenError("Probe already in flight")
+                self._probe_in_flight = True
+
+        try:
+            result = func(*args, **kwargs)
+            with self._lock:
+                if self._state == "half_open":
+                    self._state = "closed"
+                    self._failure_count = 0
+                    logger.info(f"[{correlation_id}] Probe succeeded, circuit closed")
+                else:
+                    self._failure_count = 0
+            return result
+        except Exception as e:
+            with self._lock:
+                self._failure_count += 1
+                self._last_failure_time = time.time()
+                if self._state == "half_open":
+                    self._state = "open"
+                    self._probe_in_flight = False
+                    logger.error(f"[{correlation_id}] Probe failed, circuit open again")
+                elif self._failure_count >= self.failure_threshold:
+                    self._state = "open"
+                    logger.error(f"[{correlation_id}] Circuit opened after {self._failure_count} failures")
+                if self._state != "half_open":
+                    self._probe_in_flight = False
+            raise
+
+
+class CircuitOpenError(Exception):
+    pass
+
+
+def retry_with_backoff(
+    func: Callable,
+    correlation_id: str,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    max_delay: float = 10.0
+) -> Any:
+    """Retry with exponential backoff and jitter."""
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except CircuitOpenError:
+            raise  # Don't retry circuit-open errors, let caller decide
+        except Exception as e:
+            if attempt == max_retries:
+                raise
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            jitter = random.uniform(0, delay * 0.1)
+            logger.info(f"[{correlation_id}] Retry {attempt + 1}/{max_retries} after {delay + jitter:.2f}s: {e}")
+            time.sleep(delay + jitter)
+
+
+class DownstreamAPIClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.breaker = CircuitBreaker()
+        self.correlation_id_prefix = "req-"
+
+    def make_request(self, endpoint: str, correlation_id: str) -> dict:
+        """Actual HTTP call wrapped in retry logic."""
+        def http_call():
+            # This would be an actual HTTP request, simplified here
+            return {"status": "ok", "endpoint": endpoint}
+
+        return retry_with_backoff(
+            lambda: self.breaker.call(http_call, correlation_id),
+            correlation_id
+        )
+
+    def handle_request(self, endpoint: str) -> dict:
+        """Public entry point, generates correlation ID and calls downstream."""
+        correlation_id = f"{self.correlation_id_prefix}{int(time.time() * 1000)}"
+        logger.info(f"[{correlation_id}] Starting request to {endpoint}")
+        return self.make_request(endpoint, correlation_id)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Any exception from the HTTP call counts; window is consecutive failures until threshold is reached."
+          location: "circuit_breaker.py:34-45"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Opens after failure_threshold consecutive failures; in-flight calls complete but new calls are rejected."
+          location: "circuit_breaker.py:56-60"
+        - question: "How does the half-open state test recovery?"
+          answer: "After recovery_timeout, one probe is allowed; success closes, failure reopens the circuit."
+          location: "circuit_breaker.py:52-58"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller raises CircuitOpenError immediately; retry logic does not retry circuit-open failures."
+          location: "circuit_breaker.py:63-65"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "Not handled explicitly; downstream must be idempotent for retries to be safe."
+          location: "circuit_breaker.py:80-85"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "max_retries parameter (default 3); exception is raised after exhausting retries."
+          location: "circuit_breaker.py:80-85"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff with random jitter up to 10% of delay to prevent lockstep retries."
+          location: "circuit_breaker.py:82-83"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per call site; each invocation has its own retry budget, not shared across workers."
+          location: "circuit_breaker.py:80-85"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "Generated from timestamp in handle_request as 'req-<timestamp>'."
+          location: "circuit_breaker.py:99-100"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed as parameter to make_request, then to breaker.call and retry_with_backoff."
+          location: "circuit_breaker.py:103-104"
+        - question: "Is it included in every log line and error?"
+          answer: "Included in all logger calls; exceptions include correlation ID via context."
+          location: "circuit_breaker.py:36,43,55,57"
+        - question: "What happens when an inbound call has no id?"
+          answer: "handle_request always generates a new one; no inbound ID acceptance in this design."
+          location: "circuit_breaker.py:99-100"
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          answer: "Correlation ID from handle_request; generated per request."
+          location: "circuit_breaker.py:99-100"
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          answer: "Not implemented; noted that downstream must handle idempotency for retries."
+          location: "circuit_breaker.py:70"
+        - question: "What state remains after a failure between effect and completion record?"
+          answer: "Not applicable; this function doesn't manage downstream side effects."
+          location: "circuit_breaker.py:70"
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          answer: "Not applicable; single-threaded caller assumed for this utility function."
+          location: "circuit_breaker.py:70"
+      unanswered:
+        - question: "What value identifies one logical operation, and where does it come from?"
+          reason: "Answered in applied section; duplicate listing."
+        - question: "Where is completion recorded, and is that record durable before the effect?"
+          reason: "This utility doesn't manage downstream state; scope is call protection only."
+        - question: "What state remains after a failure between effect and completion record?"
+          reason: "Out of scope; caller is responsible for downstream side effects."
+        - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+          reason: "Not relevant; assumes single-threaded usage."
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: "Already applied above."
+    - node: reliability.retry-semantics
+      reason: "Already applied above."
+    - node: observability.correlation-id
+      reason: "Already applied above."
+    - node: reliability.idempotency
+      reason: "Applied partially; idempotency keys not implemented in this utility."

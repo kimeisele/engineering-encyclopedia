@@ -1,0 +1,77 @@
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+
+def call_downstream_api(url, max_retries=3, initial_backoff=1, max_backoff=10):
+    """
+    Calls a downstream HTTP API with exponential backoff retry logic.
+
+    Args:
+        url: The URL of the downstream API to call.
+        max_retries: Maximum number of retry attempts (default: 3).
+        initial_backoff: Initial backoff time in seconds (default: 1).
+        max_backoff: Maximum backoff time in seconds (default: 10).
+
+    Returns:
+        The response from the API if successful.
+
+    Raises:
+        RequestException: If the API call fails after all retries.
+    """
+    retry_count = 0
+    backoff = initial_backoff
+
+    while retry_count <= max_retries:
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            return response
+        except RequestException as e:
+            if retry_count == max_retries:
+                # Add context to the exception before raising
+                raise RequestException(
+                    f"API call failed after {max_retries} retries. "
+                    f"Last error: {str(e)}. URL: {url}"
+                ) from e
+
+            # Exponential backoff with jitter to avoid thundering herd
+            sleep_time = min(backoff * (2 ** retry_count), max_backoff)
+            time.sleep(sleep_time)
+            retry_count += 1
+
+    # This line is theoretically unreachable due to the raise above
+    raise RequestException("API call failed after all retries")
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 7eb2a2da0948
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes the API call failure and retry steps.
+          location: "file: call_downstream_api function"
+        - question: Can the operator find the request or job from the message?
+          answer: The URL is included in the error message for traceability.
+          location: "file: call_downstream_api function"
+        - question: Is sensitive data excluded from the message?
+          answer: Only the URL is included, no sensitive data is exposed.
+          location: "file: call_downstream_api function"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is added when creating the new exception before raising.
+          location: "file: call_downstream_api function"
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in the pack, already applied above
+    - node: observability.error-context
+      reason: Duplicate node in the pack, already applied above
+    - node: observability.error-context
+      reason: Duplicate node in the pack, already applied above
+```

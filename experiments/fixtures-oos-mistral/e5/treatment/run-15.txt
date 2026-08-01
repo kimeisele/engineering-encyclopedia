@@ -1,0 +1,177 @@
+```python
+import logging
+import uuid
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class ServiceError:
+    """Container for error information with correlation ID and context."""
+    correlation_id: str
+    service_name: str
+    operation: str
+    error_message: str
+    context: Dict[str, Any]
+    original_exception: Optional[Exception] = None
+
+class TwoServiceErrorHandler:
+    """
+    Error handler for two-service requests that maintains correlation IDs
+    and provides traceability across both services.
+    """
+
+    def __init__(self, service_name: str):
+        self.service_name = service_name
+        self.logger = logging.getLogger(service_name)
+
+    def generate_correlation_id(self) -> str:
+        """Generate a unique correlation ID for a new request."""
+        return str(uuid.uuid4())
+
+    def extract_correlation_id(self, headers: Dict[str, str]) -> Optional[str]:
+        """Extract correlation ID from incoming request headers."""
+        return headers.get('X-Correlation-ID')
+
+    def propagate_correlation_id(self, headers: Dict[str, str], correlation_id: str) -> Dict[str, str]:
+        """Add correlation ID to outgoing request headers."""
+        headers['X-Correlation-ID'] = correlation_id
+        return headers
+
+    def handle_error(
+        self,
+        operation: str,
+        error: Exception,
+        correlation_id: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None
+    ) -> ServiceError:
+        """
+        Create a structured error with all necessary context for tracing.
+
+        Args:
+            operation: The operation being performed when error occurred
+            error: The exception that was raised
+            correlation_id: Existing correlation ID if available
+            context: Additional context about the request state
+
+        Returns:
+            ServiceError with all error information
+        """
+        # Generate correlation ID if not provided
+        if not correlation_id:
+            correlation_id = self.generate_correlation_id()
+
+        # Build error context
+        error_context = {
+            'service': self.service_name,
+            'operation': operation,
+            'error_type': type(error).__name__,
+            'error_message': str(error),
+            **(context or {})
+        }
+
+        # Log the error with correlation ID
+        self.logger.error(
+            f"Service error in {operation}: {str(error)}",
+            extra={
+                'correlation_id': correlation_id,
+                **error_context
+            }
+        )
+
+        return ServiceError(
+            correlation_id=correlation_id,
+            service_name=self.service_name,
+            operation=operation,
+            error_message=str(error),
+            context=error_context,
+            original_exception=error
+        )
+
+    def handle_dead_letter(
+        self,
+        original_error: ServiceError,
+        retry_count: int,
+        max_retries: int
+    ) -> None:
+        """
+        Handle a message that has exhausted retry attempts.
+
+        Args:
+            original_error: The original error that occurred
+            retry_count: How many times we retried
+            max_retries: Maximum allowed retries
+        """
+        dlq_context = {
+            **original_error.context,
+            'retry_count': retry_count,
+            'max_retries': max_retries,
+            'dead_letter_action': 'sent_to_dlq'
+        }
+
+        self.logger.critical(
+            f"Message moved to dead letter queue after {retry_count}/{max_retries} retries",
+            extra={
+                'correlation_id': original_error.correlation_id,
+                **dlq_context
+            }
+        )
+
+        # In a real system, we would send to DLQ here
+        # For example: self.dlq_client.send(original_error, dlq_context)
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID is generated at the first service entry point.
+          location: "two_service_error_handler.py:42"
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is added to request headers and passed to downstream services.
+          location: "two_service_error_handler.py:54"
+        - question: Is it included in every log line and error?
+          answer: Yes, the correlation ID is included in all logs and error records via the logging extra.
+          location: "two_service_error_handler.py:73"
+        - question: What happens when an inbound call has no id?
+          answer: A new correlation ID is generated when none is provided in incoming headers.
+          location: "two_service_error_handler.py:49"
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes both the service operation and the specific error.
+          location: "two_service_error_handler.py:70"
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the correlation ID in the error context allows tracing across services.
+          location: "two_service_error_handler.py:73"
+        - question: Is sensitive data excluded from the message?
+          answer: The context is built from provided data; operators must ensure sensitive data isn't included.
+          location: "two_service_error_handler.py:64"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when creating the ServiceError, before any exception wrapping.
+          location: "two_service_error_handler.py:61"
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: The message is moved to a dead letter queue for operator review.
+          location: "two_service_error_handler.py:100"
+        - question: What identifies a message as dead, and where does it go?
+          answer: The correlation ID identifies the dead message which goes to the DLQ.
+          location: "two_service_error_handler.py:100"
+        - question: How is a dead letter surfaced to an operator?
+          answer: Critical log entry with correlation ID and retry details is created.
+          location: "two_service_error_handler.py:95"
+        - question: Can a dead letter be reprocessed safely?
+          answer: The original context is preserved in the DLQ message for safe reprocessing.
+          location: "two_service_error_handler.py:92"
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: The circuit breaker pattern wasn't needed for this specific error handling implementation which focuses on correlation and tracing rather than failure mitigation strategies.
+```

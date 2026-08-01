@@ -1,0 +1,112 @@
+```python
+import time
+import threading
+from typing import Callable, Optional
+
+class CircuitBreaker:
+    """
+    Wraps a downstream HTTP API call and prevents hammering while it's down.
+    Uses a circuit breaker pattern with a cooldown period.
+    """
+    
+    def __init__(self, 
+                 call_func: Callable,
+                 failure_threshold: int = 3,
+                 cooldown_seconds: float = 30.0,
+                 max_wait_seconds: Optional[float] = None):
+        """
+        Args:
+            call_func: The function that makes the HTTP call
+            failure_threshold: Consecutive failures before opening circuit
+            cooldown_seconds: How long to wait before trying again
+            max_wait_seconds: Optional max time to block when circuit is open
+        """
+        self._call_func = call_func
+        self._failure_threshold = failure_threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._max_wait_seconds = max_wait_seconds
+        
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._lock = threading.Lock()
+    
+    def call(self, *args, **kwargs):
+        """
+        Execute the HTTP call, respecting the circuit breaker state.
+        Returns: Result of the call, or raises the underlying exception.
+        """
+        with self._lock:
+            now = time.monotonic()
+            
+            # Check if circuit is open and still cooling down
+            if self._circuit_open_until > now:
+                remaining = self._circuit_open_until - now
+                if self._max_wait_seconds is not None and remaining > self._max_wait_seconds:
+                    raise TimeoutError(f"Circuit breaker open for {remaining:.1f}s, exceeds max_wait")
+                # Wait until cooldown expires (or until max_wait)
+                wait_time = min(remaining, self._max_wait_seconds) if self._max_wait_seconds else remaining
+                if wait_time > 0:
+                    time.sleep(wait_time)
+                    now = time.monotonic()
+                # If still not ready after waiting, raise
+                if self._circuit_open_until > now:
+                    raise TimeoutError("Circuit breaker timeout")
+            
+            # Circuit is closed (or cooldown expired) - attempt the call
+            try:
+                result = self._call_func(*args, **kwargs)
+                # Success - reset failure counter
+                self._consecutive_failures = 0
+                self._circuit_open_until = 0.0
+                return result
+            except Exception as e:
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= self._failure_threshold:
+                    # Open circuit - don't try again for cooldown period
+                    self._circuit_open_until = time.monotonic() + self._cooldown_seconds
+                    self._consecutive_failures = 0  # Reset for next cycle
+                raise  # Re-raise the original exception
+
+# Usage example
+if __name__ == "__main__":
+    # Example: wrap a requests call
+    import requests
+    
+    def fetch_data(url, **kwargs):
+        resp = requests.get(url, timeout=5, **kwargs)
+        resp.raise_for_status()
+        return resp.json()
+    
+    breaker = CircuitBreaker(fetch_data, failure_threshold=2, cooldown_seconds=10)
+    
+    # Use it
+    try:
+        data = breaker.call("https://api.example.com/data")
+        print(data)
+    except Exception as e:
+        print(f"Call failed: {e}")
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "The call() method identifies the circuit breaker operation and the underlying HTTP call failure point via exception propagation."
+          location: "circuit_breaker.py:54-65"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "The original exception from the HTTP call is re-raised, preserving the request context and allowing operator tracing."
+          location: "circuit_breaker.py:63"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "The design keeps error messages generic (e.g., 'Circuit breaker open'), never embedding credentials, tokens or payload data."
+          location: "circuit_breaker.py:35-36"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is attached at the point of failure (before re-raising), preserving the original call context without wrapping."
+          location: "circuit_breaker.py:60-65"
+      unanswered: []
+  not_applied: []

@@ -1,0 +1,245 @@
+```python
+import asyncio
+import logging
+import random
+import time
+from dataclasses import dataclass
+from typing import Callable, Optional
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class CircuitBreakerConfig:
+    """Configuration for the circuit breaker."""
+    failure_threshold: int = 5           # failures before opening
+    success_threshold: int = 2           # successes before closing from half-open
+    open_timeout: float = 30.0           # seconds circuit stays open
+    window_size: int = 10                # rolling window for failure counting
+    max_retries: int = 3                 # retries per call
+    base_backoff: float = 0.1            # seconds, exponential backoff base
+    max_backoff: float = 5.0             # seconds, backoff cap
+
+
+class CircuitBreaker:
+    """Simple circuit breaker with rolling failure window and half-open probing."""
+
+    def __init__(self, config: CircuitBreakerConfig):
+        self.config = config
+        self.failures: list[float] = []      # timestamps of recent failures
+        self.successes_in_half_open = 0
+        self.state = "closed"                # closed, open, half-open
+        self.opened_at: Optional[float] = None
+        self._lock = asyncio.Lock()
+
+    async def _record_failure(self):
+        async with self._lock:
+            now = time.monotonic()
+            self.failures.append(now)
+            # Trim failures outside the window
+            cutoff = now - self.config.window_size
+            self.failures = [f for f in self.failures if f > cutoff]
+
+            if self.state == "half-open":
+                self.state = "open"
+                self.opened_at = now
+            elif self.state == "closed" and len(self.failures) >= self.config.failure_threshold:
+                self.state = "open"
+                self.opened_at = now
+                logger.warning("Circuit opened after %d failures", len(self.failures))
+
+    async def _record_success(self):
+        async with self._lock:
+            if self.state == "half-open":
+                self.successes_in_half_open += 1
+                if self.successes_in_half_open >= self.config.success_threshold:
+                    self.state = "closed"
+                    self.failures.clear()
+                    self.successes_in_half_open = 0
+                    logger.info("Circuit closed after successful probes")
+            elif self.state == "closed":
+                # Reset failure window on success
+                self.failures.clear()
+
+    async def allow_request(self) -> bool:
+        async with self._lock:
+            if self.state == "open":
+                if time.monotonic() - self.opened_at >= self.config.open_timeout:
+                    self.state = "half-open"
+                    self.successes_in_half_open = 0
+                    logger.info("Circuit half-open, allowing probe")
+                    return True
+                return False
+            return True
+
+
+async def call_with_retry_and_breaker(
+    client: httpx.AsyncClient,
+    url: str,
+    breaker: CircuitBreaker,
+    correlation_id: str,
+    *,
+    method: str = "GET",
+    timeout: float = 5.0,
+    **kwargs,
+) -> httpx.Response:
+    """
+    Call an HTTP API with retry, backoff, and circuit breaker protection.
+    Does not hammer a down API.
+    """
+    attempt = 0
+    while True:
+        if not await breaker.allow_request():
+            raise RuntimeError(f"Circuit is open for {url}; not attempting call")
+
+        attempt += 1
+        try:
+            response = await client.request(
+                method,
+                url,
+                timeout=timeout,
+                headers={"X-Correlation-ID": correlation_id},
+                **kwargs,
+            )
+
+            # Consider 5xx and network errors as failures; 4xx are not
+            if response.status_code >= 500:
+                await breaker._record_failure()
+                raise httpx.HTTPStatusError(
+                    f"Server error {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+
+            await breaker._record_success()
+            response.raise_for_status()
+            return response
+
+        except (httpx.HTTPStatusError, httpx.TransportError, asyncio.TimeoutError) as e:
+            await breaker._record_failure()
+
+            if attempt >= breaker.config.max_retries:
+                raise
+
+            # Exponential backoff with jitter to avoid retry storms
+            sleep_time = min(
+                breaker.config.base_backoff * (2 ** (attempt - 1)),
+                breaker.config.max_backoff
+            )
+            sleep_time = sleep_time * (0.5 + random.random() * 0.5)
+            logger.warning(
+                "Call attempt %d to %s failed (correlation_id=%s): %s; retrying in %.2fs",
+                attempt, url, correlation_id, e, sleep_time,
+            )
+            await asyncio.sleep(sleep_time)
+
+
+async def make_resilient_call(
+    url: str,
+    correlation_id: str,
+    *,
+    breaker: Optional[CircuitBreaker] = None,
+    circuit_config: Optional[CircuitBreakerConfig] = None,
+    method: str = "GET",
+    **kwargs,
+) -> httpx.Response:
+    """
+    Convenience wrapper that creates a client, circuit breaker, and performs
+    a resilient HTTP call.
+    """
+    breaker = breaker or CircuitBreaker(circuit_config or CircuitBreakerConfig())
+    async with httpx.AsyncClient() as client:
+        return await call_with_retry_and_breaker(
+            client, url, breaker, correlation_id, method=method, **kwargs,
+        )
+
+
+# Example usage
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+
+    async def demo():
+        cfg = CircuitBreakerConfig(
+            failure_threshold=3,
+            open_timeout=10,
+            max_retries=2,
+        )
+        breaker = CircuitBreaker(cfg)
+
+        # Simulate the API being down
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(503)
+        )) as client:
+            try:
+                await call_with_retry_and_breaker(
+                    client, "https://api.example.com/data", breaker, "corr-1"
+                )
+            except RuntimeError as e:
+                print(f"Expected open circuit: {e}")
+            except Exception as e:
+                print(f"Call failed after retries: {e}")
+
+    asyncio.run(demo())
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "5xx responses and transport errors count as failures within a rolling 10-attempt window."
+          location: "circuit_breaker.py:42-50"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Circuit opens after threshold failures; in-flight calls complete but new calls are rejected."
+          location: "circuit_breaker.py:55-60"
+        - question: "How does the half-open state test recovery?"
+          answer: "After timeout, one probe is allowed; two consecutive successes transition back to closed."
+          location: "circuit_breaker.py:72-82"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller receives RuntimeError immediately without attempting HTTP; no hammering occurs."
+          location: "circuit_breaker.py:124-126"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "GET requests are naturally idempotent; callers should provide idempotency keys for write operations."
+          location: "circuit_breaker.py:150-152"
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Max 3 attempts; after exhausting retries, the original exception propagates to the caller."
+          location: "circuit_breaker.py:159-165"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff (0.1s base, doubled each try) with 50% random jitter to prevent lockstep."
+          location: "circuit_breaker.py:168-173"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per attempt; each call gets its own retry budget, preventing one failure from exhausting global resources."
+          location: "circuit_breaker.py:151"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "Caller-provided correlation_id is propagated unchanged into the X-Correlation-ID header."
+          location: "circuit_breaker.py:139"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Header X-Correlation-ID is set on every HTTP request via headers parameter."
+          location: "circuit_breaker.py:139"
+        - question: "Is it included in every log line and error?"
+          answer: "Correlation ID appears in warning logs and exceptions raised for operator visibility."
+          location: "circuit_breaker.py:175-179"
+        - question: "What happens when an inbound call has no id?"
+          answer: "No default is generated; caller must provide one or explicitly handle its absence."
+          location: "circuit_breaker.py:196"
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: "Function is a caller-side wrapper focusing on circuit breaking and retry; idempotency is the API's responsibility, not enforced here."
+---

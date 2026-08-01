@@ -1,0 +1,473 @@
+Here's a comprehensive error handler for tracing a request across two services:
+
+## Core Implementation
+
+```typescript
+// types.ts
+export interface TraceContext {
+  traceId: string;
+  requestId: string;
+  serviceAStartTime?: number;
+  serviceAMetadata?: Record<string, any>;
+  serviceBStartTime?: number;
+  serviceBMetadata?: Record<string, any>;
+}
+
+export interface ApiError {
+  statusCode: number;
+  message: string;
+  code?: string;
+  details?: Record<string, any>;
+  errorType: 'validation' | 'authorization' | 'not_found' | 'timeout' | 'internal' | 'rate_limit';
+}
+
+export interface ServiceCallResult<T> {
+  success: boolean;
+  data?: T;
+  error?: ApiError;
+  durationMs: number;
+  traceInfo: {
+    startTime: number;
+    endTime: number;
+    serviceName: string;
+    endpoint: string;
+  };
+}
+```
+
+## TraceId Generation and Correlation
+
+```typescript
+// trace-id.ts
+import { randomUUID } from 'crypto';
+
+export class TraceIdGenerator {
+  static generate(): string {
+    // Format: [timestamp]-[random]
+    const timestamp = Date.now().toString(36);
+    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
+    return `${timestamp}-${randomPart}`;
+  }
+}
+
+export class TraceContextManager {
+  private static contexts: Map<string, TraceContext> = new Map();
+  
+  static create(serviceStartTime: number): TraceContext {
+    const context: TraceContext = {
+      traceId: TraceIdGenerator.generate(),
+      requestId: TraceIdGenerator.generate(),
+      serviceAStartTime: serviceStartTime,
+      serviceAMetadata: {}
+    };
+    this.contexts.set(context.traceId, context);
+    return context;
+  }
+  
+  static get(traceId: string): TraceContext | undefined {
+    return this.contexts.get(traceId);
+  }
+  
+  static update(traceId: string, updates: Partial<TraceContext>): void {
+    const existing = this.contexts.get(traceId);
+    if (existing) {
+      this.contexts.set(traceId, { ...existing, ...updates });
+    }
+  }
+  
+  static complete(traceId: string): TraceContext | undefined {
+    const context = this.contexts.get(traceId);
+    if (context) {
+      this.contexts.delete(traceId);
+      return context;
+    }
+    return undefined;
+  }
+}
+```
+
+## Two-Service Error Handling
+
+```typescript
+// two-service-handler.ts
+import { TraceContext, ApiError, ServiceCallResult, TraceIdGenerator } from './types';
+import { TraceContextManager } from './trace-id';
+
+export class TwoServiceErrorHandler {
+  private serviceAEndpoint: string;
+  private serviceBEndpoint: string;
+  private timeoutMs: number;
+
+  constructor(serviceAEndpoint: string, serviceBEndpoint: string, timeoutMs = 10000) {
+    this.serviceAEndpoint = serviceAEndpoint;
+    this.serviceBEndpoint = serviceBEndpoint;
+    this.timeoutMs = timeoutMs;
+  }
+
+  async processRequest<T>(
+    serviceAFn: (context: TraceContext) => Promise<ServiceCallResult<T>>,
+    serviceBFn: (context: TraceContext, dataFromA?: T) => Promise<ServiceCallResult<T>>
+  ): Promise<ServiceCallResult<T>> {
+    const startTime = Date.now();
+    const traceContext = TraceContextManager.create(startTime);
+    
+    console.log(`[${traceContext.traceId}] Starting two-service request at ${startTime}`);
+
+    try {
+      // === Service A Call ===
+      console.log(`[${traceContext.traceId}] Calling Service A at ${this.serviceAEndpoint}...`);
+      traceContext.serviceAMetadata = {
+        endpoint: this.serviceAEndpoint,
+        requestStartTime: Date.now()
+      };
+
+      let serviceAResult: ServiceCallResult<T>;
+      try {
+        serviceAResult = await this.executeWithTimeout(
+          serviceAFn(traceContext),
+          `Service A timeout after ${this.timeoutMs}ms`
+        );
+        
+        TraceContextManager.update(traceContext.traceId, {
+          serviceAMetadata: {
+            ...traceContext.serviceAMetadata,
+            responseCode: serviceAResult.success ? 200 : serviceAResult.error?.statusCode,
+            responseTime: Date.now() - startTime
+          }
+        });
+        
+        if (!serviceAResult.success) {
+          console.error(`[${traceContext.traceId}] Service A failed:`, serviceAResult.error);
+          return this.finalizeError(traceContext, serviceAResult.error!);
+        }
+        
+      } catch (error) {
+        console.error(`[${traceContext.traceId}] Service A exception:`, error);
+        const serviceError: ApiError = {
+          statusCode: 500,
+          message: `Service A communication failure: ${error.message}`,
+          errorType: 'internal',
+          code: 'SERVICE_A_FAILURE',
+          details: {
+            exception: error.message,
+            stack: error.stack
+          }
+        };
+        return this.finalizeError(traceContext, serviceError);
+      }
+
+      // === Service B Call ===
+      console.log(`[${traceContext.traceId}] Service A succeeded (${Date.now() - startTime}ms), calling Service B...`);
+      
+      traceContext.serviceBStartTime = Date.now();
+      traceContext.serviceBMetadata = {
+        endpoint: this.serviceBEndpoint,
+        previousTraceId: traceContext.traceId,
+        serviceADuration: Date.now() - startTime
+      };
+
+      try {
+        const serviceBResult = await this.executeWithTimeout(
+          serviceBFn(traceContext, serviceAResult.data),
+          `Service B timeout after ${this.timeoutMs}ms`
+        );
+
+        TraceContextManager.update(traceContext.traceId, {
+          serviceBMetadata: {
+            ...traceContext.serviceBMetadata,
+            responseCode: serviceBResult.success ? 200 : serviceBResult.error?.statusCode,
+            responseTime: Date.now() - traceContext.serviceBStartTime
+          }
+        });
+
+        if (!serviceBResult.success) {
+          console.error(`[${traceContext.traceId}] Service B failed:`, serviceBResult.error);
+          return this.finalizeError(traceContext, serviceBResult.error!);
+        }
+
+        // Success path
+        const successfulResult: ServiceCallResult<T> = {
+          success: true,
+          data: serviceBResult.data,
+          durationMs: Date.now() - startTime,
+          traceInfo: {
+            startTime,
+            endTime: Date.now(),
+            serviceName: 'BOTH_SERVICES',
+            endpoint: `${this.serviceAEndpoint} → ${this.serviceBEndpoint}`
+          }
+        };
+        
+        console.log(`[${traceContext.traceId}] Both services completed successfully in ${successfulResult.durationMs}ms`);
+        this.logSuccess(traceContext, successfulResult);
+        return successfulResult;
+
+      } catch (error) {
+        console.error(`[${traceContext.traceId}] Service B exception:`, error);
+        const serviceBError: ApiError = {
+          statusCode: 500,
+          message: `Service B communication failure: ${error.message}`,
+          errorType: 'internal',
+          code: 'SERVICE_B_FAILURE',
+          details: {
+            exception: error.message,
+            stack: error.stack,
+            serviceAStatus: 'completed',
+            serviceADuration: Date.now() - startTime
+          }
+        };
+        return this.finalizeError(traceContext, serviceBError);
+      }
+
+    } catch (error) {
+      console.error(`[${traceContext.traceId}] Unexpected error in request pipeline:`, error);
+      const unexpectedError: ApiError = {
+        statusCode: 500,
+        message: `Unexpected error: ${error.message}`,
+        errorType: 'internal',
+        code: 'UNEXPECTED_ERROR'
+      };
+      return this.finalizeError(traceContext, unexpectedError);
+    } finally {
+      TraceContextManager.complete(traceContext.traceId);
+    }
+  }
+
+  protected async executeWithTimeout<T>(promise: Promise<T>, errorMessage: string): Promise<T> {
+    let timeoutId: NodeJS.Timeout;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(errorMessage));
+      }, this.timeoutMs);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  private finalizeError(traceContext: TraceContext, error: ApiError): ServiceCallResult<never> {
+    const errorResult: ServiceCallResult<never> = {
+      success: false,
+      error,
+      durationMs: Date.now() - (traceContext.serviceAStartTime || 0),
+      traceInfo: {
+        startTime: traceContext.serviceAStartTime || 0,
+        endTime: Date.now(),
+        serviceName: error.code?.includes('SERVICE_A') ? 'SERVICE_A' : 'SERVICE_B',
+        endpoint: error.code?.includes('SERVICE_A') ? this.serviceAEndpoint : this.serviceBEndpoint
+      }
+    };
+    
+    console.error(`[${traceContext.traceId}] Error handler triggered:`, {
+      requestId: traceContext.requestId,
+      errorCode: error.code,
+      errorMessage: error.message,
+      servicesAttempted: [
+        error.code?.includes('SERVICE_A') ? 'A' : error.code?.includes('SERVICE_B') ? 'A,B' : 'NONE'
+      ],
+      durationMs: errorResult.durationMs
+    });
+
+    this.logError(traceContext, errorResult);
+    return errorResult;
+  }
+
+  private logSuccess(context: TraceContext, result: ServiceCallResult<any>) {
+    console.log(`[SUCCESS] TraceId: ${context.traceId}`);
+    console.log(`  RequestId: ${context.requestId}`);
+    console.log(`  Duration: ${result.durationMs}ms`);
+    console.log(`  Service A Time: ${context.serviceBStartTime! - context.serviceAStartTime!}ms`);
+    console.log(`  Service B Time: ${Date.now() - context.serviceBStartTime!}ms`);
+  }
+
+  private logError(context: TraceContext, result: ServiceCallResult<any>) {
+    console.error(`[ERROR] TraceId: ${context.traceId}`);
+    console.error(`  RequestId: ${context.requestId}`);
+    console.error(`  Error Code: ${result.error?.code}`);
+    console.error(`  Error Type: ${result.error?.errorType}`);
+    console.error(`  Error Message: ${result.error?.message}`);
+    console.error(`  Duration: ${result.durationMs}ms`);
+    console.error(`  Service A Start: ${context.serviceAStartTime}`);
+    console.error(`  Service B Start: ${context.serviceBStartTime}`);
+    console.error(`  Service A Metadata:`, context.serviceAMetadata);
+    console.error(`  Service B Metadata:`, context.serviceBMetadata);
+    if (result.error?.details) {
+      console.error(`  Details:`, result.error.details);
+    }
+  }
+}
+```
+
+## Usage Example
+
+```typescript
+// usage-example.ts
+import { TwoServiceErrorHandler } from './two-service-handler';
+import { TraceContext, ServiceCallResult } from './types';
+
+// Mock service functions
+async function mockServiceA(context: TraceContext): Promise<ServiceCallResult<string>> {
+  console.log(`[${context.traceId}] Service A starting`);
+  await new Promise(r => setTimeout(r, 100));
+  
+  // Simulate success or failure
+  if (Math.random() < 0.8) {
+    return {
+      success: true,
+      data: 'data-from-A',
+      durationMs: 100,
+      traceInfo: {
+        startTime: Date.now(),
+        endTime: Date.now() + 100,
+        serviceName: 'SERVICE_A',
+        endpoint: 'http://service-a.internal'
+      }
+    };
+  }
+  
+  return {
+    success: false,
+    error: {
+      statusCode: 500,
+      message: 'Service A internal error',
+      code: 'SERVICE_A_INTERNAL_ERROR',
+      errorType: 'internal'
+    },
+    durationMs: 100,
+    traceInfo: {
+      startTime: Date.now(),
+      endTime: Date.now() + 100,
+      serviceName: 'SERVICE_A',
+      endpoint: 'http://service-a.internal'
+    }
+  };
+}
+
+async function mockServiceB(context: TraceContext, dataFromA?: string): Promise<ServiceCallResult<string>> {
+  console.log(`[${context.traceId}] Service B starting with:`, dataFromA);
+  await new Promise(r => setTimeout(r, 150));
+  
+  return {
+    success: true,
+    data: `final-result-from-B (using ${dataFromA})`,
+    durationMs: 150,
+    traceInfo: {
+      startTime: Date.now(),
+      endTime: Date.now() + 150,
+      serviceName: 'SERVICE_B',
+      endpoint: 'http://service-b.internal'
+    }
+  };
+}
+
+// Main usage
+async function main() {
+  const handler = new TwoServiceErrorHandler(
+    'http://service-a.internal',
+    'http://service-b.internal',
+    5000
+  );
+
+  const result = await handler.processRequest(
+    mockServiceA,
+    mockServiceB
+  );
+
+  console.log('Final result:', result);
+  
+  // Operator can now use traceId to search across services
+  if (!result.success) {
+    console.log(`\n=== OPERATOR DEBUGGING ===`);
+    console.log(`Trace ID to search: ${result.error?.details?.traceId || 'check logs'}`);
+    console.log(`Look for this traceId in both service logs`);
+  }
+}
+
+main();
+```
+
+## Alternative: Express Middleware Example
+
+```typescript
+// express-middleware-example.ts
+import express from 'express';
+import { TwoServiceErrorHandler } from './two-service-handler';
+import { TraceContextManager } from './trace-id';
+
+const app = express();
+const handler = new TwoServiceErrorHandler(
+  process.env.SERVICE_A_URL || 'http://service-a:3000',
+  process.env.SERVICE_B_URL || 'http://service-b:3000'
+);
+
+app.get('/api/two-service-operation', async (req, res) => {
+  // Generate traceId from request header or create new
+  const incomingTraceId = req.headers['x-request-id'] || req.headers['x-trace-id'];
+  const traceContext = incomingTraceId 
+    ? TraceContextManager.get(String(incomingTraceId)) || TraceContextManager.create(Date.now())
+    : TraceContextManager.create(Date.now());
+  
+  // Add traceId to response headers
+  res.setHeader('x-trace-id', traceContext.traceId);
+  res.setHeader('x-request-id', traceContext.requestId);
+
+  try {
+    const result = await handler.processRequest(
+      // Service A
+      async (ctx) => {
+        // Your actual service A code here
+        const response = await fetch(ctx.serviceAMetadata?.endpoint);
+        return response.json();
+      },
+      // Service B
+      async (ctx, data) => {
+        // Your actual service B code here
+        const response = await fetch(ctx.serviceBMetadata?.endpoint, {
+          method: 'POST',
+          body: JSON.stringify(data)
+        });
+        return response.json();
+      }
+    );
+    
+    if (result.success) {
+      res.status(200).json(result.data);
+    } else {
+      res.status(result.error?.statusCode || 500).json({
+        error: result.error,
+        traceId: traceContext.traceId
+      });
+    }
+  } catch (error) {
+    res.status(500).json({
+      message: 'Unhandled error',
+      traceId: traceContext.traceId
+    });
+  }
+});
+
+app.listen(3000);
+```
+
+## Key Features
+
+1. **Trace ID Correlation**: Every request gets a unique traceId that's propagated across both services
+2. **Time Tracking**: Records when each service starts and ends
+3. **Error Propagation**: Capture detailed error info from each service
+4. **Operator-Friendly Logs**: Structured logging with clear trace IDs and service boundaries
+5. **Timeout Handling**: Prevents hanging requests
+6. **Metadata Collection**: Stores HTTP status codes, response times, and error details
+7. **Performance Metrics**: Track duration between services for bottleneck analysis
+
+## Production Improvements
+
+- Use a correlation ID middleware (e.g., `cls-hooked` or `AsyncLocalStorage`)
+- Integrate with APM tools (Datadog, New Relic, Sentry)
+- Add log aggregation (ELK, Loki, CloudWatch)
+- Persist trace contexts in Redis for multi-instance tracing
+- Implement retry logic with backoff
+
+This handler provides clear, actionable error information that operators can use to trace requests across distributed services.

@@ -1,0 +1,296 @@
+# Error Handler for Cross-Service Request Tracing
+
+Below is a comprehensive error handling solution that allows operators to trace a single request as it flows through two services. This implementation includes:
+
+1. Correlation IDs for request tracking
+2. Structured logging
+3. Error propagation between services
+4. Centralized error handling
+5. Metrics collection
+
+## Implementation (Python Example)
+
+```python
+import uuid
+import logging
+import time
+import json
+from functools import wraps
+from typing import Dict, Any, Optional
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('service_errors.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+class RequestTracer:
+    """Handles cross-service request tracing with correlation IDs"""
+
+    @staticmethod
+    def generate_correlation_id() -> str:
+        """Generate a unique correlation ID for the request"""
+        return str(uuid.uuid4())
+
+    @staticmethod
+    def log_request_start(correlation_id: str, service_name: str, request_data: Dict[str, Any]):
+        """Log the start of a request with correlation ID"""
+        logger.info(
+            f"Request started - Service: {service_name} - CorrelationID: {correlation_id}",
+            extra={
+                'correlation_id': correlation_id,
+                'service': service_name,
+                'request_data': request_data,
+                'timestamp': time.time()
+            }
+        )
+
+    @staticmethod
+    def log_request_end(correlation_id: str, service_name: str, response_data: Dict[str, Any], duration: float):
+        """Log the completion of a request"""
+        logger.info(
+            f"Request completed - Service: {service_name} - CorrelationID: {correlation_id}",
+            extra={
+                'correlation_id': correlation_id,
+                'service': service_name,
+                'response_data': response_data,
+                'duration_ms': duration * 1000,
+                'timestamp': time.time()
+            }
+        )
+
+    @staticmethod
+    def log_error(correlation_id: str, service_name: str, error: Exception, context: Dict[str, Any] = None):
+        """Log an error with full context"""
+        error_data = {
+            'error_type': type(error).__name__,
+            'error_message': str(error),
+            'error_traceback': str(error.__traceback__),
+            'service': service_name,
+            'correlation_id': correlation_id
+        }
+
+        if context:
+            error_data['context'] = context
+
+        logger.error(
+            f"Error occurred - Service: {service_name} - CorrelationID: {correlation_id}",
+            extra=error_data
+        )
+
+class ServiceError(Exception):
+    """Base class for service-specific errors"""
+    def __init__(self, message: str, original_error: Optional[Exception] = None, context: Optional[Dict] = None):
+        super().__init__(message)
+        self.original_error = original_error
+        self.context = context or {}
+
+class ServiceAError(ServiceError):
+    """Errors specific to Service A"""
+    pass
+
+class ServiceBError(ServiceError):
+    """Errors specific to Service B"""
+    pass
+
+def handle_service_errors(service_name: str):
+    """
+    Decorator to handle errors in service methods while maintaining correlation context
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract correlation ID from kwargs or generate new one
+            correlation_id = kwargs.get('correlation_id') or RequestTracer.generate_correlation_id()
+
+            try:
+                # Log request start
+                RequestTracer.log_request_start(
+                    correlation_id=correlation_id,
+                    service_name=service_name,
+                    request_data=kwargs
+                )
+
+                # Execute the function
+                start_time = time.time()
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+
+                # Log request end
+                RequestTracer.log_request_end(
+                    correlation_id=correlation_id,
+                    service_name=service_name,
+                    response_data={'result': result},
+                    duration=duration
+                )
+
+                return result
+
+            except ServiceError as e:
+                # Handle known service errors
+                RequestTracer.log_error(
+                    correlation_id=correlation_id,
+                    service_name=service_name,
+                    error=e,
+                    context={'function': func.__name__}
+                )
+                raise
+
+            except Exception as e:
+                # Handle unexpected errors
+                error = ServiceError(
+                    f"Unexpected error in {service_name}",
+                    original_error=e,
+                    context={'function': func.__name__}
+                )
+                RequestTracer.log_error(
+                    correlation_id=correlation_id,
+                    service_name=service_name,
+                    error=error
+                )
+                raise error
+
+        return wrapper
+    return decorator
+
+class ServiceA:
+    """Example Service A implementation"""
+
+    @handle_service_errors("ServiceA")
+    def process_request(self, user_id: str, data: Dict[str, Any], correlation_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Process a request that will be forwarded to Service B
+        """
+        # Validate input
+        if not user_id:
+            raise ServiceAError("User ID is required")
+
+        # Simulate processing
+        time.sleep(0.1)
+
+        # Forward to Service B
+        try:
+            service_b = ServiceB()
+            result = service_b.process_data(
+                user_id=user_id,
+                data=data,
+                correlation_id=correlation_id
+            )
+            return {'status': 'success', 'result': result}
+
+        except ServiceBError as e:
+            # Add context about the call to Service B
+            raise ServiceAError(
+                "Failed to process data in Service B",
+                original_error=e,
+                context={'service_b_call': True}
+            ) from e
+
+class ServiceB:
+    """Example Service B implementation"""
+
+    @handle_service_errors("ServiceB")
+    def process_data(self, user_id: str, data: Dict[str, Any], correlation_id: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Process data received from Service A
+        """
+        # Validate input
+        if not data:
+            raise ServiceBError("Data is required")
+
+        # Simulate processing
+        time.sleep(0.2)
+
+        # Simulate potential error
+        if data.get('error_simulation'):
+            raise ServiceBError("Simulated processing error")
+
+        return {'processed': True, 'user_id': user_id, 'data': data}
+
+# Example usage
+if __name__ == "__main__":
+    try:
+        service_a = ServiceA()
+
+        # Start with a new correlation ID
+        result = service_a.process_request(
+            user_id="user123",
+            data={"value": 42, "error_simulation": False},
+            correlation_id=RequestTracer.generate_correlation_id()
+        )
+        print("Success:", result)
+
+    except ServiceError as e:
+        print(f"Service error occurred: {e}")
+        if e.original_error:
+            print(f"Original error: {e.original_error}")
+```
+
+## Key Features
+
+1. **Correlation IDs**:
+   - Unique identifier generated at the start of each request
+   - Propagated through both services
+   - Used to trace the entire request flow
+
+2. **Structured Logging**:
+   - All logs include the correlation ID
+   - Additional context about the service, request, and response
+   - Errors include full stack traces and context
+
+3. **Error Handling**:
+   - Service-specific error classes
+   - Error propagation with context
+   - Consistent error formatting
+
+4. **Decorators**:
+   - Automatic request tracing
+   - Error handling
+   - Duration tracking
+
+5. **Context Preservation**:
+   - Errors carry context about where they occurred
+   - Original errors are preserved in the error chain
+
+## Operator Instructions
+
+To trace a request across both services:
+
+1. **Find the correlation ID**:
+   - Look for the correlation ID in the logs of either service
+   - It will appear in all related log entries
+
+2. **Search logs**:
+   - Use the correlation ID to search logs in both services
+   - Example search: `grep "correlation_id: abc123" serviceA.log serviceB.log`
+
+3. **Analyze the flow**:
+   - Follow the sequence of log entries
+   - Note timestamps to understand request duration
+   - Check for any error entries with the same correlation ID
+
+4. **Error diagnosis**:
+   - If an error occurs, examine the full error context
+   - Look at the original error and any additional context provided
+   - Check the state of the request at the time of failure
+
+## Deployment Considerations
+
+1. **Log Aggregation**:
+   - Ensure logs from both services are aggregated in a central location
+   - Consider using tools like ELK stack, Splunk, or CloudWatch
+
+2. **Monitoring**:
+   - Set up alerts for error rates with the same correlation ID
+   - Track request duration metrics
+
+3. **Documentation**:
+   - Document the correlation ID format and propagation rules
+   - Provide operators with search patterns for tracing requests
+
+This implementation provides a robust foundation for cross-service request tracing that can be adapted to most programming languages and service architectures.

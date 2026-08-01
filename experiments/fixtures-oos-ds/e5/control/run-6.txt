@@ -1,0 +1,409 @@
+Here's a comprehensive error handler for tracing a request across two services:
+
+## Core Solution: Correlation ID-Based Trace Handler
+
+```python
+# tracing_handler.py
+import uuid
+import logging
+import json
+from datetime import datetime
+from functools import wraps
+import requests
+from typing import Optional, Dict, Any
+
+class TraceContext:
+    """Manages correlation and trace IDs for cross-service tracking"""
+    
+    def __init__(self):
+        self.correlation_id = str(uuid.uuid4())
+        self.trace_id = str(uuid.uuid4())
+        self.span_start_time = {}
+        
+    def start_span(self, service_name: str):
+        span_id = str(uuid.uuid4())
+        self.span_start_time[span_id] = datetime.utcnow()
+        return {
+            'correlation_id': self.correlation_id,
+            'trace_id': self.trace_id,
+            'span_id': span_id,
+            'service': service_name,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+    
+    def end_span(self, span_info: Dict, status: str, error: Any = None):
+        duration_ms = (datetime.utcnow() - self.span_start_time.get(
+            span_info.get('span_id', ''), datetime.utcnow()
+        )).total_seconds() * 1000
+        
+        result = {
+            **span_info,
+            'duration_ms': round(duration_ms, 2),
+            'status': status,
+            'timestamp_end': datetime.utcnow().isoformat()
+        }
+        if error:
+            result['error_details'] = {
+                'type': type(error).__name__,
+                'message': str(error),
+                'traceback': self._get_traceback(error)
+            }
+        return result
+
+class RequestTracer:
+    """Decorator for tracing service calls with error handling"""
+    
+    def __init__(self, service_name: str, logger: logging.Logger):
+        self.service_name = service_name
+        self.logger = logger
+        self.log_accumulator = []
+    
+    def __call__(self, func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Extract or create trace context
+            trace_context = kwargs.get('trace_context')
+            if not trace_context:
+                trace_context = TraceContext()
+                kwargs['trace_context'] = trace_context
+            
+            # Start span
+            span_info = trace_context.start_span(self.service_name)
+            
+            try:
+                # Add trace headers to any request args
+                if 'headers' in kwargs:
+                    kwargs['headers'].update(self._trace_headers(span_info))
+                elif 'kwargs' in kwargs and isinstance(kwargs['kwargs'], dict):
+                    kwargs['kwargs'].setdefault('headers', {}).update(
+                        self._trace_headers(span_info)
+                    )
+                
+                # Execute the function
+                result = func(*args, **kwargs)
+                
+                # Log successful completion
+                complete_span = trace_context.end_span(span_info, 'SUCCESS')
+                self.logger.info(
+                    f"Request {trace_context.correlation_id} - "
+                    f"{self.service_name} completed",
+                    extra={'trace_data': complete_span}
+                )
+                self.log_accumulator.append(complete_span)
+                
+                return result
+                
+            except Exception as e:
+                # Log error with full trace
+                error_span = trace_context.end_span(span_info, 'ERROR', e)
+                self.logger.error(
+                    f"Request {trace_context.correlation_id} - "
+                    f"{self.service_name} failed: {str(e)}",
+                    extra={'trace_data': error_span, 'exc_info': True}
+                )
+                self.log_accumulator.append(error_span)
+                
+                # Propagate with trace context
+                raise RequestTraceError(
+                    message=f"Service {self.service_name} failed",
+                    correlation_id=trace_context.correlation_id,
+                    trace_id=trace_context.trace_id,
+                    original_error=e,
+                    trace_data=error_span
+                ) from e
+        return wrapper
+    
+    def _trace_headers(self, span_info: Dict) -> Dict:
+        """Generate W3C-compliant trace headers"""
+        return {
+            'X-Correlation-ID': span_info['correlation_id'],
+            'X-Trace-ID': span_info['trace_id'],
+            'X-Span-ID': span_info['span_id'],
+            'X-Service': span_info['service']
+        }
+
+class RequestTraceError(Exception):
+    """Custom exception with full trace information"""
+    
+    def __init__(self, message: str, correlation_id: str, 
+                 trace_id: str, original_error: Exception, 
+                 trace_data: Dict):
+        super().__init__(message)
+        self.correlation_id = correlation_id
+        self.trace_id = trace_id
+        self.original_error = original_error
+        self.trace_data = trace_data
+        self.received_at = datetime.utcnow().isoformat()
+    
+    def to_dict(self) -> Dict:
+        return {
+            'error': self.__class__.__name__,
+            'message': str(self),
+            'correlation_id': self.correlation_id,
+            'trace_id': self.trace_id,
+            'original_error': {
+                'type': type(self.original_error).__name__,
+                'message': str(self.original_error)
+            },
+            'trace_data': self.trace_data,
+            'received_at': self.received_at
+        }
+```
+
+## Service 1 Implementation
+
+```python
+# service1.py
+import logging
+import requests
+from tracing_handler import RequestTracer, TraceContext
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('Service1')
+tracer = RequestTracer('service1', logger)
+
+@tracer
+def process_order(order_data: Dict, trace_context: TraceContext = None) -> Dict:
+    """Service 1 - Initial processing"""
+    
+    # Simulate some processing
+    if not order_data.get('order_id'):
+        raise ValueError("Missing order_id")
+    
+    # Call Service 2
+    try:
+        response = requests.post(
+            'http://service2-api/process',
+            json={'order': order_data},
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        # Error will be caught by tracer decorator
+        raise RuntimeError(f"Failed to call Service 2: {str(e)}") from e
+
+# Example usage
+def main():
+    trace_context = TraceContext()
+    order_data = {
+        'order_id': 'ORD-123',
+        'customer_id': 'CUST-456',
+        'amount': 100.00
+    }
+    
+    try:
+        result = process_order(order_data, trace_context=trace_context)
+        logger.info(f"Order processed successfully: {result}")
+    except Exception as e:
+        if hasattr(e, 'to_dict'):
+            logger.error(f"Order processing failed: {json.dumps(e.to_dict(), indent=2)}")
+        else:
+            logger.error(f"Unexpected error: {str(e)}")
+
+if __name__ == "__main__":
+    main()
+```
+
+## Service 2 Implementation
+
+```python
+# service2.py
+import logging
+import json
+from fastapi import FastAPI, Request
+from tracing_handler import RequestTracer, TraceContext
+
+app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('Service2')
+tracer = RequestTracer('service2', logger)
+
+@app.post("/process")
+async def process_request(request: Request):
+    # Extract trace context from headers
+    trace_id = request.headers.get('X-Trace-ID')
+    correlation_id = request.headers.get('X-Correlation-ID')
+    
+    # Create trace context if not provided
+    if not trace_id or not correlation_id:
+        trace_context = TraceContext()
+        trace_context.correlation_id = correlation_id
+        trace_context.trace_id = trace_id
+    else:
+        trace_context = TraceContext()
+    
+    # Add trace context to request data
+    request_data = await request.json()
+    request_data['trace_context'] = trace_context
+    
+    return await process_service2_request(request_data, trace_context)
+
+@tracer
+async def process_service2_request(request_data: Dict, trace_context: TraceContext) -> Dict:
+    """Service 2 - Business logic"""
+    
+    # Simulate business processing
+    try:
+        order = request_data.get('order', {})
+        if not order.get('validated'):
+            raise ValueError("Order not validated")
+            
+        # Process payment
+        payment_result = {
+            'transaction_id': 'TXN-' + str(uuid.uuid4()),
+            'status': 'SUCCESS',
+            'amount': order.get('amount', 0)
+        }
+        
+        return {
+            'service': 'service2',
+            'correlation_id': trace_context.correlation_id,
+            'trace_id': trace_context.trace_id,
+            'result': payment_result
+        }
+    except Exception as e:
+        # Error handled by tracer decorator
+        raise
+```
+
+## Global Error Handler / Middleware
+
+```python
+# global_error_handler.py
+import logging
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from tracing_handler import RequestTraceError
+
+logger = logging.getLogger('ErrorHandler')
+
+def setup_global_handlers(app: FastAPI):
+    """Setup global error handling for tracing"""
+    
+    @app.middleware("http")
+    async def trace_middleware(request: Request, call_next):
+        trace_context = TraceContext()
+        
+        # Add trace information to request state
+        request.state.trace_context = trace_context
+        request.state.trace_headers = {
+            'X-Correlation-ID': trace_context.correlation_id,
+            'X-Trace-ID': trace_context.trace_id,
+            'X-Span-ID': trace_context.trace_id  # Root span
+        }
+        
+        try:
+            response = await call_next(request)
+            response.headers['X-Correlation-ID'] = trace_context.correlation_id
+            response.headers['X-Trace-ID'] = trace_context.trace_id
+            
+            if response.status_code >= 400:
+                logger.error(
+                    f"HTTP {response.status_code} for request {trace_context.correlation_id}",
+                    extra={'trace_data': {
+                        'correlation_id': trace_context.correlation_id,
+                        'trace_id': trace_context.trace_id,
+                        'path': request.url.path,
+                        'status': response.status_code
+                    }}
+                )
+            return response
+            
+        except RequestTraceError as e:
+            await handle_trace_error(request, e)
+        except Exception as e:
+            await handle_generic_error(request, e)
+    
+    @app.exception_handler(RequestTraceError)
+    async def trace_error_handler(request: Request, exc: RequestTraceError):
+        return JSONResponse(
+            status_code=500,
+            content={
+                'error': 'request_failed',
+                'message': str(exc),
+                'correlation_id': exc.correlation_id,
+                'trace_id': exc.trace_id,
+                'service_errors': [exc.trace_data]
+            },
+            headers={
+                'X-Correlation-ID': exc.correlation_id,
+                'X-Trace-ID': exc.trace_id
+            }
+        )
+    
+    return trace_middleware
+
+async def handle_trace_error(request: Request, error: RequestTraceError):
+    logger.error(
+        f"Cross-service error for correlation_id={error.correlation_id}: "
+        f"{json.dumps(error.to_dict(), indent=2)}"
+    )
+
+async def handle_generic_error(request: Request, error: Exception):
+    trace_context = request.state.trace_context
+    logger.error(
+        f"Unhandled error for correlation_id={trace_context.correlation_id}: "
+        f"{str(error)}",
+        exc_info=True
+    )
+```
+
+## Consolidated Error Logging Output
+
+```python
+# Example of the unified error log output
+error_log_example = {
+    "level": "ERROR",
+    "message": "Cross-service request failed",
+    "timestamp": "2024-01-15T10:30:00Z",
+    "correlation_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+    "trace_id": "parent-trace-abc123",
+    "services": {
+        "service1": {
+            "span_id": "span1-abc123",
+            "status": "ERROR",
+            "duration_ms": 145.2,
+            "error": {
+                "type": "RuntimeError",
+                "message": "Failed to call Service 2: Connection refused"
+            }
+        },
+        "service2": {
+            "span_id": "span2-def456",
+            "status": "ERROR",
+            "duration_ms": 98.7,
+            "error": {
+                "type": "ValueError",
+                "message": "Order not validated"
+            }
+        }
+    },
+    "request_details": {
+        "path": "/api/orders",
+        "method": "POST",
+        "order_id": "ORD-123",
+        "customer_id": "CUST-456"
+    }
+}
+```
+
+## Key Features:
+
+1. **Correlation IDs**: Single ID shared across both services
+2. **Nested Spans**: Each service contributes its own span
+3. **Full Error Context**: Includes service name, timestamp, duration, and original exception
+4. **W3C Trace Headers**: Standard headers for distributed tracing
+5. **Custom Exception**: `RequestTraceError` carries all trace information
+6. **Global Error Handler**: Captures and formats errors at the API boundary
+7. **Structured Logging**: JSON-formatted logs for easy ingestion
+8. **Retry/Recovery**: Optional patterns can be added
+
+## Operator View:
+
+With this system, operators can:
+1. Search by correlation ID in logs
+2. See the complete error chain across services
+3. Trace timing and performance metrics
+4. Correlate HTTP requests with internal service calls
+5. Debug failures across distributed systems efficiently

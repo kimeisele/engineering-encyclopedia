@@ -149,16 +149,37 @@ e5-Mistral +0.20 are inside their spreads. Plain: **one clear effect, one
 ceiling-limited flat cell, two cells too small to call** — none negative,
 but only e4-Mistral is evidence of an effect.
 
-## Judgment (corpus rule, repaired instrument)
+## Out-of-sample at n=15 (item 2)
 
-With the repaired instrument the corpus rule **survives out-of-sample in
-direction**, and that is the defensible claim: no negative cell remains,
-but the support rests on a **single strong cell** (e4-Mistral +3.20 with
-the placebo at control). e4-DeepSeek is flat at a 5.60/6.00 control
-ceiling, and the two e5 cells (+0.40, +0.20) are inside within-arm spread
-at n=5 — "three of four positive" would overstate the data. The rule is
-supported, not proven, and control-arm headroom (the flat cell) remains the
-plainest caveat.
+The e4/e5 cells were extended from n=5 to n=15 per arm (same prompts,
+same repaired rubrics; runs 6–15 appended to the existing sets, no run
+replaced). 120 additional completions, 0 failures.
+
+| Cell | C (n=15) | T (n=15) | P (n=15) | T−C | P−C | pooled sd(T,C) | clears spread? |
+|---|---|---|---|---|---|---|---|
+| e4 DeepSeek | 5.40 | 5.60 | 5.00 | +0.20 | −0.40 | 0.57 | no (ceiling: control 5.40/6) |
+| e4 Mistral | 2.87 | 5.93 | 2.40 | +3.07 | −0.47 | 1.01 | **yes** |
+| e5 DeepSeek | 5.07 | 5.07 | 5.00 | +0.00 | −0.07 | 0.92 | no |
+| e5 Mistral | 5.33 | 5.60 | 3.87 | +0.27 | −1.47 | 0.73 | no |
+
+**Which deltas clear within-arm spread and which still do not:** only
+e4-Mistral (+3.07 vs 1.01, with the placebo −0.47 at control). e4-DeepSeek
+(+0.20 vs 0.57) is a ceiling pair, e5-DeepSeek is exactly 0.00, and
+e5-Mistral (+0.27 vs 0.73) remains too small to call. Extending to n=15 did
+**not** rescue the two e5 cells; the out-of-sample support for the corpus
+rule still rests on a single node (circuit-breaker on Mistral). Placebo at
+n=15 is at or below control on all four cells.
+
+## Judgment (corpus rule, repaired instrument, n=15)
+
+With the repaired instrument and n=15 per out-of-sample arm, the corpus
+rule **survives out-of-sample in direction**, and that is the defensible
+claim: only one cell clears within-arm spread (e4-Mistral +3.07 with the
+placebo at control). e4-DeepSeek is a ceiling pair (control 5.40/6.00), and
+the two e5 cells (0.00, +0.27) are inside within-arm spread even at n=15 —
+"three of four positive" would overstate the data. The rule is supported,
+not proven, and control-arm headroom (the flat cell) remains the plainest
+caveat.
 
 ## Limitation
 

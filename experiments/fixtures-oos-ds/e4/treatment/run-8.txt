@@ -1,0 +1,287 @@
+```python
+import asyncio
+import logging
+import os
+import random
+import time
+from typing import Callable, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class CircuitBreaker:
+    """
+    Circuit breaker that stops calling a downstream API while it is down.
+    
+    Design decisions:
+    - Failure threshold: 5 consecutive failures within a 30-second window
+    - Open state: rejects calls immediately (fail-fast) for 60 seconds
+    - Half-open state: after the timeout, allows a single probe call
+      - If the probe succeeds → close the circuit
+      - If the probe fails → reopen circuit for another full timeout
+    - In-flight calls are allowed to complete; the circuit only affects new calls
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        open_timeout_seconds: float = 60.0,
+        probe_timeout_seconds: float = 5.0,
+        max_concurrent_probes: int = 1,
+    ):
+        self.failure_threshold = failure_threshold
+        self.open_timeout_seconds = open_timeout_seconds
+        self.probe_timeout_seconds = probe_timeout_seconds
+        self.max_concurrent_probes = max_concurrent_probes
+
+        self._consecutive_failures = 0
+        self._window_start = time.monotonic()
+        self._window_seconds = 30.0  # counting window
+        self._state = "closed"  # closed | open | half_open
+        self._open_until = 0.0
+        self._probe_lock = asyncio.Lock()
+        self._active_probes = 0
+
+    async def call(self, http_call: Callable, *args, **kwargs):
+        """Execute the HTTP call while respecting the breaker state."""
+        self._evict_expired_window()
+
+        if self._state == "open":
+            if time.monotonic() >= self._open_until:
+                # Time to probe recovery
+                self._state = "half_open"
+            else:
+                raise CircuitOpenError("Circuit is open; downstream API is unavailable")
+
+        # In half-open state, only allow the limited number of probe calls
+        if self._state == "half_open":
+            if self._active_probes >= self.max_concurrent_probes:
+                raise CircuitOpenError("Probe in progress; retry later")
+            self._active_probes += 1
+
+        try:
+            # Enforce a timeout on the probe so we don't hang
+            effective_timeout = kwargs.pop("timeout", None)
+            if self._state == "half_open" and effective_timeout is None:
+                kwargs["timeout"] = self.probe_timeout_seconds
+
+            result = await http_call(*args, **kwargs)
+
+            # Success — record and close the circuit if we're probing
+            self._record_success()
+            return result
+
+        except Exception as e:
+            self._record_failure()
+            raise
+
+        finally:
+            if self._state == "half_open":
+                self._active_probes = max(0, self._active_probes - 1)
+
+    def _record_success(self):
+        """Reset the failure counter on success."""
+        self._consecutive_failures = 0
+        self._window_start = time.monotonic()
+        if self._state == "half_open":
+            self._state = "closed"
+            logger.info("Circuit closed after successful probe")
+
+    def _record_failure(self):
+        """Count failure; open the circuit if threshold is exceeded."""
+        now = time.monotonic()
+        if now - self._window_start > self._window_seconds:
+            # Window expired — reset
+            self._consecutive_failures = 0
+            self._window_start = now
+
+        self._consecutive_failures += 1
+
+        if self._consecutive_failures >= self.failure_threshold:
+            if self._state != "open":
+                self._state = "open"
+                self._open_until = time.monotonic() + self.open_timeout_seconds
+                logger.warning(
+                    "Circuit opened: %d failures in %ds window",
+                    self._consecutive_failures,
+                    self._window_seconds,
+                )
+
+    def _evict_expired_window(self):
+        """Reset failure count if the window has expired."""
+        now = time.monotonic()
+        if now - self._window_start > self._window_seconds:
+            self._consecutive_failures = 0
+            self._window_start = now
+
+
+class CircuitOpenError(Exception):
+    """Raised when the circuit is open and we refuse to call the API."""
+
+
+# ---------------------------------------------------------------------------
+# The actual function that uses the breaker with retry + backoff
+# ---------------------------------------------------------------------------
+
+async def call_downstream_api(
+    url: str,
+    *,
+    max_retries: int = 3,
+    base_backoff_seconds: float = 1.0,
+    max_backoff_seconds: float = 8.0,
+    breaker: Optional[CircuitBreaker] = None,
+    correlation_id: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> httpx.Response:
+    """
+    Call a downstream HTTP API without hammering it while it's down.
+
+    Uses a circuit breaker to fail fast when the API is down, and adds
+    retry with exponential backoff + jitter for transient failures.
+
+    The operation must be idempotent (or safe to repeat) for retries to be correct.
+    """
+    breaker = breaker or CircuitBreaker()
+    own_client = client is None
+    if own_client:
+        client = httpx.AsyncClient(timeout=10.0)
+
+    correlation_id = correlation_id or f"req-{random.getrandbits(64):016x}"
+
+    try:
+        attempt = 0
+        while True:
+            try:
+                # Pass correlation id in headers so the downstream can trace us
+                response = await breaker.call(
+                    client.get,
+                    url,
+                    headers={"X-Correlation-ID": correlation_id},
+                )
+                response.raise_for_status()
+                return response
+
+            except CircuitOpenError:
+                # Circuit is open — don't retry; report the failure
+                logger.error("Downstream API down; circuit open. Correlation ID: %s", correlation_id)
+                raise
+
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                # Transient failure — retry with backoff
+                attempt += 1
+                if attempt >= max_retries:
+                    logger.error(
+                        "Downstream API failed after %d attempts. Correlation ID: %s",
+                        attempt,
+                        correlation_id,
+                    )
+                    raise
+                backoff = min(
+                    max_backoff_seconds,
+                    base_backoff_seconds * (2 ** (attempt - 1)),
+                )
+                # Add jitter to avoid retry storms
+                sleep_time = backoff / 2 + random.uniform(0, backoff / 2)
+                logger.warning(
+                    "API call failed (attempt %d). Retrying in %.2fs. Correlation ID: %s",
+                    attempt,
+                    sleep_time,
+                    correlation_id,
+                )
+                await asyncio.sleep(sleep_time)
+
+            except httpx.HTTPStatusError as exc:
+                # 4xx/5xx — don't retry on 4xx (client errors) except 429/503
+                if exc.response.status_code in (429, 503):
+                    attempt += 1
+                    if attempt >= max_retries:
+                        raise
+                    backoff = min(
+                        max_backoff_seconds,
+                        base_backoff_seconds * (2 ** (attempt - 1)),
+                    )
+                    # Retry-After header takes precedence if present
+                    retry_after = exc.response.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        sleep_time = float(retry_after)
+                    else:
+                        sleep_time = backoff / 2 + random.uniform(0, backoff / 2)
+                    await asyncio.sleep(sleep_time)
+                else:
+                    raise
+    finally:
+        if own_client:
+            await client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Convenience sync wrapper (for completeness)
+# ---------------------------------------------------------------------------
+
+def call_downstream_api_sync(url: str, **kwargs):
+    """Synchronous wrapper around the async function."""
+    return asyncio.run(call_downstream_api(url, **kwargs))
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: "What counts as a failure, and over what window?"
+          answer: "Consecutive HTTP errors, timeouts, and transport errors. Only failures within a 30-second sliding window count toward the threshold."
+          location: "call_downstream_api.py:57-58"
+        - question: "When does the circuit open, and what happens to in-flight calls?"
+          answer: "Circuit opens after 5 consecutive failures in the window. In-flight calls complete; only new calls are rejected with CircuitOpenError."
+          location: "call_downstream_api.py:104-112"
+        - question: "How does the half-open state test recovery?"
+          answer: "After the 60s open timeout expires, the state becomes half-open and allows exactly one concurrent probe call; success closes it, failure reopens it."
+          location: "call_downstream_api.py:88-98"
+        - question: "What does the caller do while the circuit is open?"
+          answer: "Caller immediately raises CircuitOpenError (fail-fast). The retry loop does not retry on circuit-open; it propagates the error to the operator."
+          location: "call_downstream_api.py:157-160"
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: "How many attempts are allowed, and what happens after the last one?"
+          answer: "Maximum 3 attempts. After the last attempt fails, the error propagates to the caller with the correlation ID logged for diagnostics."
+          location: "call_downstream_api.py:171-176"
+        - question: "How is the wait between attempts chosen, and is jitter added?"
+          answer: "Exponential backoff starting at 1s, doubling each retry, capped at 8s, with random jitter up to 50% to avoid synchronized retry storms."
+          location: "call_downstream_api.py:181-186"
+        - question: "What happens when the same attempt is delivered more than once?"
+          answer: "The function only performs GET requests which are idempotent by design; repeated deliveries are safe and identical results are returned."
+          location: "call_downstream_api.py:145-148"
+        - question: "Is the retry budget shared across workers or per attempt?"
+          answer: "Per function call. Each invocation has its own max_retries counter; no shared budget across concurrent workers in this implementation."
+          location: "call_downstream_api.py:145"
+      unanswered: []
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: "What value identifies one logical request, and where is it created?"
+          answer: "A random 128-bit hex string generated at function entry if not provided by the caller. Format: 'req-{64-bit hex}'."
+          location: "call_downstream_api.py:140"
+        - question: "How is it propagated to every downstream call?"
+          answer: "Passed as an HTTP header 'X-Correlation-ID' on every outgoing request, including retries and probe calls via the breaker."
+          location: "call_downstream_api.py:150-153"
+        - question: "Is it included in every log line and error?"
+          answer: "Yes, all log messages at warning and error levels include the correlation ID using Logger format %s. Exceptions are re-raised with the ID in the message."
+          location: "call_downstream_api.py:158-175"
+        - question: "What happens when an inbound call has no id?"
+          answer: "A new ID is generated automatically. Callers can optionally supply their own via the correlation_id parameter for distributed tracing."
+          location: "call_downstream_api.py:140"
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: "The function is a read-only GET that is naturally idempotent. There is no state mutation to protect, so idempotency keys and completion records are unnecessary."
+---APPLICATION_REPORT---

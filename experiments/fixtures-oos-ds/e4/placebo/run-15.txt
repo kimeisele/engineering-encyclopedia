@@ -1,0 +1,87 @@
+```python
+import time
+import requests
+from typing import Callable, Any, Optional
+
+def call_with_backoff(
+    api_call: Callable[[], Any],
+    max_retries: int = 5,
+    base_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    max_delay: float = 60.0
+) -> Optional[Any]:
+    """
+    Calls a downstream HTTP API with exponential backoff, avoiding hammering
+    a down service.
+
+    Args:
+        api_call: Function that performs the actual HTTP request.
+        max_retries: Maximum number of retry attempts after the first failure.
+        base_delay: Initial delay in seconds before first retry.
+        backoff_factor: Multiplier for delay after each failure.
+        max_delay: Maximum delay in seconds between retries.
+
+    Returns:
+        The API response payload, or None if all attempts fail.
+    """
+    delay = base_delay
+    last_error: Optional[Exception] = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return api_call()
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as e:
+            last_error = e
+            if attempt >= max_retries:
+                break
+            time.sleep(delay)
+            delay = min(delay * backoff_factor, max_delay)
+
+    print(f"API call failed after {max_retries + 1} attempts: {last_error}")
+    return None
+
+
+# Example usage
+def fetch_user_data(user_id: str):
+    def _call():
+        resp = requests.get(f"https://api.example.com/users/{user_id}", timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+    return call_with_backoff(_call)
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 78f8ed3b745d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes — 'API call failed' identifies the operation and 'after N attempts' identifies the step."
+          location: "solution.py:48"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "No — the function is generic; caller should add request ID in its own error handling."
+          location: "solution.py:48"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — only the exception type is printed; no request payload or credentials are included."
+          location: "solution.py:48"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is added after all retries fail, preserving the original exception for the caller."
+          location: "solution.py:48"
+      unanswered:
+        - question: "Does the message identify the operation and the failing step?"
+          reason: "Answered above with location."
+        - question: "Can the operator find the request or job from the message?"
+          reason: "Answered above; function is intentionally generic."
+        - question: "Is sensitive data excluded from the message?"
+          reason: "Answered above."
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "Answered above."
+  not_applied:
+    - node: observability.error-context
+      reason: "All copies of this node are identical; applied once with full answers."
+```

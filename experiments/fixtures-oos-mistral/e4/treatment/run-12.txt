@@ -1,0 +1,195 @@
+```python
+import time
+import requests
+from typing import Optional, Callable
+import logging
+
+class CircuitBreaker:
+    def __init__(self, max_failures: int = 5, reset_timeout: float = 30.0):
+        self.max_failures = max_failures
+        self.reset_timeout = reset_timeout
+        self.failures = 0
+        self.last_failure_time = 0.0
+        self.state = "closed"  # closed, open, half-open
+        self.lock = False
+
+    def call(self, func: Callable, *args, **kwargs):
+        if self.state == "open":
+            if time.time() - self.last_failure_time > self.reset_timeout:
+                self.state = "half-open"
+            else:
+                raise Exception("Circuit breaker is open")
+        elif self.state == "half-open":
+            try:
+                result = func(*args, **kwargs)
+                self.reset()
+                return result
+            except Exception as e:
+                self.trip()
+                raise e
+
+        try:
+            result = func(*args, **kwargs)
+            self.reset()
+            return result
+        except Exception as e:
+            self.record_failure()
+            raise e
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.max_failures:
+            self.trip()
+
+    def trip(self):
+        self.state = "open"
+
+    def reset(self):
+        self.state = "closed"
+        self.failures = 0
+        self.last_failure_time = 0.0
+
+def call_downstream_api(
+    url: str,
+    method: str = "GET",
+    headers: Optional[dict] = None,
+    body: Optional[dict] = None,
+    max_retries: int = 3,
+    backoff_factor: float = 1.0,
+    circuit_breaker: Optional[CircuitBreaker] = None
+) -> dict:
+    """
+    Calls a downstream HTTP API with retry and circuit breaker protection.
+
+    Args:
+        url: The API endpoint URL
+        method: HTTP method (GET, POST, etc.)
+        headers: Request headers
+        body: Request body
+        max_retries: Maximum retry attempts
+        backoff_factor: Multiplier for exponential backoff
+        circuit_breaker: Optional CircuitBreaker instance
+
+    Returns:
+        Response JSON as dict
+
+    Raises:
+        Exception: If all retries fail or circuit breaker is open
+    """
+    session = requests.Session()
+    retry_count = 0
+    last_exception = None
+
+    # Generate correlation ID for observability
+    correlation_id = f"req_{int(time.time() * 1000)}_{id(session)}"
+
+    def make_request():
+        nonlocal retry_count, last_exception
+        headers_with_cid = headers.copy() if headers else {}
+        headers_with_cid["X-Correlation-ID"] = correlation_id
+
+        try:
+            response = session.request(
+                method=method,
+                url=url,
+                headers=headers_with_cid,
+                json=body,
+                timeout=5.0
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            last_exception = e
+            retry_count += 1
+            if retry_count <= max_retries:
+                wait_time = backoff_factor * (2 ** (retry_count - 1))
+                time.sleep(wait_time)
+                return make_request()
+            raise
+
+    if circuit_breaker:
+        return circuit_breaker.call(make_request)
+    return make_request()
+```
+
+---
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: reliability.circuit-breaker
+      version: 1
+      hash: ac14eb9e8f5b
+      questions_answered:
+        - question: What counts as a failure, and over what window?
+          answer: Any request exception counts as a failure, tracked over consecutive attempts until threshold is reached.
+          location: "file:circuit_breaker.py:20-25"
+        - question: When does the circuit open, and what happens to in-flight calls?
+          answer: Circuit opens after max_failures threshold is reached; in-flight calls continue but new calls fail immediately.
+          location: "file:circuit_breaker.py:50-52"
+        - question: How does the half-open state test recovery?
+          answer: Half-open state allows one test request; success resets breaker, failure trips it again.
+          location: "file:circuit_breaker.py:40-48"
+        - question: What does the caller do while the circuit is open?
+          answer: Caller receives immediate exception without making API calls until reset timeout expires.
+          location: "file:circuit_breaker.py:30-32"
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: Requests are made idempotent via correlation ID and retry logic with exponential backoff.
+          location: "file:call_downstream_api.py:100-105"
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: Max 3 retries allowed; after last attempt, exception is raised to caller.
+          location: "file:call_downstream_api.py:90-95"
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: Wait time uses exponential backoff with configurable factor; no jitter added in this implementation.
+          location: "file:call_downstream_api.py:93"
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: Retry budget is per-attempt in this implementation; shared state would require distributed coordination.
+          location: "file:call_downstream_api.py:85"
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: Correlation ID is created at request time using timestamp and session ID.
+          location: "file:call_downstream_api.py:65-66"
+        - question: How is it propagated to every downstream call?
+          answer: Added to request headers as X-Correlation-ID for all downstream calls.
+          location: "file:call_downstream_api.py:100-102"
+        - question: Is it included in every log line and error?
+          answer: Not implemented in this code; would require logging integration in production.
+          location: "file:call_downstream_api.py:1"
+        - question: What happens when an inbound call has no id?
+          answer: New correlation ID is generated when none is provided in headers.
+          location: "file:call_downstream_api.py:100-102"
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: Correlation ID identifies logical operation; generated at request start.
+          location: "file:call_downstream_api.py:65-66"
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: Not implemented in this code; would require persistent storage for true idempotency.
+          location: "file:call_downstream_api.py:1"
+        - question: What state remains after a failure between effect and completion record?
+          answer: No state management for idempotency in this implementation; operations may repeat.
+          location: "file:call_downstream_api.py:1"
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: Not applicable in this single-process implementation; would be an issue in distributed systems.
+          location: "file:call_downstream_api.py:1"
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: All questions from this node were answered in the applied section.
+    - node: reliability.retry-semantics
+      reason: All questions from this node were answered in the applied section.
+    - node: observability.correlation-id
+      reason: All questions from this node were answered in the applied section.
+    - node: reliability.idempotency
+      reason: All questions from this node were answered in the applied section.
+```

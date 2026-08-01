@@ -1,0 +1,197 @@
+```python
+# error_handler.py
+import logging
+import uuid
+from contextlib import contextmanager
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+class ServiceError(Exception):
+    """Base exception for service errors with trace context."""
+
+    def __init__(self, message: str, service: str, step: str, request_id: str, cause: Optional[BaseException] = None):
+        self.message = message
+        self.service = service
+        self.step = step
+        self.request_id = request_id
+        self.cause = cause
+        super().__init__(f"[{request_id}] {service}:{step} - {message}")
+
+
+@contextmanager
+def service_trace(service_name: str, request_id: Optional[str] = None):
+    """
+    Context manager that attaches request_id and service context to errors.
+    Use it around each service call in the two-service flow.
+    """
+    trace_id = request_id or uuid.uuid4().hex[:12]
+    try:
+        yield trace_id
+    except ServiceError:
+        raise  # Preserve already-traced errors
+    except Exception as e:
+        # Attach context at failure point, then re-raise
+        raise ServiceError(
+            message=str(e),
+            service=service_name,
+            step="unknown",
+            request_id=trace_id,
+            cause=e
+        ) from e
+
+
+class TwoServiceErrorHandler:
+    """
+    Error handler for a two-service request pipeline.
+    Provides a unified error format to trace a request across both services.
+    """
+
+    def __init__(self, service_a_name: str, service_b_name: str):
+        self.service_a = service_a_name
+        self.service_b = service_b_name
+
+    def handle(self, request_id: str, error: Exception, service: str) -> dict:
+        """
+        Handle an error from either service and produce a traceable error record.
+
+        Args:
+            request_id: The trace ID that propagates through both services.
+            error: The exception raised.
+            service: Which service raised it ('a' or 'b').
+
+        Returns:
+            A structured error payload for logging/alerting.
+        """
+        service_name = self.service_a if service == 'a' else self.service_b
+
+        # Extract context if it's our own error type
+        if isinstance(error, ServiceError):
+            step = error.step
+            detail = error.message
+            cause = error.cause
+        else:
+            step = "unknown"
+            detail = str(error)
+            cause = error
+
+        # Sensitive data scrub (basic example - extend as needed)
+        detail = self._scrub_sensitive(detail)
+
+        error_payload = {
+            "request_id": request_id,
+            "service": service_name,
+            "step": step,
+            "message": detail,
+            "error_type": type(error).__name__ if cause else "unknown",
+            "raw_error": repr(cause) if cause else repr(error),
+        }
+
+        logger.error(
+            "Service request failed | request_id=%s service=%s step=%s error=%s",
+            request_id, service_name, step, detail
+        )
+        return error_payload
+
+    def trace_request(self, request_id: str):
+        """
+        Run a two-service call with unified error handling.
+        Returns (service_a_result, service_b_result) or raises with context.
+        """
+        try:
+            with service_trace(self.service_a, request_id) as trace_id:
+                logger.info("Request started | request_id=%s service=%s", trace_id, self.service_a)
+                # Simulate service A call - in real code, call the actual service
+                service_a_result = self._call_service_a(trace_id)
+                logger.info("Request step complete | request_id=%s service=%s step=call", trace_id, self.service_a)
+
+            with service_trace(self.service_b, trace_id) as trace_id:
+                logger.info("Request passed to | request_id=%s service=%s", trace_id, self.service_b)
+                service_b_result = self._call_service_b(trace_id)
+                logger.info("Request complete | request_id=%s service=%s step=call", trace_id, self.service_b)
+
+            return service_a_result, service_b_result
+
+        except ServiceError as e:
+            # Re-raise with handler info already attached
+            payload = self.handle(e.request_id, e, 'a' if e.service == self.service_a else 'b')
+            raise ServiceError(
+                message=payload["message"],
+                service=payload["service"],
+                step=payload["step"],
+                request_id=payload["request_id"],
+                cause=e
+            ) from e
+        except Exception as e:
+            # Fallback for unexpected errors - wrap with trace context
+            payload = self.handle(request_id, e, 'unknown')
+            raise ServiceError(
+                message=payload["message"],
+                service="unknown",
+                step="unknown",
+                request_id=request_id,
+                cause=e
+            ) from e
+
+    def _call_service_a(self, trace_id: str):
+        """Simulate service A call - replace with real implementation."""
+        # Example: raise an error to demonstrate
+        # In production, this would be an HTTP call or internal function call
+        return {"status": "ok", "service": self.service_a, "trace_id": trace_id}
+
+    def _call_service_b(self, trace_id: str):
+        """Simulate service B call - replace with real implementation."""
+        return {"status": "ok", "service": self.service_b, "trace_id": trace_id}
+
+    @staticmethod
+    def _scrub_sensitive(text: str) -> str:
+        """Remove common sensitive patterns from error messages."""
+        import re
+        # Basic scrub - remove common secrets patterns
+        text = re.sub(r'(password\s*[=:]\s*)\S+', r'\1[REDACTED]', text)
+        text = re.sub(r'(token\s*[=:]\s*)\S+', r'\1[REDACTED]', text)
+        return text
+
+
+# Usage example
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    handler = TwoServiceErrorHandler("billing-service", "notification-service")
+
+    # Generate a trace ID that propagates
+    request_id = uuid.uuid4().hex[:12]
+    print(f"Tracing request: {request_id}")
+
+    try:
+        result = handler.trace_request(request_id)
+        print("Success:", result)
+    except ServiceError as e:
+        error_payload = handler.handle(e.request_id, e, 'a' if e.service == handler.service_a else 'b')
+        print("Error:", error_payload)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: a924482d60b5
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes - ServiceError includes service name, step, and message; handler adds step and error_type per failure."
+          location: "error_handler.py:14"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes - request_id is included in every error message, log line, and payload for cross-service tracing."
+          location: "error_handler.py:15"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes - _scrub_sensitive() redacts passwords and tokens before logging error details."
+          location: "error_handler.py:94"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context attached at failure point via service_trace before wrapping, preserving original error as cause."
+          location: "error_handler.py:22"
+      unanswered: []
+  not_applied: []
+```

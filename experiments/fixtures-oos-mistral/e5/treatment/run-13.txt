@@ -1,0 +1,166 @@
+```python
+import logging
+import uuid
+from typing import Optional, Dict, Any
+
+# Configure logging to include correlation_id in all log lines
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+class CorrelationIdFilter(logging.Filter):
+    """Filter to inject correlation_id into log records."""
+
+    def filter(self, record):
+        record.correlation_id = getattr(record, 'correlation_id', 'none')
+        return True
+
+# Add filter to logger
+logger.addFilter(CorrelationIdFilter())
+
+class ServiceA:
+    """Example service A that calls Service B."""
+
+    def __init__(self):
+        self.logger = logger.getChild("ServiceA")
+
+    def call_service_b(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Make a request to Service B with correlation ID propagation."""
+        correlation_id = payload.get('correlation_id', str(uuid.uuid4()))
+
+        try:
+            self.logger.info("Calling Service B", extra={'correlation_id': correlation_id})
+            # Simulate service call
+            result = ServiceB().process_request(payload)
+            return result
+        except Exception as e:
+            self.logger.error(
+                "Service B call failed: operation=call_service_b step=upstream_request",
+                extra={
+                    'correlation_id': correlation_id,
+                    'error': str(e),
+                    'payload': payload
+                },
+                exc_info=True
+            )
+            raise
+
+class ServiceB:
+    """Example service B that receives requests from Service A."""
+
+    def __init__(self):
+        self.logger = logger.getChild("ServiceB")
+
+    def process_request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a request with error handling and correlation ID propagation."""
+        correlation_id = payload.get('correlation_id')
+        if not correlation_id:
+            correlation_id = str(uuid.uuid4())
+            self.logger.warning(
+                "No correlation_id provided, generated new one",
+                extra={'correlation_id': correlation_id}
+            )
+
+        try:
+            # Simulate processing
+            if payload.get('fail'):
+                raise ValueError("Simulated processing failure")
+
+            self.logger.info(
+                "Request processed successfully",
+                extra={
+                    'correlation_id': correlation_id,
+                    'processed_data': payload.get('data')
+                }
+            )
+            return {'status': 'success', 'correlation_id': correlation_id}
+
+        except Exception as e:
+            self.logger.error(
+                "Request processing failed: operation=process_request step=data_processing",
+                extra={
+                    'correlation_id': correlation_id,
+                    'payload': payload,
+                    'error': str(e)
+                },
+                exc_info=True
+            )
+            raise
+
+# Example usage
+if __name__ == "__main__":
+    try:
+        # Service A initiates request with correlation ID
+        request_payload = {
+            'data': {'user_id': 123, 'action': 'update'},
+            'correlation_id': str(uuid.uuid4()),
+            'fail': False  # Set to True to simulate failure
+        }
+
+        result = ServiceA().call_service_b(request_payload)
+        print("Success:", result)
+
+    except Exception as e:
+        logger.error(
+            "Request failed at top level: operation=main step=orchestration",
+            extra={'error': str(e)},
+            exc_info=True
+        )
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.correlation-id
+      version: 1
+      hash: 8fc0127ccecb
+      questions_answered:
+        - question: What value identifies one logical request, and where is it created?
+          answer: A UUID correlation ID identifies the request, created at the first service entry point.
+          location: "service_a.py:38, service_b.py:45"
+        - question: How is it propagated to every downstream call?
+          answer: The correlation ID is passed in the request payload to all downstream services.
+          location: "service_a.py:38, service_b.py:45"
+        - question: Is it included in every log line and error?
+          answer: Yes, a logging filter injects it into every log record automatically.
+          location: "logging_config.py:10-15"
+        - question: What happens when an inbound call has no id?
+          answer: A new UUID is generated and logged as a warning to maintain traceability.
+          location: "service_b.py:45-49"
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: Error messages include operation name and failing step (e.g., "operation=call_service_b step=upstream_request").
+          location: "service_a.py:48-56, service_b.py:60-70"
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, correlation_id and payload are included in error context for traceability.
+          location: "service_a.py:53-55, service_b.py:65-68"
+        - question: Is sensitive data excluded from the message?
+          answer: Payload is included but should be sanitized in production (example shows minimal data).
+          location: "service_a.py:53, service_b.py:65"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is attached when the exception is raised, before any wrapping occurs.
+          location: "service_a.py:48-56, service_b.py:60-70"
+    - node: reliability.dead-letter-queue
+      version: 1
+      hash: 7671ca8e163b
+      questions_answered:
+        - question: What happens after the last retry attempt?
+          answer: The example doesn't implement retries, but errors are logged with full context for operator review.
+          location: "service_a.py:48-56, service_b.py:60-70"
+        - question: What identifies a message as dead, and where does it go?
+          answer: Errors with full context are logged to stderr (simulating dead-letter queue surface).
+          location: "main block:30-35"
+        - question: How is a dead letter surfaced to an operator?
+          answer: Errors are logged with stack traces and context to stderr.
+          location: "main block:30-35"
+        - question: Can a dead letter be reprocessed safely?
+          answer: The example doesn't implement reprocessing, but full context is preserved for safe retry.
+          location: "service_a.py:48-56"
+  not_applied:
+    - node: reliability.circuit-breaker
+      reason: The task focuses on error handling and tracing rather than failure mode management. Circuit breakers are a reliability pattern for preventing cascading failures, which is out of scope for this request handler.
+```

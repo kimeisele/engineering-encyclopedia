@@ -1,0 +1,89 @@
+Here's the implementation that calls a downstream HTTP API with backoff to avoid hammering it when down:
+
+```python
+import time
+import requests
+from requests.exceptions import RequestException
+from typing import Optional, Dict, Any
+
+def call_downstream_api(
+    url: str,
+    payload: Optional[Dict[str, Any]] = None,
+    max_retries: int = 5,
+    initial_backoff: float = 1.0,
+    backoff_factor: float = 2.0,
+    timeout: int = 10
+) -> Optional[Dict[str, Any]]:
+    """
+    Calls a downstream HTTP API with exponential backoff on failure.
+
+    Args:
+        url: The API endpoint URL
+        payload: Optional request payload
+        max_retries: Maximum number of retry attempts
+        initial_backoff: Initial backoff time in seconds
+        backoff_factor: Multiplier for exponential backoff
+        timeout: Request timeout in seconds
+
+    Returns:
+        Response JSON if successful, None otherwise
+    """
+    backoff = initial_backoff
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            if attempt == max_retries:
+                # Log the final failure with context
+                error_msg = (
+                    f"API call failed after {max_retries} attempts. "
+                    f"URL: {url}, Error: {str(e)}"
+                )
+                raise RuntimeError(error_msg) from e
+
+            # Exponential backoff with jitter
+            sleep_time = backoff * (1 + 0.1 * (2 * (attempt / max_retries) - 1))
+            time.sleep(sleep_time)
+            backoff *= backoff_factor
+
+    return None
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 7eb2a2da0948
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The error message includes the API URL and the failing step (attempt number).
+          location: file:call_downstream_api.py:line 38
+        - question: Can the operator find the request or job from the message?
+          answer: The message includes the URL which uniquely identifies the API endpoint.
+          location: file:call_downstream_api.py:line 38
+        - question: Is sensitive data excluded from the message?
+          answer: The error message only includes the URL and error, no sensitive payload data.
+          location: file:call_downstream_api.py:line 38
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is added when creating the new RuntimeError exception.
+          location: file:call_downstream_api.py:line 38
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied
+    - node: observability.error-context
+      reason: Duplicate node in pack, already applied
+```

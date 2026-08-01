@@ -1,0 +1,426 @@
+Here's a comprehensive error handler design for tracing a request across two services:
+
+## Core Tracing Infrastructure
+
+### 1. **Shared Trace Context Structure**
+```python
+# shared/trace_context.py
+import uuid
+import time
+import json
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Any
+
+@dataclass
+class TraceContext:
+    """Unified trace context passed between services"""
+    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    parent_span_id: Optional[str] = None
+    service_name: str = "unknown"
+    start_time: float = field(default_factory=time.time)
+    
+    # Additional metadata
+    headers: Dict[str, str] = field(default_factory=dict)
+    method: Optional[str] = None
+    path: Optional[str] = None
+    
+    def to_headers(self) -> Dict[str, str]:
+        """Serialize trace context to HTTP headers"""
+        return {
+            'X-Trace-ID': self.trace_id,
+            'X-Request-ID': self.request_id,
+            'X-Parent-Span-ID': self.parent_span_id or '',
+            'X-Service-Name': self.service_name
+        }
+    
+    @classmethod
+    def from_headers(cls, headers: Dict[str, str], service_name: str) -> 'TraceContext':
+        """Reconstruct trace context from incoming headers"""
+        return cls(
+            trace_id=headers.get('X-Trace-ID', str(uuid.uuid4())),
+            request_id=headers.get('X-Request-ID', str(uuid.uuid4())),
+            parent_span_id=headers.get('X-Parent-Span-ID'),
+            service_name=service_name
+        )
+```
+
+### 2. **Comprehensive Error Handler**
+```python
+# shared/error_handler.py
+import logging
+import sys
+import traceback
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class ServiceError:
+    """Structured error response"""
+    code: int
+    message: str
+    service: str
+    trace_id: str
+    request_id: str
+    timestamp: str
+    error_type: str
+    stack_trace: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'error': {
+                'code': self.code,
+                'message': self.message,
+                'service': self.service,
+                'trace_id': self.trace_id,
+                'request_id': self.request_id,
+                'timestamp': self.timestamp,
+                'error_type': self.error_type,
+                'stack_trace': self.stack_trace
+            }
+        }
+
+class ErrorHandler:
+    """Unified error handler with full trace capability"""
+    
+    def __init__(self, service_name: str, logger: logging.Logger):
+        self.service_name = service_name
+        self.logger = logger
+        self.error_patterns = {}
+        
+    def handle_error(self, 
+                    context: TraceContext,
+                    error: Exception,
+                    error_code: int = 500,
+                    error_type: str = "INTERNAL_ERROR") -> ServiceError:
+        """Main error handling method with full trace context"""
+        
+        # Extract error details
+        error_message = str(error)
+        stack_trace = traceback.format_exc()
+        
+        # Create structured error
+        service_error = ServiceError(
+            code=error_code,
+            message=error_message,
+            service=self.service_name,
+            trace_id=context.trace_id,
+            request_id=context.request_id,
+            timestamp=time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime()),
+            error_type=error_type,
+            stack_trace=stack_trace
+        )
+        
+        # Log comprehensive error details
+        self._log_error(context, service_error, stack_trace)
+        
+        return service_error
+    
+    def _log_error(self, context: TraceContext, error: ServiceError, stack_trace: str):
+        """Comprehensive logging with full context"""
+        log_entry = {
+            'timestamp': error.timestamp,
+            'level': 'ERROR',
+            'service': self.service_name,
+            'trace_id': context.trace_id,
+            'request_id': context.request_id,
+            'parent_span_id': context.parent_span_id,
+            'error_code': error.code,
+            'error_type': error.error_type,
+            'error_message': error.message,
+            'path': context.path,
+            'method': context.method,
+            'stack_trace': stack_trace
+        }
+        
+        # Log to multiple sinks
+        self.logger.error(json.dumps(log_entry))
+        
+        # Log to trace aggregation system (e.g., Jaeger, Zipkin)
+        self._send_to_trace_system(context, error)
+        
+        # Log to separate error tracking system
+        self._send_to_error_tracking(error)
+    
+    def _send_to_trace_system(self, context: TraceContext, error: ServiceError):
+        """Send error to distributed tracing system"""
+        # Example: Send to Jaeger
+        trace_data = {
+            'trace_id': context.trace_id,
+            'span_id': str(uuid.uuid4()),
+            'parent_span_id': context.parent_span_id,
+            'service': self.service_name,
+            'operation': 'error_handling',
+            'tags': {
+                'error': 'true',
+                'error.message': error.message,
+                'error.code': error.code
+            },
+            'duration': (time.time() - context.start_time) * 1000
+        }
+        # In production, use OpenTelemetry or similar
+        # self.tracer.start_span(...)
+    
+    def _send_to_error_tracking(self, error: ServiceError):
+        """Send to error tracking system (Sentry, Rollbar, etc.)"""
+        # Example integration
+        pass
+    
+    def create_cross_service_error(self, 
+                                  context: TraceContext, 
+                                  downstream_error: ServiceError,
+                                  error_code: int = 502) -> ServiceError:
+        """Handle errors when calling downstream service"""
+        return ServiceError(
+            code=error_code,
+            message=f"Downstream service error from {downstream_error.service}: {downstream_error.message}",
+            service=self.service_name,
+            trace_id=context.trace_id,
+            request_id=context.request_id,
+            timestamp=time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime()),
+            error_type="DOWNSTREAM_ERROR",
+            stack_trace=None
+        )
+```
+
+### 3. **Service Integration Example**
+```python
+# service_a.py (upstream service)
+class ServiceA:
+    def __init__(self):
+        self.service_name = "service-a"
+        self.logger = self._setup_logger()
+        self.error_handler = ErrorHandler(self.service_name, self.logger)
+    
+    def process_request(self, request_headers: Dict[str, str], payload: Dict) -> tuple[Dict, Optional[ServiceError]]:
+        """Main request handler"""
+        
+        # Reconstruct trace context from incoming headers
+        context = TraceContext.from_headers(request_headers, self.service_name)
+        context.method = request_headers.get('HTTP_METHOD', 'POST')
+        context.path = "/api/v1/process"
+        
+        try:
+            # Business logic
+            result = self._do_business_logic(payload)
+            
+            # Call downstream service
+            downstream_context = TraceContext(
+                trace_id=context.trace_id,
+                request_id=str(uuid.uuid4()),  # Generate new request ID for downstream
+                parent_span_id=str(uuid.uuid4()),  # This is the current span ID
+                service_name=self.service_name
+            )
+            
+            downstream_result, error = self._call_service_b(downstream_context, result)
+            
+            if error:
+                # Propagate error with trace context
+                return None, self.error_handler.create_cross_service_error(context, error)
+            
+            return downstream_result, None
+            
+        except Exception as e:
+            error = self.error_handler.handle_error(
+                context=context,
+                error=e,
+                error_code=500,
+                error_type="SERVICE_A_ERROR"
+            )
+            return None, error
+    
+    def _call_service_b(self, context: TraceContext, payload: Dict) -> tuple[Optional[Dict], Optional[ServiceError]]:
+        """Call Service B with propagated trace context"""
+        try:
+            # Convert trace context to HTTP headers
+            headers = context.to_headers()
+            
+            # Make HTTP call to Service B
+            # response = requests.post('http://service-b:8080/api/process', 
+            #                         headers=headers, 
+            #                         json=payload)
+            
+            # For demo purposes
+            import requests
+            response = requests.post('http://service-b:8080/api/process', 
+                                     headers=headers, 
+                                     json=payload)
+            
+            if response.status_code >= 400:
+                # Parse error from Service B
+                error_data = response.json().get('error', {})
+                error = ServiceError(
+                    code=response.status_code,
+                    message=error_data.get('message', 'Unknown downstream error'),
+                    service='service-b',
+                    trace_id=error_data.get('trace_id', context.trace_id),
+                    request_id=error_data.get('request_id', context.request_id),
+                    timestamp=error_data.get('timestamp', ''),
+                    error_type=error_data.get('error_type', 'DOWNSTREAM_ERROR')
+                )
+                return None, error
+            
+            return response.json(), None
+            
+        except Exception as e:
+            return None, self.error_handler.handle_error(
+                context=context,
+                error=e,
+                error_code=503,
+                error_type="SERVICE_UNAVAILABLE"
+            )
+```
+
+### 4. **API Error Response Format**
+```json
+{
+    "error": {
+        "code": 500,
+        "message": "Database connection failed",
+        "service": "service-a",
+        "trace_id": "550e8400-e29b-41d4-a716-446655440000",
+        "request_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        "timestamp": "2024-01-15T12:30:45.123Z",
+        "error_type": "DATABASE_ERROR",
+        "stack_trace": "Traceback (most recent call last):\n    ..."
+    }
+}
+```
+
+### 5. **Cross-Service Error Propagation**
+```python
+# service_b.py (downstream service)
+class ServiceB:
+    def __init__(self):
+        self.service_name = "service-b"
+        self.logger = self._setup_logger()
+        self.error_handler = ErrorHandler(self.service_name, self.logger)
+    
+    def process(self, request_headers: Dict[str, str], payload: Dict) -> tuple[Dict, Optional[ServiceError]]:
+        """Downstream service handler"""
+        
+        # Extract trace context from incoming headers
+        context = TraceContext.from_headers(request_headers, self.service_name)
+        
+        try:
+            # Simulate business logic
+            if payload.get('simulate_error'):
+                raise ValueError("Invalid payload data")
+            
+            result = {"status": "success", "data": process_payload(payload)}
+            return result, None
+            
+        except Exception as e:
+            error = self.error_handler.handle_error(
+                context=context,
+                error=e,
+                error_code=422,
+                error_type="VALIDATION_ERROR"
+            )
+            return None, error
+```
+
+### 6. **Log Correlation Format**
+```python
+# logging_correlation.py
+class CorrelationFormatter(logging.Formatter):
+    """Custom formatter that includes trace correlation IDs in all logs"""
+    
+    def format(self, record):
+        # Add trace IDs to all log records
+        if hasattr(record, 'request_id'):
+            record.request_id = f"[{record.request_id}]"
+        else:
+            record.request_id = "[no-request]"
+        
+        if hasattr(record, 'trace_id'):
+            record.trace_id = f"[{record.trace_id}]"
+        else:
+            record.trace_id = "[no-trace]"
+        
+        return super().format(record)
+
+# Configure logging
+def setup_logging():
+    handler = logging.StreamHandler()
+    formatter = CorrelationFormatter(
+        '%(asctime)s - %(levelname)s - %(name)s - %(trace_id)s - %(request_id)s - %(message)s'
+    )
+    handler.setFormatter(formatter)
+    
+    logger = logging.getLogger('service')
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+```
+
+### 7. **Usage in FastAPI Framework**
+```python
+# api/main.py
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+error_handler = ErrorHandler("api-service", logger)
+
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    # Generate trace context from incoming headers or create new
+    context = TraceContext.from_headers(request.headers, "api-service")
+    
+    # Store in request state for use in routes
+    request.state.trace_context = context
+    
+    try:
+        response = await call_next(request)
+        # Add trace headers to response
+        response.headers.update(context.to_headers())
+        return response
+    except Exception as e:
+        error = error_handler.handle_error(context, e)
+        return JSONResponse(
+            status_code=error.code,
+            content=error.to_dict()
+        )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    context = request.state.trace_context
+    error = error_handler.handle_error(
+        context=context,
+        error=exc,
+        error_code=exc.status_code,
+        error_type="HTTP_ERROR"
+    )
+    return JSONResponse(status_code=exc.status_code, content=error.to_dict())
+```
+
+### 8. **Monitoring and Tracing Dashboard Query**
+```sql
+-- Query to trace full request flow
+SELECT 
+    trace_id,
+    request_id,
+    timestamp,
+    service_name,
+    operation,
+    error_type,
+    error_message,
+    duration
+FROM trace_events
+WHERE trace_id = '550e8400-e29b-41d4-a716-446655440000'
+ORDER BY timestamp ASC
+```
+
+This implementation provides:
+- **Full trace propagation** via HTTP headers
+- **Structured error responses** with all correlation IDs
+- **Cross-service error correlation** through trace IDs
+- **Comprehensive logging** with request metadata
+- **Integration with tracing systems** (Jaeger, Zipkin, etc.)
+- **Error tracking system support** (Sentry, Rollbar)
+
+The key advantage is that an operator can:
+1. Find the initial trace ID from any error message
+2. Query the logging system for all logs with that trace ID
+3. See the complete request flow across both services
+4. Understand where the error occurred and its context

@@ -1,0 +1,302 @@
+Here's a resilient function that implements rate limiting, exponential backoff, and circuit breaking to avoid hammering a downstream API when it's down:
+
+```python
+import time
+import requests
+from datetime import datetime, timedelta
+from typing import Optional, Callable, Any
+import threading
+from enum import Enum
+
+class CircuitState(Enum):
+    CLOSED = "closed"      # Normal operation, requests allowed
+    OPEN = "open"          # Circuit is open, requests blocked
+    HALF_OPEN = "half_open" # Testing if service recovered
+
+class CircuitBreaker:
+    def __init__(self, 
+                 failure_threshold: int = 5,
+                 recovery_timeout: int = 30,
+                 half_open_max_calls: int = 1,
+                 min_between_requests: float = 2.0):  # Minimum seconds between requests when down
+        
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout  # Seconds to wait before trying recovery
+        self.half_open_max_calls = half_open_max_calls
+        self.min_between_requests = min_between_requests
+        
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.last_request_time = None
+        self.half_open_calls = 0
+        
+        self.lock = threading.Lock()
+    
+    def _can_make_request(self) -> bool:
+        """Determine if we can make a request based on circuit state"""
+        with self.lock:
+            current_time = time.time()
+            
+            # Respect minimum time between requests (rate limiting)
+            if self.last_request_time:
+                time_since_last = current_time - self.last_request_time
+                if time_since_last < self.min_between_requests:
+                    return False
+            
+            if self.state == CircuitState.OPEN:
+                # Check if recovery timeout has passed
+                if current_time - self.last_failure_time >= self.recovery_timeout:
+                    self.state = CircuitState.HALF_OPEN
+                    self.half_open_calls = 0
+                    return True
+                return False
+                
+            elif self.state == CircuitState.HALF_OPEN:
+                # Only allow limited calls in half-open state
+                if self.half_open_calls >= self.half_open_max_calls:
+                    return False
+                self.half_open_calls += 1
+                return True
+                
+            # CLOSED state
+            return True
+    
+    def record_success(self):
+        """Record a successful request"""
+        with self.lock:
+            self.failure_count = 0
+            self.half_open_calls = 0
+            if self.state == CircuitState.HALF_OPEN:
+                self.state = CircuitState.CLOSED
+    
+    def record_failure(self):
+        """Record a failed request"""
+        with self.lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
+            
+            if self.state == CircuitState.CLOSED:
+                if self.failure_count >= self.failure_threshold:
+                    self.state = CircuitState.OPEN
+                    print(f"Circuit OPEN after {self.failure_count} failures")
+            
+            elif self.state == CircuitState.HALF_OPEN:
+                self.state = CircuitState.OPEN
+                print("Circuit OPEN from HALF_OPEN failure")
+            
+            self.half_open_calls = 0
+    
+    def update_last_request_time(self):
+        """Update the last request time for rate limiting"""
+        with self.lock:
+            self.last_request_time = time.time()
+
+def resilient_api_call(
+    request_func: Callable[..., Any],
+    circuit_breaker: Optional[CircuitBreaker] = None,
+    timeout: float = 5.0,
+    max_retries: int = 3,
+    backoff_factor: float = 2.0,
+    retry_exceptions: tuple = (requests.exceptions.RequestException, TimeoutError)
+) -> Any:
+    """
+    Makes an API call with circuit breaking and exponential backoff.
+    
+    Args:
+        request_func: Function that makes the HTTP call
+        circuit_breaker: Circuit breaker instance
+        timeout: Request timeout in seconds
+        max_retries: Maximum number of retries
+        backoff_factor: Exponential backoff multiplier
+        retry_exceptions: Exceptions to retry on
+    
+    Returns:
+        Response data on success
+    
+    Raises:
+        Exception: If service is down or all retries exhausted
+    """
+    
+    if circuit_breaker is None:
+        circuit_breaker = CircuitBreaker()
+    
+    # Update request time for rate limiting
+    circuit_breaker.update_last_request_time()
+    
+    # Check if we can make a request based on circuit state
+    if not circuit_breaker._can_make_request():
+        raise Exception(f"Circuit breaker is {circuit_breaker.state.value}. API is unavailable.")
+    
+    delay = 1.0  # Initial backoff delay
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            # Make the actual HTTP call
+            response = request_func(timeout=timeout)
+            
+            # Check if response is valid (2xx status codes)
+            if response.status_code >= 200 and response.status_code < 300:
+                circuit_breaker.record_success()
+                print(f"Success on attempt {attempt + 1}")
+                return response
+            else:
+                # Handle non-2xx responses
+                error_msg = f"API returned status code {response.status_code}"
+                if response.status_code >= 500:  # Server errors
+                    raise Exception(error_msg)
+                else:
+                    # Client errors (4xx) - don't retry these
+                    raise Exception(f"Client error: {error_msg}, won't retry")
+        
+        except retry_exceptions as e:
+            last_exception = e
+            print(f"Attempt {attempt + 1} failed: {str(e)}")
+            
+            # Record the failure in circuit breaker
+            circuit_breaker.record_failure()
+            
+            if attempt < max_retries - 1:
+                # Exponential backoff with jitter
+                sleep_time = delay * (backoff_factor ** attempt)
+                # Add random jitter to avoid thundering herd
+                import random
+                sleep_time *= (0.5 + random.random() * 0.5)
+                print(f"Retrying in {sleep_time:.2f} seconds...")
+                time.sleep(sleep_time)
+    
+    # All retries exhausted
+    raise Exception(f"API call failed after {max_retries} attempts. Last error: {last_exception}")
+
+# Example usage:
+
+def demo_request_function(timeout=5.0):
+    """Example function that simulates an API call"""
+    response = requests.get('https://api.example.com/data', timeout=timeout)
+    return response
+
+# Usage in production code:
+circuit = CircuitBreaker(
+    failure_threshold=3,      # Open circuit after 3 consecutive failures
+    recovery_timeout=30,      # Try recovery after 30 seconds
+    half_open_max_calls=1,    # Only allow 1 test call in half-open state
+    min_between_requests=2.0  # Minimum 2 seconds between requests when down
+)
+
+# Example with error handling
+try:
+    result = resilient_api_call(
+        demo_request_function,
+        circuit_breaker=circuit,
+        timeout=5,
+        max_retries=3,
+        backoff_factor=2.0
+    )
+    print("Call successful:", result.status_code)
+except Exception as e:
+    print(f"Call failed: {e}")
+    print(f"Circuit state: {circuit.state.value}")
+```
+
+Here's a more concise version if you need just the essentials:
+
+```python
+import time
+import requests
+from functools import wraps
+from typing import Callable, Any
+import random
+
+def with_circuit_breaker(
+    failure_threshold: int = 3,
+    recovery_timeout: float = 30.0,
+    min_wait_between: float = 1.0,
+    max_retries: int = 3
+):
+    """
+    Decorator for API calls with circuit breaker and exponential backoff
+    """
+    def decorator(func: Callable[..., Any]):
+        state = {
+            'failures': 0,
+            'open_until': 0,
+            'last_request': 0,
+            'circuit_open': False
+        }
+        
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Rate limiting check
+            now = time.time()
+            time_since_last = now - state['last_request']
+            if time_since_last < min_wait_between:
+                raise Exception(f"Rate limited: too many requests to down service")
+            
+            # Circuit check
+            if state['circuit_open']:
+                if now >= state['open_until']:
+                    # Circuit can be closed again
+                    state['circuit_open'] = False
+                    state['failures'] = 0
+                    print("Circuit now CLOSED - trying recovery")
+                else:
+                    raise Exception("Service is temporarily unavailable (circuit open)")
+            
+            # Make the request with retries
+            delay = 1.0
+            for attempt in range(max_retries):
+                try:
+                    state['last_request'] = time.time()
+                    result = func(*args, **kwargs)
+                    if result.status_code < 400:
+                        # Success - reset failures
+                        state['failures'] = 0
+                        return result
+                    else:
+                        raise Exception(f"HTTP {result.status_code}")
+                except Exception as e:
+                    state['failures'] += 1
+                    
+                    # Open circuit if too many failures
+                    if state['failures'] >= failure_threshold:
+                        state['circuit_open'] = True
+                        state['open_until'] = time.time() + recovery_timeout
+                        print(f"Circuit OPEN after {state['failures']} failures")
+                    
+                    if attempt < max_retries - 1:
+                        sleep_time = delay * (2 ** attempt) * random.uniform(0.5, 1.5)
+                        print(f"Retry {attempt+1} in {sleep_time:.1f}s")
+                        time.sleep(sleep_time)
+            
+            raise Exception("All retries exhausted")
+        
+        return wrapper
+    return decorator
+
+# Usage example:
+@with_circuit_breaker(failure_threshold=3, recovery_timeout=30, max_retries=3)
+def call_api():
+    return requests.get('https://api.example.com/data', timeout=5)
+
+# In your code:
+try:
+    response = call_api()
+    print("Success:", response.json())
+except Exception as e:
+    print(f"Failed: {e}")
+```
+
+**Key features of these implementations:**
+
+1. **Circuit Breaker Pattern**: Tracks consecutive failures and "opens" the circuit to stop making requests entirely when the service is down
+2. **Rate Limiting**: Enforces a minimum time between requests to a failing service
+3. **Exponential Backoff**: Increases wait time between retries
+4. **Half-Open State**: Periodically tests the service to see if it's recovered
+5. **Configurable Parameters**: All limits (failure threshold, recovery time, max retries, etc.) are customizable
+
+The service won't be "hammered" because:
+- After threshold failures, the circuit opens and blocks all requests
+- Even before that, requests are spaced by `min_wait_between` seconds
+- Retries use exponential backoff with random jitter
+- In half-open state, only one test request is allowed at a time

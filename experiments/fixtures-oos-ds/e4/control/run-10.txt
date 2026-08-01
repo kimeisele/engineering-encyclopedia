@@ -1,0 +1,245 @@
+Here's a robust solution that implements a circuit breaker pattern with exponential backoff:
+
+```python
+import time
+import logging
+import threading
+from typing import Callable, Any, Optional
+from functools import wraps
+from datetime import datetime, timedelta
+
+class CircuitBreaker:
+    """
+    Circuit breaker implementation to prevent hammering a downstream API.
+    
+    States: CLOSED (normal), OPEN (API down - stop calling), HALF_OPEN (testing)
+    """
+    
+    def __init__(self, 
+                 failure_threshold: int = 5,
+                 recovery_timeout: float = 30.0,
+                 success_threshold: int = 2,
+                 max_backoff: float = 300.0):
+        """
+        Initialize the circuit breaker.
+        
+        Args:
+            failure_threshold: Number of consecutive failures before opening circuit
+            recovery_timeout: Time (seconds) to wait before testing recovery
+            success_threshold: Number of successful calls needed in HALF_OPEN state to close circuit
+            max_backoff: Maximum backoff time between calls (seconds)
+        """
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.success_threshold = success_threshold
+        self.max_backoff = max_backoff
+        
+        # State management
+        self.state = 'CLOSED'  # CLOSED, OPEN, HALF_OPEN
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time = None
+        self.last_attempt_time = None
+        self.lock = threading.Lock()
+        
+        # Logging
+        self.logger = logging.getLogger(__name__)
+        
+    def _can_attempt(self) -> bool:
+        """Determine if we can make a call to the downstream API."""
+        with self.lock:
+            if self.state == 'CLOSED':
+                # Apply exponential backoff
+                if self.last_attempt_time and self.failure_count > 0:
+                    backoff = min(
+                        self.recovery_timeout * (2 ** (self.failure_count - 1)),
+                        self.max_backoff
+                    )
+                    if time.time() - self.last_attempt_time < backoff:
+                        return False
+                return True
+                
+            elif self.state == 'HALF_OPEN':
+                # Allow limited attempts for testing
+                return True
+                
+            elif self.state == 'OPEN':
+                # Check if recovery timeout has elapsed
+                if self.last_failure_time:
+                    elapsed = time.time() - self.last_failure_time
+                    if elapsed >= self.recovery_timeout:
+                        self.state = 'HALF_OPEN'
+                        self.success_count = 0
+                        self.logger.info("Circuit moved to HALF_OPEN state")
+                        return True
+                return False
+                
+            return False
+    
+    def _record_success(self):
+        """Record a successful API call."""
+        with self.lock:
+            self.last_attempt_time = time.time()
+            
+            if self.state == 'HALF_OPEN':
+                self.success_count += 1
+                if self.success_count >= self.success_threshold:
+                    self.state = 'CLOSED'
+                    self.failure_count = 0
+                    self.success_count = 0
+                    self.logger.info("Circuit moved to CLOSED state after recovery")
+            else:  # CLOSED state
+                self.failure_count = 0
+                
+    def _record_failure(self, error: Exception):
+        """Record a failed API call."""
+        with self.lock:
+            self.last_attempt_time = time.time()
+            self.last_failure_time = time.time()
+            
+            if self.state == 'HALF_OPEN':
+                self.state = 'OPEN'
+                self.logger.warning(f"Circuit opened during HALF_OPEN state: {error}")
+            elif self.state == 'CLOSED':
+                self.failure_count += 1
+                if self.failure_count >= self.failure_threshold:
+                    self.state = 'OPEN'
+                    self.logger.warning(f"Circuit opened after {self.failure_count} failures: {error}")
+                    
+    def is_available(self) -> bool:
+        """Check if the circuit is currently available."""
+        return self._can_attempt()
+    
+    def call(self, func: Callable, *args, **kwargs) -> Any:
+        """
+        Call a function with circuit breaker protection.
+        
+        Args:
+            func: The function to call
+            *args: Positional arguments
+            **kwargs: Keyword arguments
+            
+        Returns:
+            The return value of the function
+            
+        Raises:
+            CircuitBreakerOpenError: If circuit is open and we can't call
+            Exception: If the function itself raises an exception
+        """
+        if not self._can_attempt():
+            self.logger.warning("Circuit breaker is OPEN - not calling downstream API")
+            raise CircuitBreakerOpenError("Circuit breaker is OPEN - downstream API not available")
+        
+        try:
+            result = func(*args, **kwargs)
+            self._record_success()
+            return result
+        except Exception as e:
+            self._record_failure(e)
+            raise
+
+class CircuitBreakerOpenError(Exception):
+    """Raised when circuit breaker is open and prevents API calls."""
+    pass
+
+# Decorator version for easy usage
+def circuit_breaker(circuit: Optional[CircuitBreaker] = None, **circuit_kwargs):
+    """
+    Decorator to apply circuit breaker to a function.
+    
+    Usage:
+        @circuit_breaker(failure_threshold=5, recovery_timeout=30)
+        def call_api():
+            # API call logic
+            pass
+    """
+    def decorator(func):
+        cb = circuit or CircuitBreaker(**circuit_kwargs)
+        
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return cb.call(func, *args, **kwargs)
+        
+        wrapper.circuit = cb  # Expose circuit for monitoring
+        return wrapper
+    return decorator
+
+# Example usage
+if __name__ == "__main__":
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Example API wrapper
+    class ExampleAPIClient:
+        def __init__(self, circuit_breaker=None):
+            self.circuit = circuit_breaker or CircuitBreaker()
+            self.total_calls = 0
+            
+        def call_api(self, *args, **kwargs):
+            return self.circuit.call(self._actual_api_call, *args, **kwargs)
+        
+        def _actual_api_call(self, endpoint, **kwargs):
+            self.total_calls += 1
+            # Simulate API call - replace with actual HTTP request
+            import random
+            if random.random() < 0.7:  # 70% failure rate for demo
+                raise ConnectionError("API is down")
+            return {"status": "success", "data": f"Response from {endpoint}"}
+    
+    # Test the circuit breaker
+    cb = CircuitBreaker(
+        failure_threshold=3,
+        recovery_timeout=5,
+        success_threshold=2
+    )
+    
+    client = ExampleAPIClient(cb)
+    
+    print("Testing circuit breaker...")
+    for i in range(20):
+        try:
+            result = client.call_api(f"/api/data/{i}")
+            print(f"Call {i+1}: SUCCESS - {result}")
+        except CircuitBreakerOpenError as e:
+            print(f"Call {i+1}: BLOCKED - {e}")
+        except ConnectionError as e:
+            print(f"Call {i+1}: FAILED - {e}")
+        
+        time.sleep(1)  # Wait between calls
+    
+    print(f"\nTotal actual API calls made: {client.total_calls}")
+    print("Note: The circuit breaker prevented hammering the API");
+```
+
+**Key Features:**
+
+1. **Three States**: CLOSED (normal operation), OPEN (API down, stop calling), HALF_OPEN (testing recovery)
+
+2. **Exponential Backoff**: After first failure, waits `recovery_timeout * 2^(failures-1)`, capped at `max_backoff`
+
+3. **Thread-Safe**: Uses locks to handle concurrent calls
+
+4. **Configurable Parameters**:
+   - `failure_threshold`: How many failures before opening circuit
+   - `recovery_timeout`: How long to wait before testing recovery
+   - `success_threshold`: How many successes needed to fully recover
+   - `max_backoff`: Maximum wait time between retries
+
+5. **Monitoring**: Tracks attempt times and provides logging for state transitions
+
+**When to use which approach:**
+
+- Use the **class directly** if you want fine-grained control
+- Use the **decorator** for simple cases
+- Use the **with pattern** for even more safety
+
+The circuit breaker significantly reduces hammering by:
+- **Not calling at all** when circuit is OPEN
+- **Waiting with backoff** when failures occur in CLOSED state  
+- **Limited testing** in HALF_OPEN state
+- **Automatic recovery** when API comes back
+
+This is a production-ready solution used widely in distributed systems to handle downstream API failures gracefully.
