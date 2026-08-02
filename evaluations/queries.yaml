@@ -131,3 +131,39 @@
 - query: "loading the orders then querying each customer"
   required: [data.n-plus-one]
   forbidden_to_dominate: [apis.pagination]
+
+# Slice 7: findability queries for the nodes that had none — every corpus
+# node now has at least one query naming it as required (asserted by
+# tests.test_retrieval.TestFindability).
+
+- query: "lock the row before updating it to avoid lost updates"
+  required: [concurrency.locking-strategy]
+  forbidden_to_dominate: [concurrency.race-conditions]
+
+- query: "trace one request across two services"
+  required: [observability.correlation-id]
+  forbidden_to_dominate: [observability.error-context]
+
+- query: "a cached value must never be stale after the source changes"
+  required: [performance.cache-invalidation]
+  forbidden_to_dominate: [data.schema-migration]
+
+- query: "stop calling the api while it is down"
+  required: [reliability.circuit-breaker]
+  forbidden_to_dominate: [reliability.retry-semantics]
+
+- query: "jobs that keep failing need somewhere to go"
+  required: [reliability.dead-letter-queue]
+  forbidden_to_dominate: [reliability.retry-semantics]
+
+- query: "publish an event reliably from inside a transaction"
+  required: [reliability.outbox-pattern]
+  forbidden_to_dominate: [data.transaction-boundaries]
+
+- query: "check which claims in the report are not backed by the raw output"
+  required: [review.unsupported-claims]
+  forbidden_to_dominate: [testing.coverage-limitations]
+
+- query: "score the code without the report text contaminating the result"
+  required: [testing.evaluation-contamination]
+  forbidden_to_dominate: [testing.coverage-limitations]

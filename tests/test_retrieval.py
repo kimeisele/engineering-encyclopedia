@@ -120,5 +120,51 @@ class TestRetrievalBackends(unittest.TestCase):
         self.assertLess(elapsed, 0.2, f"index+queries took {elapsed:.3f}s")
 
 
+class TestFindability(unittest.TestCase):
+    """Slice 7: retrieval regression is mechanical, not by hand.
+
+    Every corpus node has at least one query in evaluations/queries.yaml
+    naming it as required, and every such query lands that node inside the
+    pack on BOTH backends. Adding a node that displaces an existing one
+    turns this test red; a query that matches nothing (no_match) also
+    fails. The apis.pagination displacement after batch C was caught by
+    hand — this test makes that class of regression impossible to miss.
+    """
+
+    def test_every_corpus_node_has_a_findability_query(self):
+        nodes = load_nodes()
+        queries = yaml.safe_load(
+            open(ROOT / "evaluations" / "queries.yaml", encoding="utf-8")
+        )
+        named = {req for entry in queries for req in entry.get("required", [])}
+        for node in nodes:
+            self.assertIn(
+                node.id,
+                named,
+                f"{node.id} has no findability query in evaluations/queries.yaml",
+            )
+
+    def test_every_query_lands_its_node_in_pack_on_both_backends(self):
+        nodes = load_nodes()
+        queries = yaml.safe_load(
+            open(ROOT / "evaluations" / "queries.yaml", encoding="utf-8")
+        )
+        for backend in available_backends():
+            index = RetrievalIndex(nodes, backend=backend)
+            for entry in queries:
+                pack = compose_pack(nodes, index, entry["query"], PackOptions())
+                self.assertFalse(
+                    pack["trace"].get("no_match", False),
+                    f"{backend}: no_match for {entry['query']!r}",
+                )
+                selected = set(pack["trace"]["selected"])
+                for req in entry.get("required", []):
+                    self.assertIn(
+                        req,
+                        selected,
+                        f"{backend}: {req} displaced for {entry['query']!r}",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()
