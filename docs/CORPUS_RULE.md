@@ -103,3 +103,11 @@ distinction predicts no better than the baseline-headroom alternative (the
 pack helps where the model's unaided baseline is weak: e4-Mistral control
 2.80 vs e4-DeepSeek 5.40), and the data does not prefer one over the other.
 This section supersedes any earlier "survives in direction" wording.
+
+The `review.*` namespace (node 16, E6) does **not** demonstrate an effect:
+after a measurement audit and repair (the third instrument defect the
+project has caught — `docs/OOS_E6_AUDIT.md`), the E6 treatment still beats
+control on neither the rubric nor the resolvable-location count, and the
+placebo outscored the treatment on both providers' rubric and DeepSeek's
+locations. A review instruction written as a machine contract is a
+defensible design, but the data does not show it changing agent output.
