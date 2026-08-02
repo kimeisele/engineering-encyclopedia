@@ -1,0 +1,33 @@
+task: e8
+node: performance.cache-invalidation
+description: >
+  Deterministic rubric for E8 (pre-registered convergence test): does the
+  produced cache never serve a stale value after the source changes?
+  Fixed before any run. Every criterion is a boolean (re.search + re.DOTALL
+  over the scored artifact); the score is the count of satisfied criteria.
+
+criteria:
+  - id: cache_key_includes_version
+    description: "the cache key captures the source version or fingerprint"
+    kind: present
+    pattern: "(key\\s*[=+].{0,40}(version|updated|fingerprint|mtime)|f['\"][^'\"]*\\{(version|updated|fingerprint|mtime))"
+  - id: explicit_invalidation
+    description: "the cache is explicitly invalidated on source change"
+    kind: present
+    pattern: "(invalidate|\\.delete\\(|\\.pop\\(|\\.clear\\(|del\\s+\\w+\\[)"
+  - id: ttl_or_expiry
+    description: "entries expire (ttl, max_age, deadline, time-based)"
+    kind: present
+    pattern: "(ttl|expir|max_age|deadline|time\\.time|monotonic)"
+  - id: miss_refetch
+    description: "a miss triggers a refetch rather than serving nothing"
+    kind: present
+    pattern: "(miss|not in cache|absent|KeyError).{0,60}(fetch|reload|compute|get)"
+  - id: stampede_guard
+    description: "concurrent misses are guarded (single-flight, lock, mutex)"
+    kind: present
+    pattern: "(single.?flight|in.?flight|lock|mutex|waiting)"
+  - id: no_unbounded_stale
+    description: "staleness is bounded (no never-expiring entry)"
+    kind: absent
+    pattern: "(while\\s+True|no\\s+expir|ttl\\s*=\\s*[Nn]one)"

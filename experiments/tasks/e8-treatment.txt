@@ -1,0 +1,160 @@
+TASK
+Write a function that returns a cached value for a key, and must not serve a stale value after the source data changes.
+
+CONTEXT PACK
+You receive the following context pack of engineering knowledge.
+
+context_pack:
+  primary:
+  - does_not_imply:
+    - that a TTL alone keeps the cache correct
+    - that invalidation is free
+    - that a short TTL fixes a wrong key
+    - that every reader needs the newest value
+    hash: 9dcaeca5d909
+    id: performance.cache-invalidation
+    questions:
+    - What identifies a cached entry, and does it include the source version?
+    - What invalidates the entry, and is that tied to the source change?
+    - What does a reader see between the source change and the invalidation?
+    - What happens when the cache is empty and many readers arrive at once?
+    relevance: the cache key changes when the source changes
+    risks:
+    - keys that do not change when the source changes
+    - invalidation running before the write is durable
+    - unbounded staleness from out-of-band source updates
+    - thundering herd on expiry
+    summary: 'A cache is only correct while its invalidation is correct. The decision
+      is what identifies a cached entry and what changes when the source changes;
+      without an explicit invalidation rule, a cache silently serves the old answer
+      forever.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that locks are the only answer
+    - that a mutex makes the surrounding logic correct
+    - that a race will show up in tests
+    - that the bug is in the last code changed
+    hash: 785591749aba
+    id: concurrency.race-conditions
+    questions:
+    - What state is shared, and where is it mutated?
+    - Is the read-and-write sequence atomic as one step?
+    - Can two workers observe the same value as unclaimed?
+    - What happens if the check and the action are interleaved?
+    relevance: a race between read and write
+    risks:
+    - check-then-act on shared state without atomicity
+    - locks held across slow I/O
+    - assuming tests expose the interleaving
+    summary: 'A race condition is a flaw in timing: the outcome depends on the order
+      in which concurrent operations happen to interleave. Any check-then-act sequence
+      that is not atomic can observe stale state and make a wrong decision.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that validation replaces escaping or parameterisation
+    - that a whitelist is the only correct approach
+    - that validation once at entry protects later use
+    - that type checks are the same as semantic validation
+    hash: 5bce2610cc1c
+    id: security.input-validation
+    questions:
+    - Where is the trust boundary, and is validation done there?
+    - What is the set of acceptable values, and what rejects everything else?
+    - Is the validated form used downstream, or the raw input?
+    - Does each use site still treat the value as untrusted?
+    relevance: reject input that does not match the expected shape
+    risks:
+    - validating for display but using the raw value elsewhere
+    - blacklist filters bypassed by encodings or edge cases
+    - validation logic that changes the value silently
+    summary: 'Validate input at the trust boundary: what enters a system is data,
+      and only a shape the program explicitly accepts should be used. Validation is
+      about rejecting what is not expected, not about patching what is.
+
+      '
+    version: 1
+  supporting:
+  - does_not_imply:
+    - durability across power loss without an fsync
+    - that directory metadata is also flushed
+    - that concurrent writers are safe
+    - that the new content is valid
+    hash: 4c5573dcd875
+    id: python.files.atomic-replacement
+    questions:
+    - Is the temp file created in the same directory as the target?
+    - Is the data flushed before the rename?
+    - What happens to the temp file if the write fails?
+    - Can two writers both rename over the target?
+    relevance: write the config file atomically
+    risks:
+    - renaming across filesystems, which is not atomic
+    - omitting fsync and losing data on power loss
+    - leftover temp files after a crash
+    - a config file replaced with an invalid new version
+    summary: 'Update a file by writing a temporary file in the same directory, flushing
+      it, and renaming it over the target. The rename is atomic on POSIX, so readers
+      see either the old or the new content, never a truncated middle state.
+
+      '
+    version: 1
+context_pack_hash: 2eb0429df7fc
+knowledge_revision: 96bf58e88848
+request:
+  original: Write a function that returns a cached value for a key, and must not serve
+    a stale value after the source data changes.
+retrieval_backend: fts5
+trace:
+  excluded:
+  - observability.error-context
+  - review.unsupported-claims
+  - observability.correlation-id
+  - reliability.circuit-breaker
+  - reliability.retry-semantics
+  selected:
+  - performance.cache-invalidation
+  - concurrency.race-conditions
+  - security.input-validation
+  - python.files.atomic-replacement
+  truncated: true
+
+APPLICATION REPORT
+Alongside your code, return an application report in this exact YAML form:
+
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: <node id from the pack>
+      version: <version of that node>
+      hash: <hash of that node>
+      questions_answered:
+        - question: "<a question of that node, copied verbatim>"
+          answer: "<your answer, non-empty, at most 40 words>"
+          location: "<file:line where you applied it>"
+      unanswered:
+        - question: "<a question of that node, copied verbatim>"
+          reason: "<why you did not answer it>"
+  not_applied:
+    - node: <any other node id from the pack>
+      reason: "<why you did not apply it>"
+
+Rules:
+- Every node in the pack must appear exactly once across `applied` and
+  `not_applied`. Omission, duplication and double-listing all fail.
+- Questions must be copied verbatim from the node's `questions` list in the
+  pack; altered question text fails.
+- Every question of an applied node must appear in `questions_answered` or
+  `unanswered`.
+- Answers are non-empty and at most 40 words; locations are non-empty;
+  every `not_applied` entry has a non-empty reason.
+
+FORMAT
+Separate your implementation from the application report with the exact
+line: ---APPLICATION_REPORT---
+Everything above that line is the artifact to be evaluated; everything
+below it is the report.

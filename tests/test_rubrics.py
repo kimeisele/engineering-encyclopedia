@@ -178,6 +178,58 @@ FIXTURES = {
             "negative": "I think the review is thorough and careful",
         },
     },
+    "e7": {
+        "atomic_guard": {
+            "positive": "UPDATE counters SET value = value + 1 WHERE id = %s",
+            "negative": "counter += 1",
+        },
+        "explicit_lock": {
+            "positive": "with lock:\n    counter += 1",
+            "negative": "counter += 1",
+        },
+        "version_or_cas_field": {
+            "positive": "UPDATE counters SET value = ?, version = version + 1 WHERE version = expected",
+            "negative": "counter += 1",
+        },
+        "guarded_read_modify_write": {
+            "positive": "with lock:\n    counter += 1",
+            "negative": "counter += 1",
+        },
+        "contention_handling": {
+            "positive": "except Exception:\n    retry()",
+            "negative": "counter += 1",
+        },
+        "no_timestamp_identity": {
+            "positive": "counter += 1",
+            "negative": "key = str(time.time())",
+        },
+    },
+    "e8": {
+        "cache_key_includes_version": {
+            "positive": "key = f'{name}-{version}'",
+            "negative": "key = name",
+        },
+        "explicit_invalidation": {
+            "positive": "cache.pop(key)",
+            "negative": "return cache[key]",
+        },
+        "ttl_or_expiry": {
+            "positive": "ttl = 60",
+            "negative": "return cache[key]",
+        },
+        "miss_refetch": {
+            "positive": "if key not in cache:\n    value = fetch(key)",
+            "negative": "return cache[key]",
+        },
+        "stampede_guard": {
+            "positive": "with lock:\n    value = fetch(key)",
+            "negative": "return cache[key]",
+        },
+        "no_unbounded_stale": {
+            "positive": "return cache[key]",
+            "negative": "while True:\n    pass",
+        },
+    },
 }
 
 

@@ -1,0 +1,1 @@
+Write a function that returns a cached value for a key, and must not serve a stale value after the source data changes.
