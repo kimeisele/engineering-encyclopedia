@@ -3,104 +3,106 @@
 Versioned engineering knowledge nodes that make coding-agent reasoning
 inspectable and provable.
 
-Coding agents already contain the knowledge in this encyclopedia. They fail
-anyway — not because the knowledge is absent, but because it is stored in
-weights: activated probabilistically, unevenly across contexts, impossible to
-inspect, impossible to patch, impossible to verify after the fact.
+## What is actually known
 
-**This project does not teach agents new facts. It makes the application of
-known facts reliable and provable.**
+This project was measured, and the measurement was itself audited three
+times. What is known, stated without advocacy:
 
-Four properties follow, and every design decision in this repository serves
-them:
+- **In-sample, the knowledge pack changes agent output.** On three tasks
+  (idempotency, subprocess safety, atomic file replacement), the treatment
+  arm out-scored control on all six provider×task cells across two
+  providers (DeepSeek, Mistral), and a placebo arm (a structurally
+  identical pack with irrelevant content) matched or under-scored control —
+  so the in-sample effect is reproducible and is not prompt structure.
+- **Out-of-sample, it does not generalise.** Of six out-of-sample cells
+  (e4/e5 at n=15 on two providers, plus E6), exactly **one** shows a clean
+  knowledge effect (e4-Mistral, +3.07). One cell cannot carry a rule.
+- **The corpus rule is unsupported out-of-sample**, and `review.*` does not
+  demonstrate an effect. Both are retained only as hypotheses.
+- **The instrument was caught failing three times** (the report
+  contaminating the scored artifact; a pattern crediting the wrong
+  construct; the E6 parser and a criterion that never fired). Two of the
+  three reversed a result. Every number below is scored with the repaired
+  instrument.
 
-1. **Reliable retrieval** — the knowledge arrives deterministically, not when
-   the model happens to think of it.
-2. **Inspectability** — a human can read exactly which node the agent relied
-   on, and correct that node. A weight cannot be corrected.
-3. **Consistency** — the same guidance across sessions, models and vendors.
-   Swapping the model does not swap the knowledge.
-4. **Anchoring against confabulation** — a fixed, hashed, versioned text
-   against which plausible invention becomes visible.
+The full record — raw scores, before/after, the audit — is in
+`experiments/RESULTS.md`; a one-page summary is in
+`docs/EXPERIMENT_SUMMARY.md`.
 
-The product is the **Application Report**: the mechanism by which an agent
-names the node it applied, the question it answered, and where in the artifact
-it answered it. Retrieval is a means to that end.
+## What it is
 
-## Measured result
+Coding agents already contain this knowledge; they fail anyway because it
+is stored in weights — activated probabilistically, impossible to inspect
+or patch. This repository stores it as fixed, versioned, hashed YAML
+nodes, retrieves it deterministically (SQLite FTS5 with a pure-Python
+fallback), and composes a bounded context pack per request. The product is
+the **Application Report**: an agent names the node it applied, the
+question it answered, and where in the artifact it answered it. A
+human can read exactly which node the agent relied on and correct that
+node; a weight cannot be corrected.
 
-The thesis is now supported by measurement, not just argument. A three-arm
-experiment (control / treatment / placebo, n=5 per arm, two providers, final
-scoring pipeline) measured whether the knowledge pack changes agent output:
+Four properties drive every design decision: reliable retrieval,
+inspectability, consistency across models, and anchoring against
+confabulation (a fixed, hashed text against which plausible invention
+becomes visible).
 
-| Task | DeepSeek (C / T / P) | Mistral (C / T / P) |
-|---|---|---|
-| e1 idempotency | 3.80 / 4.80 / 2.20 | 2.80 / 4.60 / 2.40 |
-| e2 subprocess-safety | 3.60 / 5.00 / 2.80 | 3.60 / 5.00 / 4.80 |
-| e3 atomic-replacement | 5.60 / 6.00 / 5.20 | 1.40 / 5.80 / 1.40 |
+## For a non-technical operator: using node questions as review questions
 
-The placebo arm (a structurally identical pack with irrelevant content)
-matches control — or scores below it — on five of six task×provider cells,
-so the effect is not prompt length; on one cell (Mistral e2) the placebo
-sits at the treatment level, so a structural component cannot be ruled out
-there. An out-of-sample check on two later nodes (circuit-breaker,
-correlation-id), scored with the repaired instrument, supports **one clear
-out-of-sample effect** (e4-Mistral +3.20, placebo at control), one
-ceiling-limited flat cell (e4-DeepSeek), and **two cells too small to call**
-(e5-DeepSeek 0.00, e5-Mistral +0.27 — both inside within-arm spread even at
-n=15 per out-of-sample arm; see `experiments/RESULTS.md`,
-`docs/OOS_DIAGNOSIS.md`). Honest bounds: n=5 per arm in-sample, n=15 per
-arm out-of-sample, three in-sample and two out-of-sample tasks, two
-providers, one in-sample anomaly. The knowledge is **supported** by the
-in-sample result, never claimed as proven; **out of sample the corpus rule
-is not supported** — the only clean effect is a single cell (e4-Mistral,
-on one provider, on one node), which cannot carry a rule, so the rule is
-retained as an unsupported hypothesis. The `review.*` namespace (node 16)
-does not demonstrate an effect — its E6 null survived a measurement audit
-(`docs/OOS_E6_AUDIT.md`), the third instrument defect the project has
-caught. Full detail, raw scores and caveats: `experiments/RESULTS.md`.
+You do not need to read the code an agent produced to check whether it used
+the knowledge. Each node carries `questions` — concrete, answerable
+questions like "Where is completion recorded, and is that record durable
+before the effect?" Use those questions as your review checklist against
+work you cannot read yourself: the agent must answer each question **with a
+location** (a file and a line where the answer can be found). An answer
+without a location is not an answer.
 
-## Repository layout
+`encyclopedia verify-report` makes this mechanical. It takes the agent's
+report and the exact pack the agent was given, and proves — offline, with
+no model involved — that:
 
+- the report is bound to the pack it claims (hashes must match),
+- every node in the pack appears exactly once, applied or explicitly
+  not-applied (a node cannot be silently dropped),
+- every question of an applied node is answered with a non-empty location,
+  or explicitly marked unanswered with a reason (**no question can be
+  skipped**),
+- the questions are the node's own (altered wording fails).
+
+Worked example. An agent was given the `reliability.idempotency` node and
+returns this report fragment:
+
+```yaml
+applied:
+  - node: reliability.idempotency
+    version: 1
+    hash: 59f0bc8c39bb
+    questions_answered:
+      - question: Where is completion recorded, and is that record durable before the effect?
+        answer: In the processed_jobs table, written in the same transaction as the charge.
+        location: worker.py:41
+    unanswered: []
 ```
-src/encyclopedia/    code (MIT)
-knowledge/           versioned YAML engineering nodes (CC BY 4.0)
-taxonomy/            enumerations the nodes may use (CC BY 4.0)
-evaluations/         regression queries with required / forbidden nodes
-experiments/         three-case experiment harness (rubrics, prompts, runner)
-tests/               unittest suite
-docs/                founding brief, repository protection record
-```
 
-## Install
+`verify-report` checks the hash against the node, checks `worker.py:41`
+answers the verbatim question, and confirms every other question of the
+node was either answered or explicitly marked unanswered — so a question
+that was skipped, or a claim without a location, fails verification
+instead of passing silently.
 
-Requires Python 3.12+. The only runtime dependency is PyYAML; everything else
-is the Python standard library. Everything works offline after install.
+## Install and use
+
+Requires Python 3.12+; the only runtime dependency is PyYAML. Everything
+works offline.
 
 ```sh
 pip install .
-```
-
-## Usage
-
-```sh
-encyclopedia validate                          # validate corpus + taxonomy
-encyclopedia list                              # all nodes
-encyclopedia show reliability.idempotency      # one node, full detail
-encyclopedia search "duplicate processing"     # ranked keyword search
-encyclopedia related reliability.idempotency   # graph neighbours
+encyclopedia validate
 encyclopedia query "make sure this worker doesn't process the same job twice"
 encyclopedia verify-report report.yaml --pack pack.yaml
 ```
 
-Options: `--format yaml|json` (default yaml),
-`--detail compact|guidance|full` (default guidance),
-`--max-primary N` (default 3, cap 3), `--max-supporting N` (default 3, cap 3),
-`--language`, `--project-type`.
-
-`query` emits a context pack with a deterministic `context_pack_hash` that
-binds the pack to its content. `verify-report` checks an Application Report
-against the exact pack the agent received — offline, no model involved.
+Commands: `validate`, `list`, `show`, `search`, `related`, `query`,
+`verify-report`. No other commands.
 
 ## Licensing
 
@@ -108,19 +110,10 @@ against the exact pack the agent received — offline, no model involved.
 - **Knowledge content** (`knowledge/`, `taxonomy/`): CC BY 4.0 — see
   `knowledge/LICENSE`.
 
-## Governance
+## Governance and record
 
-`main` is protected: pull requests required, force pushes blocked, deletion
-blocked, required status check `validate`. See `docs/REPOSITORY_PROTECTION.md`.
-
-## Experiments status
-
-The three-case experiment harness (Section 8 of the founding brief) is
-delivered: three task prompts, three deterministic rubrics, and a
-provider-agnostic runner. Results are recorded in `experiments/RESULTS.md`;
-see `experiments/README.md` for how the 30 completions are run and recorded.
-
-## Status
-
-Implementation of the founding brief, v1 — open for review as a draft pull
-request. Deviations and judgement calls are recorded in `DEVIATIONS.md`.
+`main` is protected (pull requests required, force pushes blocked,
+deletion blocked, required status check `validate`). Judgement calls are
+recorded in `DEVIATIONS.md`; the corpus rule's status in
+`docs/CORPUS_RULE.md`; the one-cell analysis in
+`docs/WORKING_CELL_ANALYSIS.md`.
