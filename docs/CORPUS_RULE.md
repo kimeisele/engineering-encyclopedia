@@ -36,8 +36,11 @@ decision-vs-idiom rule; nothing in the data contradicts it.
 
 ## Consequence of this change
 
-The corpus grows from eight to sixteen nodes, all chosen by this rule because
-they require a decision rather than recall:
+The corpus grew from the original eight nodes (Section 4) to thirty-four
+across the owner-approved expansions, all chosen by this rule because they
+require a decision rather than recall (the exact node set is asserted in
+`tests/test_nodes.py`; the Slice 6 batches added security, APIs,
+operations and data coverage):
 
 - `reliability.outbox-pattern` — what durably records the intent, and what
   identifies a row as published;

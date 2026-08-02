@@ -1,0 +1,84 @@
+id: data.n-plus-one
+version: 1
+title: N+1 queries
+kind: pitfall
+status: established
+
+summary: >
+  Loading a collection and then querying once per member turns one request
+  into N+1 round trips. Batch, join, or eager-load instead; the failure is
+  invisible until the collection grows.
+
+intent_signals:
+  - n plus one
+  - query per row
+  - load each item
+  - too many queries
+  - eager load
+  - batch fetch
+  - fetch in a loop
+  - slow list endpoint
+
+applies_when:
+  - a collection is loaded and each element needs related data
+  - an ORM lazily fetches per accessed relation
+
+does_not_apply_when:
+  - each row's related data is already present in the loaded result
+
+does_not_imply:
+  - that joins are always better than batched queries
+  - that eager loading is free
+  - that a small test set shows the problem
+  - that the ORM hides the round trips
+
+questions:
+  - How many queries does one request issue, and does it scale with the result size?
+  - Is related data fetched in one batched query or join per relationship?
+  - Is lazy loading disabled where a list endpoint is on the hot path?
+  - Is the query count asserted in tests, not just the response shape?
+
+techniques:
+  - one query per relationship, via joins or IN-batched fetches
+  - eager loading with a known plan, not default lazy
+  - query-count assertions in tests for list endpoints
+  - profiling with a realistic data volume
+
+risks:
+  - per-row queries inside loops
+  - ORM lazy loading on list endpoints
+  - joins that duplicate rows and need de-duplication
+  - tests with two rows that hide a quadratic explosion
+
+tradeoffs:
+  - technique: join
+    benefit: one round trip
+    cost: row duplication, complex selects
+    choose_when: shallow related data
+  - technique: batched IN queries
+    benefit: flat rows, indexed lookups
+    cost: multiple round trips, bounded by batching
+    choose_when: deep or variable related data
+
+relations:
+  related:
+    - apis.pagination
+  requires_consideration_of:
+    - apis.request-timeouts
+
+contexts:
+  languages: [any]
+  project_types: [web-service, automation]
+  lifecycle_stages: [implementation, review, debugging]
+
+provenance:
+  origin: curated
+  rationale: >
+    N+1 is the classic scaling failure that tests with tiny fixtures miss;
+    the batch-or-join choice is the decision this node forces, and the
+    pagination relation records that list endpoints are where it bites.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [n plus one, query count, eager loading, batched queries, lazy loading]

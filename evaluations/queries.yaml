@@ -113,3 +113,21 @@
 - query: "the job queue is growing too fast for the slow consumer"
   required: [operations.backpressure]
   forbidden_to_dominate: [reliability.retry-semantics]
+
+# Batch D (Slice 6): data and persistence nodes
+
+- query: "save the order and the payment together"
+  required: [data.transaction-boundaries]
+  forbidden_to_dominate: [reliability.idempotency]
+
+- query: "add a column to the users table in production"
+  required: [data.schema-migration]
+  forbidden_to_dominate: [apis.versioning]
+
+- query: "the database connections are leaking"
+  required: [data.connection-lifecycle]
+  forbidden_to_dominate: [apis.request-timeouts]
+
+- query: "loading the orders then querying each customer"
+  required: [data.n-plus-one]
+  forbidden_to_dominate: [apis.pagination]

@@ -34,11 +34,11 @@ excluded, and whether the budget truncated any), and `context_pack` with
 `primary` and `supporting` nodes. Every node carries `id`, `version`,
 `hash`, `relevance`, `summary`, `questions`, `does_not_imply` and `risks`.
 The excerpt below is abridged to the nodes and fields that matter here
-(this run: corpus revision `96bf58e88848`):
+(this run: corpus revision `9a83b5f8d6ee`):
 
 ```yaml
-knowledge_revision: 96bf58e88848
-context_pack_hash: f70a481b60ee
+knowledge_revision: 9a83b5f8d6ee
+context_pack_hash: 945d65f484cf
 context_pack:
   primary:
     - id: reliability.idempotency
@@ -121,10 +121,10 @@ encyclopedia verify-report report.yaml --pack pack.yaml --root .
 ## Worked end-to-end example (run exactly as written)
 
 **Simple path.** `encyclopedia query "make sure this worker doesn't process
-the same job twice" --detail guidance > pack.yaml` — pack `f70a481b60ee`,
-revision `96bf58e88848`, nodes: reliability.idempotency,
+the same job twice" --detail guidance > pack.yaml` — pack `945d65f484cf`,
+revision `9a83b5f8d6ee`, nodes: reliability.idempotency,
 concurrency.race-conditions, concurrency.locking-strategy,
-python.files.atomic-replacement, reliability.retry-semantics. Hand the pack
+operations.graceful-shutdown, reliability.retry-semantics. Hand the pack
 to the agent with the request. Done.
 
 **Optional variant: verified.** Ask for the `application_report` and get
@@ -133,8 +133,8 @@ this (the agent applies `reliability.idempotency`; other pack nodes are
 
 ```yaml
 application_report:
-  knowledge_revision: 96bf58e88848
-  context_pack_hash: f70a481b60ee
+  knowledge_revision: 9a83b5f8d6ee
+  context_pack_hash: 945d65f484cf
   applied:
     - node: reliability.idempotency
       version: 1
@@ -155,8 +155,8 @@ application_report:
       reason: No shared mutable state in this change.
     - node: concurrency.locking-strategy
       reason: No concurrent writers in this change.
-    - node: python.files.atomic-replacement
-      reason: No file writes in this change.
+    - node: operations.graceful-shutdown
+      reason: No shutdown path in this change.
     - node: reliability.retry-semantics
       reason: No retries in this change.
 ```
