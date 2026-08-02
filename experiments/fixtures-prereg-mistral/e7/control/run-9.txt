@@ -1,0 +1,117 @@
+# Thread-Safe Counter Update Function
+
+Here's a Python implementation of a shared counter that uses a threading.Lock to ensure thread safety and prevent lost updates:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self.lock:
+            return self.value
+```
+
+## Usage Example
+
+```python
+counter = SharedCounter()
+
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.increment()
+
+# Create and start multiple worker threads
+threads = []
+for i in range(5):
+    t = threading.Thread(target=worker, args=(counter, 1000))
+    threads.append(t)
+    t.start()
+
+# Wait for all threads to complete
+for t in threads:
+    t.join()
+
+print(f"Final counter value: {counter.get_value()}")  # Should be 5000
+```
+
+## Alternative Implementations
+
+### 1. Using `threading.RLock` (reentrant lock) if the same thread might need to acquire the lock multiple times:
+
+```python
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.RLock()
+
+    def increment(self, amount=1):
+        with self.lock:
+            self.value += amount
+            return self.value
+```
+
+### 2. Using atomic operations (Python 3.10+ with `threading.atomic`):
+
+```python
+import threading.atomic as atomic
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = atomic.atomic(initial_value)
+
+    def increment(self, amount=1):
+        self.value.fetch_add(amount)
+        return self.value.load()
+
+    def get_value(self):
+        return self.value.load()
+```
+
+### 3. Using a queue for thread-safe operations:
+
+```python
+from queue import Queue
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.queue = Queue()
+        self.running = True
+        self.worker_thread = threading.Thread(target=self._process_queue)
+        self.worker_thread.daemon = True
+        self.worker_thread.start()
+
+    def _process_queue(self):
+        while self.running or not self.queue.empty():
+            try:
+                amount = self.queue.get(timeout=0.1)
+                self.value += amount
+                self.queue.task_done()
+            except:
+                continue
+
+    def increment(self, amount=1):
+        self.queue.put(amount)
+        return self.value
+
+    def get_value(self):
+        return self.value
+
+    def shutdown(self):
+        self.running = False
+        self.worker_thread.join()
+```
+
+The first implementation using `threading.Lock` is the most straightforward and commonly used approach for this problem. It ensures that only one thread can modify the counter at any time, preventing race conditions and lost updates.

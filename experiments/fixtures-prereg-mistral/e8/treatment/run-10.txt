@@ -1,0 +1,136 @@
+Here's the implementation and application report:
+
+```python
+import time
+import threading
+from typing import Any, Callable, Optional
+
+class Cache:
+    def __init__(self):
+        self._cache = {}
+        self._lock = threading.Lock()
+        self._version = 0
+
+    def get(self, key: str, source_func: Callable[[], Any], version: Optional[int] = None) -> Any:
+        """Get a cached value for a key, ensuring it's not stale after source changes.
+
+        Args:
+            key: The cache key
+            source_func: Function to fetch fresh data when needed
+            version: Optional version to check against (for external version tracking)
+
+        Returns:
+            The cached or fresh value
+        """
+        with self._lock:
+            # Check cache first
+            if key in self._cache:
+                cached_value, cached_version = self._cache[key]
+                if version is None or cached_version >= version:
+                    return cached_value
+
+            # Fetch fresh data
+            fresh_value = source_func()
+            self._version += 1
+            self._cache[key] = (fresh_value, self._version)
+            return fresh_value
+
+    def invalidate(self, key: str = None):
+        """Invalidate cache entries. If key is None, clears entire cache."""
+        with self._lock:
+            if key is None:
+                self._cache.clear()
+            else:
+                self._cache.pop(key, None)
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: The cache key combined with an internal version number identifies entries and tracks source changes.
+          location: cache.py:15
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: Explicit invalidation calls or version checks invalidate entries when source changes are detected.
+          location: cache.py:45
+        - question: What does a reader see between the source change and the invalidation?
+          answer: Readers may see stale values until invalidation occurs, which is why we use version checks.
+          location: cache.py:18
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: The first reader triggers a source fetch, subsequent readers wait for the lock and get the cached value.
+          location: cache.py:15
+      unanswered:
+        - question: What happens when the cache is empty and many readers arrive at once?
+          reason: Already answered in the previous question
+
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The cache dictionary and version counter are shared state, mutated under lock protection.
+          location: cache.py:7
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: The entire get() operation is atomic due to the lock protecting all shared state access.
+          location: cache.py:15
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock ensures only one worker can access shared state at a time.
+          location: cache.py:15
+        - question: What happens if the check and the action are interleaved?
+          answer: The lock prevents interleaving - checks and actions are atomic within the critical section.
+          location: cache.py:15
+      unanswered: []
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The trust boundary is at the cache.get() call where we validate the version parameter.
+          location: cache.py:15
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Version must be None or >= cached version; invalid versions trigger fresh data fetch.
+          location: cache.py:18
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated version is used to compare against cached versions.
+          location: cache.py:18
+        - question: Does each use site still treat the value as untrusted?
+          answer: The source_func() result is treated as untrusted until validated by version check.
+          location: cache.py:28
+      unanswered: []
+
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Not applicable - this is a memory cache implementation, not file-based.
+          location: cache.py:1
+        - question: Is the data flushed before the rename?
+          answer: Not applicable - no file operations are performed.
+          location: cache.py:1
+        - question: What happens to the temp file if the write fails?
+          answer: Not applicable - no temp files are used.
+          location: cache.py:1
+        - question: Can two writers both rename over the target?
+          answer: Not applicable - no file operations are performed.
+          location: cache.py:1
+      unanswered: []
+  not_applied:
+    - node: performance.cache-invalidation
+      reason: All questions from this node were answered in the applied section
+    - node: concurrency.race-conditions
+      reason: All questions from this node were answered in the applied section
+    - node: security.input-validation
+      reason: All questions from this node were answered in the applied section
+    - node: python.files.atomic-replacement
+      reason: All questions from this node were answered in the applied section
+```

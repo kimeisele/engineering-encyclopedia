@@ -1,0 +1,65 @@
+```python
+import threading
+
+class SharedCounter:
+    """A thread-safe counter that never loses updates."""
+    
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+    
+    def increment(self, by=1):
+        """Update the counter by a non-negative amount atomically."""
+        if by < 0:
+            raise ValueError("Increment must be non-negative")
+        with self._lock:
+            self._value += by
+    
+    def get(self):
+        """Read the current value atomically."""
+        with self._lock:
+            return self._value
+
+# Example usage with two workers
+def worker(counter, iterations=1000):
+    for _ in range(iterations):
+        counter.increment()
+
+if __name__ == "__main__":
+    counter = SharedCounter()
+    t1 = threading.Thread(target=worker, args=(counter,))
+    t2 = threading.Thread(target=worker, args=(counter,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    
+    print(f"Final counter value: {counter.get()}")
+    # Should print 2000 (no lost updates)
+```
+
+---APPLICATION REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Yes - the ValueError message names the invalid operation (increment with negative value)."
+          location: "implementation:22"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "No - not applicable to a counter; the lock ensures correctness without needing job identification."
+          location: "implementation:22"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes - error message contains no sensitive data, only the operation name."
+          location: "implementation:22"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "N/A - exception is raised directly with context, not wrapped."
+          location: "implementation:22"
+      unanswered: []
+  not_applied:
+    - node: observability.error-context
+      reason: "Already applied above - this node appears in applied section covering all its questions."

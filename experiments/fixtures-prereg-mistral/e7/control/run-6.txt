@@ -1,0 +1,116 @@
+# Thread-Safe Shared Counter with Conflict Detection
+
+Here's a Python implementation of a shared counter that uses a locking strategy to ensure no updates are lost when multiple workers try to increment it simultaneously:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self._lock:
+            self._value += amount
+            return self._value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self._lock:
+            return self._value
+
+    def reset(self):
+        """Thread-safe reset operation"""
+        with self._lock:
+            self._value = 0
+            return self._value
+```
+
+## Alternative Implementation with Conflict Detection
+
+If you prefer a lock-free approach with conflict detection (using compare-and-swap):
+
+```python
+import threading
+import time
+
+class AtomicCounter:
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+
+    def increment(self, amount=1, max_retries=3):
+        """Attempt to increment atomically with retries on conflict"""
+        for _ in range(max_retries):
+            old_value = self._value
+            new_value = old_value + amount
+            # Try to atomically swap if value hasn't changed
+            if self._compare_and_swap(old_value, new_value):
+                return new_value
+            # Small delay to reduce contention
+            time.sleep(0.001)
+        raise RuntimeError("Failed to increment counter after retries")
+
+    def _compare_and_swap(self, old_value, new_value):
+        """Atomic compare-and-swap operation"""
+        if self._value == old_value:
+            self._value = new_value
+            return True
+        return False
+
+    def get_value(self):
+        """Read the current value (may be stale if other threads are updating)"""
+        return self._value
+```
+
+## Usage Example
+
+```python
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.increment()
+
+# Using the locked version
+counter = SharedCounter()
+threads = []
+for _ in range(10):
+    t = threading.Thread(target=worker, args=(counter, 1000))
+    threads.append(t)
+    t.start()
+
+for t in threads:
+    t.join()
+
+print(f"Final value (locked): {counter.get_value()}")
+
+# Using the atomic version
+atomic_counter = AtomicCounter()
+threads = []
+for _ in range(10):
+    t = threading.Thread(target=worker, args=(atomic_counter, 1000))
+    threads.append(t)
+    t.start()
+
+for t in threads:
+    t.join()
+
+print(f"Final value (atomic): {atomic_counter.get_value()}")
+```
+
+## Key Points:
+
+1. **Locking Strategy**: The first implementation uses a mutex lock to ensure only one thread can modify the counter at a time.
+
+2. **Conflict Detection**: The second implementation uses a compare-and-swap approach, retrying if the value changes between read and write.
+
+3. **Thread Safety**: Both implementations guarantee that:
+   - No increments will be lost
+   - The final value will be correct
+   - No race conditions can occur
+
+4. **Performance Tradeoffs**:
+   - The locking version is simpler but may have more contention
+   - The atomic version avoids locks but may need retries under high contention
+
+Choose the approach that best fits your specific requirements and performance characteristics.

@@ -1,0 +1,75 @@
+# Thread-Safe Counter with Locking Strategy
+
+Here's a Python implementation of a shared counter that uses a threading lock to ensure atomic updates when multiple workers try to increment it simultaneously:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self.lock:
+            return self.value
+```
+
+## How It Works:
+
+1. **Locking Mechanism**: The `threading.Lock()` ensures that only one thread can execute the critical section (the increment operation) at a time.
+
+2. **Context Manager**: The `with self.lock` statement automatically acquires the lock before the operation and releases it afterward, even if an exception occurs.
+
+3. **Atomic Operations**: Both the read and write operations are protected by the lock, preventing race conditions.
+
+## Alternative Implementation (Using Atomic Operations):
+
+For Python 3.10+, you could also use the `threading.atomic` module (though this is more limited):
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+```
+
+## Usage Example:
+
+```python
+counter = SharedCounter()
+
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.increment()
+
+# Create and start multiple threads
+threads = []
+for i in range(5):
+    t = threading.Thread(target=worker, args=(counter, 1000))
+    threads.append(t)
+    t.start()
+
+# Wait for all threads to complete
+for t in threads:
+    t.join()
+
+print(f"Final counter value: {counter.get_value()}")  # Should be 5000
+```
+
+This implementation guarantees that no increments will be lost, even when multiple threads are updating the counter simultaneously.

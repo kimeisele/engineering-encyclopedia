@@ -1,0 +1,335 @@
+Here's a comprehensive solution that ensures cached values are never stale:
+
+```python
+import time
+import threading
+from typing import Any, Callable, Optional, Dict, Tuple
+from collections import OrderedDict
+import functools
+
+class CacheWithVersioning:
+    """
+    A cache that tracks data versions to prevent serving stale data.
+    
+    Key features:
+    - Stores both the value and a version/check for each key
+    - Automatically invalidates cache when data changes
+    - Thread-safe for concurrent access
+    """
+    
+    def __init__(self, max_size: int = 100, ttl: Optional[float] = None):
+        """
+        Initialize the cache.
+        
+        Args:
+            max_size: Maximum number of entries to keep (LRU eviction)
+            ttl: Time-to-live in seconds (None for no TTL)
+        """
+        self.max_size = max_size
+        self.ttl = ttl
+        self._cache: OrderedDict[str, Tuple[Any, Any, float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self._version_checkers: Dict[str, Callable] = {}
+        self._data_versions: Dict[str, Any] = {}
+        
+    def register_version_checker(self, key: str, checker: Callable) -> None:
+        """
+        Register a function that returns the current version of the data.
+        This is used to determine if cached data is still valid.
+        
+        Args:
+            key: The cache key
+            checker: A callable that returns a version identifier (hash, timestamp, etc.)
+                   that changes when the source data changes
+        """
+        self._version_checkers[key] = checker
+        self._data_versions[key] = checker()
+    
+    def get(self, key: str) -> Optional[Any]:
+        """
+        Get a value from cache, checking if it's still valid.
+        
+        Args:
+            key: The cache key
+            
+        Returns:
+            The cached value if valid, None if not found or stale
+        """
+        with self._lock:
+            if key not in self._cache:
+                return None
+            
+            value, cached_version, timestamp = self._cache[key]
+            
+            # Check TTL
+            if self.ttl and time.time() - timestamp > self.ttl:
+                self._evict(key)
+                return None
+            
+            # Check version if we have a checker
+            if key in self._version_checkers:
+                current_version = self._version_checkers[key]()
+                if current_version != cached_version:
+                    self._evict(key)
+                    return None
+            
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            return value
+    
+    def set(self, key: str, value: Any, version: Any = None) -> None:
+        """
+        Set a value in the cache.
+        
+        Args:
+            key: The cache key
+            value: The value to cache
+            version: Optional version identifier (if not using version checker)
+        """
+        with self._lock:
+            if version is None:
+                version = self._data_versions.get(key, time.time())
+            
+            self._cache[key] = (value, version, time.time())
+            self._cache.move_to_end(key)
+            
+            # Evict if over max size
+            while len(self._cache) > self.max_size:
+                self._cache.popitem(last=False)
+    
+    def invalidate(self, key: str) -> None:
+        """Explicitly invalidate a key."""
+        with self._lock:
+            self._evict(key)
+    
+    def clear(self) -> None:
+        """Clear all cached data."""
+        with self._lock:
+            self._cache.clear()
+    
+    def _evict(self, key: str) -> None:
+        """Remove a key from cache."""
+        self._cache.pop(key, None)
+    
+    def update_data_version(self, key: str) -> None:
+        """
+        Notify the cache that the source data has changed.
+        This will invalidate all cached entries for this key.
+        """
+        with self._lock:
+            if key in self._version_checkers:
+                new_version = self._version_checkers[key]()
+                self._data_versions[key] = new_version
+                # Remove all cache entries with old versions
+                if key in self._cache:
+                    self._evict(key)
+
+
+class DataCache:
+    """A simpler, more practical cache with automatic data change detection."""
+    
+    def __init__(self, max_size: int = 100):
+        self.max_size = max_size
+        self._cache: OrderedDict[str, Tuple[Any, float]] = OrderedDict()
+        self._lock = threading.Lock()
+    
+    @functools.lru_cache(maxsize=None)
+    def _get_data_version(self, data_id: str) -> str:
+        """
+        Get a version identifier for data.
+        Override this in subclasses to detect actual data changes.
+        """
+        return "default"
+    
+    def get(self, key: str, fetcher: Callable, force_refresh: bool = False) -> Any:
+        """
+        Get or compute a value with automatic invalidation.
+        
+        Args:
+            key: Cache key
+            fetcher: Function that fetches fresh data if cache is invalid
+            force_refresh: Force re-fetch even if cache is valid
+        
+        Returns:
+            The value, ensuring it's always fresh
+        """
+        with self._lock:
+            # Check if we need to refresh
+            current_version = self._get_data_version(key)
+            needs_refresh = force_refresh or key not in self._cache
+            
+            if not needs_refresh:
+                cached_value, cached_version = self._cache[key]
+                if current_version != cached_version:
+                    needs_refresh = True
+            
+            if needs_refresh:
+                # Fetch fresh data
+                fresh_value = fetcher()
+                self._cache[key] = (fresh_value, current_version)
+                self._cache.move_to_end(key)
+                
+                # Evict if over capacity
+                while len(self._cache) > self.max_size:
+                    self._cache.popitem(last=False)
+                
+                return fresh_value
+            
+            # Return cached value (it's guaranteed fresh)
+            self._cache.move_to_end(key)
+            return self._cache[key][0]
+    
+    def invalidate(self, key: str) -> None:
+        """Explicitly invalidate cache entry."""
+        with self._lock:
+            self._cache.pop(key, None)
+
+
+class DatabaseCacheWithVersioning:
+    """
+    Example: Cache that tracks database row versions to prevent stale reads.
+    """
+    
+    def __init__(self, db_connection, max_size: int = 100):
+        self.db = db_connection
+        self.cache = CacheWithVersioning(max_size=max_size)
+    
+    def get_user(self, user_id: int) -> dict:
+        """
+        Get a user by ID, ensuring we never serve stale data.
+        Uses database version tracking (like PostgreSQL's xmin or row version).
+        """
+        # Register version checker that queries the database for current version
+        def get_user_version(uid: int) -> str:
+            with self.db.cursor() as cursor:
+                cursor.execute(
+                    "SELECT version FROM users WHERE id = %s", 
+                    (uid,)
+                )
+                result = cursor.fetchone()
+                return result[0] if result else None
+        
+        key = f"user:{user_id}"
+        self.cache.register_version_checker(key, lambda: get_user_version(user_id))
+        
+        # Try to get from cache
+        result = self.cache.get(key)
+        if result is None:
+            # Fetch from database
+            with self.db.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+                user_data = cursor.fetchone()
+            if user_data:
+                self.cache.set(key, user_data, version=get_user_version(user_id))
+                return user_data
+        return result
+    
+    def update_user(self, user_id: int, new_data: dict) -> None:
+        """Update user data and invalidate cache."""
+        with self.db.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE users SET data = %s, version = version + 1 
+                WHERE id = %s
+                """,
+                (new_data, user_id)
+            )
+            self.db.commit()
+        # Cache will detect the version change on next access
+        self.cache.update_data_version(f"user:{user_id}")
+
+
+# Example usage with practical implementation
+def example_demonstration():
+    """Demonstrate the cache with data change detection"""
+    
+    # Simulated data store
+    data_store = {
+        "users": {
+            1: {"name": "Alice", "email": "alice@example.com"},
+            2: {"name": "Bob", "email": "bob@example.com"}
+        },
+        "data_versions": {1: 1, 2: 1}  # Version tracking
+    }
+    
+    # Create cache with versioning
+    cache = CacheWithVersioning(max_size=10, ttl=300)
+    
+    # Register version checker for user data
+    def get_user_version(user_id: int) -> int:
+        return data_store["data_versions"].get(user_id, 0)
+    
+    def get_user(user_id: int) -> dict:
+        key = f"user:{user_id}"
+        cache.register_version_checker(
+            key, 
+            lambda: get_user_version(user_id)
+        )
+        
+        # Try cache first
+        cached = cache.get(key)
+        if cached is not None:
+            print(f"Cache hit for user {user_id}")
+            return cached
+        
+        # Fetch from "database"
+        user = data_store["users"][user_id].copy()
+        cache.set(key, user, version=get_user_version(user_id))
+        print(f"Cache miss for user {user_id}, fetched from database")
+        return user
+    
+    def update_user(user_id: int, field: str, value: any):
+        """Simulate data update that should invalidate cache"""
+        data_store["users"][user_id][field] = value
+        data_store["data_versions"][user_id] += 1
+        print(f"Updated user {user_id}: {field} = {value}")
+        cache.invalidate(f"user:{user_id}")
+    
+    # Test the cache
+    print("=== Initial cache usage ===")
+    user1 = get_user(1)  # Miss
+    user1_again = get_user(1)  # Hit
+    print(f"User 1 email: {user1['email']}")
+    
+    print("\n=== Data changes ===")
+    update_user(1, "email", "new_alice@example.com")
+    user1_updated = get_user(1)  # Should be fresh
+    print(f"Updated email: {user1_updated['email']}")
+    
+    print("\n=== Cache after change ===")
+    print(f"Cache state: {dict(cache._cache)}")
+
+
+if __name__ == "__main__":
+    example_demonstration()
+```
+
+## Key Features:
+
+1. **Version checking**: Each cache entry stores a version identifier. Before serving cached data, it checks if the version has changed.
+
+2. **Thread safety**: Uses locks to handle concurrent access safely.
+
+3. **TTL support**: Optional time-based expiration.
+
+4. **LRU eviction**: Automatically removes least recently used entries to maintain size limits.
+
+5. **Flexible invalidation**: Supports both:
+   - Automatic detection via version checkers
+   - Explicit invalidation through `invalidate()` or `update_data_version()`
+
+## How it prevents stale data:
+
+1. **Version checkers**: Register a function that returns a unique version identifier for the data. This could be a database row version, file modification timestamp, or any other indicator.
+
+2. **Automatic re-fetch**: When a version mismatch is detected, the cache automatically fetches fresh data.
+
+3. **Explicit invalidation**: After data updates, you can call `invalidate()` or `update_data_version()` to ensure stale data isn't served.
+
+## Usage patterns:
+
+- **Database caching**: Track row versions to invalidate when database records change
+- **File caching**: Use file modification timestamps as version indicators
+- **API response caching**: Use ETags or Last-Modified headers for version checking
+
+The cache guarantees that if source data has changed, the cached value is immediately invalidated and fresh data is fetched on the next access. This ensures you never serve stale data while maintaining good performance through caching.

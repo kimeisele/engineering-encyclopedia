@@ -1,0 +1,262 @@
+I'll provide solutions using different concurrency strategies. Let me start with a simple thread-based solution using locks, then show alternatives.
+
+## Solution 1: Thread-safe with Lock
+```python
+import threading
+import time
+import random
+
+class SharedCounter:
+    """Thread-safe counter using a lock."""
+    
+    def __init__(self):
+        self.value = 0
+        self.lock = threading.Lock()
+    
+    def update(self, amount):
+        """Update the counter with proper locking."""
+        with self.lock:
+            # Critical section - only one thread at a time
+            current = self.value
+            # Simulate some work to increase race probability
+            time.sleep(random.uniform(0.001, 0.002))
+            self.value = current + amount
+            return self.value
+    
+    def get_value(self):
+        """Thread-safe read."""
+        with self.lock:
+            return self.value
+
+def worker(counter, updates, worker_id):
+    """Worker function that performs multiple updates."""
+    for i in range(updates):
+        # Random positive or negative update
+        amount = random.choice([-1, 1])
+        counter.update(amount)
+    print(f"Worker {worker_id} completed, counter={counter.get_value()}")
+
+# Usage
+def test_with_locks():
+    counter = SharedCounter()
+    threads = []
+    
+    # Create 2 workers, each doing 1000 updates
+    for i in range(2):
+        t = threading.Thread(target=worker, args=(counter, 1000, i))
+        threads.append(t)
+        t.start()
+    
+    # Wait for all threads to complete
+    for t in threads:
+        t.join()
+    
+    print(f"Final counter value: {counter.get_value()}")
+    print(f"Expected range: {-2000} to {2000}")
+```
+
+## Solution 2: Using RLock (reentrant lock)
+```python
+class ReentrantCounter:
+    """Counter using RLock for reentrant safety."""
+    
+    def __init__(self):
+        self.value = 0
+        self.lock = threading.RLock()  # RLock allows same thread to re-acquire
+    
+    def update(self, amount):
+        with self.lock:
+            self.value += amount
+            # Define a helper that also needs lock access
+            self._log_update()  # This is safe with RLock
+    
+    def _log_update(self):
+        with self.lock:  # Reentrant lock allows this
+            print(f"Updated to {self.value}")
+    
+    def get_value(self):
+        with self.lock:
+            return self.value
+```
+
+## Solution 3: Using Atomic Operations (Python 3.8+)
+```python
+from functools import partial
+import queue
+import threading
+
+class AtomicCounter:
+    """Counter using atomic operations via queue (not truly atomic in Python, but demonstrates pattern)."""
+    
+    def __init__(self):
+        self.value = 0
+        self._lock = threading.Lock()
+    
+    def update(self, amount):
+        # Python doesn't have true atomic operations for integers,
+        # but we can use the lock-free compare-and-swap pattern
+        while True:
+            try:
+                # Use a separate thread-safe operation
+                with self._lock:
+                    old_val = self.value
+                    new_val = old_val + amount
+                    # Simulate a compare-and-swap
+                    if self.value == old_val:
+                        self.value = new_val
+                        return
+            except:
+                pass
+```
+
+## Solution 4: Using Process Pool for Multiprocessing
+```python
+# For multi-process scenarios
+import multiprocessing as mp
+
+def update_counter(shared_counter, amount, lock):
+    """Update shared counter across processes."""
+    with lock:
+        shared_counter.value += amount
+
+def test_multiprocessing():
+    # Create a manager for sharing data between processes
+    manager = mp.Manager()
+    shared_counter = manager.Namespace()
+    shared_counter.value = 0
+    lock = mp.Lock()
+    
+    processes = []
+    for i in range(2):
+        p = mp.Process(target=update_counter, args=(shared_counter, 1 if i == 0 else -1, lock))
+        processes.append(p)
+        p.start()
+    
+    for p in processes:
+        p.join()
+    
+    print(f"Final value: {shared_counter.value}")
+```
+
+## Solution 5: Higher-Performance Counter (Multiple Locks/Sharding)
+```python
+import threading
+
+class ShardedCounter:
+    """High-performance counter using multiple locks for better concurrency."""
+    
+    def __init__(self, shards=4):
+        self.shards = [0] * shards
+        self.locks = [threading.Lock() for _ in range(shards)]
+        self.shard_count = shards
+    
+    def update(self, amount, shard_id=None):
+        """Update with optional shard selection."""
+        if shard_id is None:
+            # Distribute across shards
+            shard_id = hash(amount) % self.shard_count
+        
+        with self.locks[shard_id]:
+            self.shards[shard_id] += amount
+    
+    def get_total(self):
+        """Get total (requires acquiring all locks)."""
+        total = 0
+        # Acquire all locks to get consistent snapshot
+        for i in range(self.shard_count):
+            with self.locks[i]:
+                total += self.shards[i]
+        return total
+
+def worker_sharded(counter, updates, worker_id):
+    """Sharded worker."""
+    for _ in range(updates):
+        amount = random.choice([-1, 1])
+        counter.update(amount)
+    print(f"Worker {worker_id} done, total={counter.get_total()}")
+
+def test_sharded():
+    counter = ShardedCounter(shards=4)
+    threads = []
+    for i in range(2):
+        t = threading.Thread(target=worker_sharded, args=(counter, 1000, i))
+        threads.append(t); t.start()
+    for t in threads:
+        t.join()
+    print(f"Final total: {counter.get_total()}")
+```
+
+## Best Practice Recommendations
+
+1. **For simple cases**: Use `threading.Lock` (Solution 1)
+2. **For reentrant scenarios**: Use `RLock` (Solution 2)
+3. **For multiple processes**: Use `multiprocessing.Manager` with `Lock` (Solution 4)
+4. **For high contention**: Consider sharding (Solution 5)
+
+## Complete Production-Ready Example
+```python
+import threading
+import random
+import time
+from typing import Optional
+
+class ProductionCounter:
+    """Robust counter for production use."""
+    
+    def __init__(self, initial_value: int = 0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+    
+    def increment(self, by: int = 1) -> int:
+        """Increment counter and return new value."""
+        with self._lock:
+            self._value += by
+            return self._value
+    
+    def decrement(self, by: int = 1) -> int:
+        """Decrement counter and return new value."""
+        return self.increment(-by)
+    
+    def get(self) -> int:
+        """Get current value atomically."""
+        with self._lock:
+            return self._value
+    
+    def wait_until(self, predicate):
+        """Wait until predicate returns True"""
+        with self._lock:
+            return self._condition.wait_for(predicate)
+```
+
+## Testing to Verify Correctness
+```python
+def test_all_solutions():
+    """Run comprehensive tests to verify no updates are lost."""
+    
+    print("Testing with 10000 iterations, 2 workers:")
+    
+    # Test solution 1
+    counter = SharedCounter()
+    threads = [threading.Thread(target=worker, args=(counter, 5000, i)) for i in range(2)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    print(f"Lock solution: {counter.get_value()} updates recorded")
+    
+    # Test sharded
+    counter = ShardedCounter(shards=4)
+    threads = [threading.Thread(target=worker_sharded, args=(counter, 5000, i)) for i in range(2)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    print(f"Sharded solution: {counter.get_total()} updates recorded")
+
+if __name__ == "__main__":
+    test_all_solutions()
+```
+
+**Key points:**
+- Always use locks for shared mutable state in Python
+- The `with` statement ensures locks are properly released even with exceptions
+- For multiprocessing, use `multiprocessing.Lock` or manager objects
+- Modern Python (`3.10+`) has better threading but still needs locks for shared state
+- Always test with concurrent access to verify no updates are lost

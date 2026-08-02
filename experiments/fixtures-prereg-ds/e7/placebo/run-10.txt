@@ -1,0 +1,29 @@
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Atomically increment the counter by amount."""
+        with self._lock:
+            self._value += amount
+            return self._value
+
+    def get(self):
+        with self._lock:
+            return self._value
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied: []
+  not_applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: The context pack contains only error-context guidance, which is unrelated to thread-safe counter updates and provides no applicable locking or conflict-detection strategy.

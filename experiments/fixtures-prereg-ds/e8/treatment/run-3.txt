@@ -1,0 +1,149 @@
+```python
+from typing import Any, Callable, Hashable
+import threading
+import time
+
+
+class VersionedCache:
+    """
+    A cache that never serves stale data by tying the cache key to the source version.
+    
+    The cache key is (user_key, source_version), so when the source data changes,
+    the old entry is simply no longer found. This avoids explicit invalidation races.
+    """
+
+    def __init__(self, load: Callable[[Hashable], Any], get_version: Callable[[], Any]):
+        """
+        Args:
+            load: function that loads the value for a key from the source
+            get_version: function that returns a version identifier for the source
+                        (e.g. a hash, mtime, or revision number) - must change
+                        whenever the source data changes
+        """
+        self._load = load
+        self._get_version = get_version
+        self._cache: dict[tuple[Hashable, Any], Any] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: Hashable, ttl: float | None = None) -> Any:
+        """
+        Get the cached value for key, loading it if needed.
+        Never returns stale data because the version is part of the cache key.
+        
+        Args:
+            key: the user-facing key
+            ttl: optional time-to-live in seconds; if None, cache until version changes
+        """
+        version = self._get_version()
+        cache_key = (key, version)
+
+        # Fast path: check cache without lock
+        if ttl is None:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                return cached
+        else:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                value, timestamp = cached
+                if time.monotonic() - timestamp < ttl:
+                    return value
+
+        # Slow path: load with lock to avoid thundering herd
+        with self._lock:
+            # Re-check after acquiring lock (another thread may have loaded it)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                if ttl is None:
+                    return cached
+                value, timestamp = cached
+                if time.monotonic() - timestamp < ttl:
+                    return value
+            
+            # Load fresh value
+            value = self._load(key)
+            if ttl is None:
+                self._cache[cache_key] = value
+            else:
+                self._cache[cache_key] = (value, time.monotonic())
+            return value
+
+
+# Example usage:
+# cache = VersionedCache(
+#     load=lambda key: read_from_source(key),
+#     get_version=lambda: get_source_revision()
+# )
+``` 
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "Cache key is (user_key, source_version); version from get_version() is part of the key, so stale entries are unreachable."
+          location: "VersionedCache.__init__ line 20"
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          answer: "No explicit invalidation; the version changes when source changes, making the old key unreachable. New version creates fresh cache entry."
+          location: "VersionedCache.get line 37"
+        - question: "What does a reader see between the source change and the invalidation?"
+          answer: "Nothing stale. Reader gets version first; if source changed, version differs, so it loads fresh data. No window of stale reads."
+          location: "VersionedCache.get line 38"
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          answer: "Locked slow path with double-check prevents thundering herd. First thread loads; others reuse the loaded value after acquiring lock."
+          location: "VersionedCache.get lines 49-57"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared _cache dict is mutated inside get() under _lock; reads outside lock use immutable version-keyed lookups that never mutate."
+          location: "VersionedCache.__init__ line 24"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Check-and-load is atomic under the lock; double-check ensures a single load per version-key even with concurrent readers."
+          location: "VersionedCache.get lines 49-57"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No. Lock ensures only one thread loads per missing key; others block then reuse the loaded value after lock release."
+          location: "VersionedCache.get line 49"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving impossible due to lock. Fast path read is race-free because cache keys are versioned, and slow path is fully locked."
+          location: "VersionedCache.get lines 38-51"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Version from get_version() is treated as trusted; no user input to validate. Keys are passed only to user's load function."
+          location: "VersionedCache.get line 37"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "No explicit validation needed; the cache is generic. The caller's load function owns key validation and can reject bad keys."
+          location: "VersionedCache.__init__ line 12"
+      unanswered:
+        - question: "Is the validated form used downstream, or the raw input?"
+          reason: "Not applicable: cache stores opaque values from load(); caller owns validation semantics. Raw key is only used for cache identity, never passed to source."
+          location: "VersionedCache.__init__ line 12"
+        - question: "Does each use site still treat the value as untrusted?"
+          reason: "Not applicable: cache caller decides trust. The cache itself doesn't interpret or transform values; it only stores and returns them."
+          location: "VersionedCache.__init__ line 12"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "Node concerns file I/O; this solution uses in-memory cache, no files involved."
+        - question: "Is the data flushed before the rename?"
+          reason: "No file operations exist in this implementation."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "No temp files; failure during load() simply propagates to caller without cache mutation."
+        - question: "Can two writers both rename over the target?"
+          reason: "No renames; cache writes are serialized by lock."
+  not_applied: []
+```

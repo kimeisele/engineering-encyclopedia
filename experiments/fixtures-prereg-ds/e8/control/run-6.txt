@@ -1,0 +1,256 @@
+Here's a comprehensive solution that ensures cached values never become stale:
+
+```python
+import time
+import threading
+from collections import OrderedDict
+from typing import Any, Callable, Optional, Dict, Tuple
+
+class CacheWithInvalidation:
+    """
+    A cache that automatically invalidates entries when the source data changes.
+    
+    Key features:
+    - Never serves stale data
+    - Supports TTL-based expiration
+    - Thread-safe for concurrent access
+    - Optional callbacks to detect source changes
+    """
+    
+    def __init__(self, 
+                 max_size: int = 1000,
+                 default_ttl: Optional[float] = None,
+                 source_checker: Optional[Callable[[str], Any]] = None):
+        """
+        Initialize cache.
+        
+        Args:
+            max_size: Maximum number of entries to cache (LRU eviction)
+            default_ttl: Default time-to-live in seconds (None = no TTL)
+            source_checker: Optional function that returns current source version/hash
+                          for a given key to detect changes
+        """
+        self.max_size = max_size
+        self.default_ttl = default_ttl
+        self.source_checker = source_checker
+        
+        self._cache: OrderedDict[str, Tuple[Any, float, Any]] = OrderedDict()
+        # Format: key -> (value, timestamp, source_version)
+        self._lock = threading.RLock()
+        
+    def get(self, key: str, 
+            compute_func: Callable[[], Any],
+            ttl: Optional[float] = None,
+            force_refresh: bool = False) -> Any:
+        """
+        Get value for key, computing it if needed.
+        
+        Args:
+            key: Cache key
+            compute_func: Function to compute value if cache miss
+            ttl: Custom TTL for this key (defaults to default_ttl)
+            force_refresh: Force recomputation even if cached
+            
+        Returns:
+            Cached or computed value
+        """
+        current_time = time.time()
+        ttl = ttl if ttl is not None else self.default_ttl
+        
+        with self._lock:
+            # Check if key exists in cache
+            if not force_refresh and key in self._cache:
+                value, timestamp, source_version = self._cache[key]
+                
+                # Check TTL expiration
+                if ttl is None or (current_time - timestamp) <= ttl:
+                    # Check source changes
+                    if not self._source_changed(key, source_version):
+                        # Move to end (most recently used)
+                        self._cache.move_to_end(key)
+                        return value
+                    
+                # Entry is expired or source changed, remove it
+                del self._cache[key]
+            
+            # Compute new value
+            value = compute_func()
+            
+            # Get current source version
+            current_source_version = self._get_source_version(key)
+            
+            # Store in cache
+            self._cache[key] = (value, current_time, current_source_version)
+            self._cache.move_to_end(key)
+            
+            # Evict oldest if cache too large
+            while len(self._cache) > self.max_size:
+                self._cache.popitem(last=False)
+                
+            return value
+            
+    def _source_changed(self, key: str, cached_source_version: Any) -> bool:
+        """Check if source data has changed since caching."""
+        if self.source_checker is None:
+            return False  # No source checker, assume source doesn't change
+        
+        try:
+            current_source_version = self.source_checker(key)
+            return current_source_version != cached_source_version
+        except Exception:
+            return False  # Can't check, assume no change
+            
+    def _get_source_version(self, key: str) -> Any:
+        """Get current source version for key."""
+        if self.source_checker is None:
+            return None
+        try:
+            return self.source_checker(key)
+        except Exception:
+            return None
+            
+    def invalidate(self, key: str) -> None:
+        """Manually invalidate a key."""
+        with self._lock:
+            self._cache.pop(key, None)
+            
+    def clear(self) -> None:
+        """Clear entire cache."""
+        with self._lock:
+            self._cache.clear()
+            
+    @property
+    def size(self) -> int:
+        """Current cache size."""
+        with self._lock:
+            return len(self._cache)
+
+
+class DatabaseCache:
+    """
+    Example implementation for database queries with automatic invalidation.
+    """
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.cache = CacheWithInvalidation(
+            max_size=100,
+            default_ttl=300,  # 5 minutes default
+            source_checker=self._get_db_version
+        )
+        
+    def _get_db_version(self, key: str) -> Any:
+        """Check database version for invalidation."""
+        # Example: check a timestamp or version column
+        with self.db.cursor() as cursor:
+            cursor.execute("SELECT version FROM table_versions WHERE table_name = %s", (key,))
+            result = cursor.fetchone()
+            return result[0] if result else 0
+            
+    def query_user(self, user_id: int) -> dict:
+        """Get user data with caching and automatic invalidation."""
+        key = f"user_{user_id}"
+        
+        def compute_user():
+            with self.db.cursor() as cursor:
+                cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+                
+        return self.cache.get(key, compute_user)
+        
+    def update_user(self, user_id: int, **changes) -> None:
+        """Update user data and invalidate cache."""
+        with self.db.cursor() as cursor:
+            # Perform update
+            cursor.execute(
+                "UPDATE users SET " + 
+                ", ".join(f"{k} = %s" for k in changes) + 
+                " WHERE id = %s",
+                list(changes.values()) + [user_id]
+            )
+            # Update version table
+            cursor.execute(
+                "UPDATE table_versions SET version = version + 1, updated_at = NOW() "
+                "WHERE table_name = %s",
+                ("users",)
+            )
+            self.db.commit()
+            
+        # Cache will be automatically invalidated on next access
+
+
+# Usage examples
+def example_basic():
+    cache = CacheWithInvalidation()
+    
+    # Get or compute value
+    result = cache.get("my_key", lambda: expensive_computation())
+    
+    # Force refresh
+    result = cache.get("my_key", lambda: expensive_computation(), force_refresh=True)
+    
+    # Custom TTL
+    result = cache.get("my_key", lambda: expensive_computation(), ttl=60)
+
+
+def example_with_source_checker():
+    """Example with external data source monitoring."""
+    
+    # Mock external data source
+    external_data = {"key1": "v1", "key2": "v2"}
+    
+    def get_source_version(key):
+        """Return version/hash of source data."""
+        return hash(str(external_data.get(key)))
+    
+    cache = CacheWithInvalidation(
+        source_checker=get_source_version
+    )
+    
+    # First access - caches
+    result = cache.get("key1", lambda: external_data["key1"])
+    
+    # External source changes
+    external_data["key1"] = "updated_v1"
+    
+    # Next access - automatically detects change and recomputes
+    result = cache.get("key1", lambda: external_data["key1"])
+    assert result == "updated_v1"  # Never serves stale data
+
+
+def expensive_computation():
+    """Mock expensive computation."""
+    import time
+    time.sleep(0.1)  # Simulate expensive operation
+    return {"data": "computed"}
+```
+
+## Key Features:
+
+1. **Automatic Invalidation**: Uses `source_checker` function to detect when source data changes
+2. **TTL Support**: Optional time-to-live expiration
+3. **Force Refresh**: Explicit option to bypass cache
+4. **Thread Safety**: Uses reentrant lock for concurrent access
+5. **LRU Eviction**: Automatically removes oldest entries when cache is full
+6. **Flexible Source Checking**: Can check database versions, file hashes, API versions, etc.
+
+## How It Prevents Stale Data:
+
+1. **Source Version Check**: Compares cached source version with current version
+2. **TTL Expiration**: Automatically expires cached values after time period
+3. **Forced Refresh**: Allows explicit invalidation
+4. **Manual Invalidation**: Stop using cache for specific keys when needed
+
+## Usage Scenarios:
+
+- Database query caching with row-level invalidation
+- API response caching with ETag/version checking
+- File content caching with file modification time checking
+- Configuration caching with versioned config files
+
+The solution ensures that you never serve stale data by:
+- Always checking source versions when configured
+- Supporting explicit invalidation
+- Providing force refresh capability
+- Implementing TTL expiration as safety net

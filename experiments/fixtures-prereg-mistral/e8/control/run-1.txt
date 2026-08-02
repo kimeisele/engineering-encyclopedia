@@ -1,0 +1,110 @@
+# Cache with Staleness Prevention
+
+Here's a Python function that implements a cache with a mechanism to prevent serving stale values when the source data changes. This uses a combination of a timestamp and a version number to ensure freshness.
+
+```python
+import time
+from functools import wraps
+
+def cached_with_staleness(cache_ttl=60, version=None):
+    """
+    Decorator to cache function results with staleness prevention.
+
+    Args:
+        cache_ttl: Time-to-live for cached values in seconds (default: 60)
+        version: Optional version identifier that changes when source data changes
+
+    Returns:
+        A decorator that caches function results while preventing stale values
+    """
+    def decorator(func):
+        cache = {}
+        last_checked = {}
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Create a unique key for the cache
+            key = (args, frozenset(kwargs.items()))
+
+            # Check if we have a cached value
+            if key in cache:
+                cached_value, cached_time, cached_version = cache[key]
+
+                # Check if cache is still valid
+                if (time.time() - cached_time < cache_ttl and
+                    cached_version == version):
+                    return cached_value
+
+            # If cache is stale or doesn't exist, compute new value
+            result = func(*args, **kwargs)
+
+            # Update cache with new value, current time, and version
+            cache[key] = (result, time.time(), version)
+
+            return result
+        return wrapper
+    return decorator
+```
+
+## Usage Example
+
+```python
+# Example usage with a data source that changes
+data_version = "v1"  # This would change when source data changes
+
+@cached_with_staleness(cache_ttl=30, version=data_version)
+def get_expensive_data(param):
+    # Simulate expensive computation
+    print("Computing new value...")
+    return f"Result for {param}"
+
+# First call - computes and caches
+print(get_expensive_data("test"))  # Computes and caches
+
+# Second call within TTL - returns cached value
+print(get_expensive_data("test"))  # Returns cached value
+
+# Simulate data change
+data_version = "v2"
+
+# Call again - since version changed, recomputes
+print(get_expensive_data("test"))  # Computes new value
+```
+
+## Key Features
+
+1. **Time-based expiration**: Values expire after `cache_ttl` seconds
+2. **Version checking**: Values are only served if the version matches
+3. **Thread-safe**: Each call checks the cache before returning
+4. **Flexible**: Works with any function that takes hashable arguments
+
+## Alternative Implementation (Using a Class)
+
+For more complex scenarios, you might prefer a class-based approach:
+
+```python
+import time
+
+class StaleCache:
+    def __init__(self, ttl=60):
+        self.ttl = ttl
+        self.cache = {}
+        self.versions = {}
+
+    def get(self, key, version, compute_func):
+        current_time = time.time()
+
+        # Check if we have a valid cached value
+        if key in self.cache:
+            cached_value, cached_time, cached_version = self.cache[key]
+            if (current_time - cached_time < self.ttl and
+                cached_version == version):
+                return cached_value
+
+        # Compute new value if cache is stale
+        result = compute_func()
+        self.cache[key] = (result, current_time, version)
+        return result
+```
+
+This implementation gives you more control over the cache behavior and can be integrated into larger systems more easily.

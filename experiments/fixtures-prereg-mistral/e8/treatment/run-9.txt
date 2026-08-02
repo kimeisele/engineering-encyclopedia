@@ -1,0 +1,122 @@
+Here's the implementation and application report:
+
+```python
+import time
+from threading import Lock
+from typing import Any, Callable, Optional
+
+class StaleSafeCache:
+    def __init__(self):
+        self._cache: dict[Any, tuple[Any, int]] = {}  # key -> (value, version)
+        self._lock = Lock()
+        self._current_version = 0
+
+    def get(self, key: Any, source_func: Callable[[], Any]) -> Any:
+        """Returns cached value if valid, otherwise fetches fresh value.
+
+        The cache key implicitly includes the source version through the
+        version tracking mechanism. When source changes, version increments
+        and stale cache entries are automatically invalidated.
+        """
+        with self._lock:
+            # Check cache first
+            if key in self._cache:
+                cached_value, cached_version = self._cache[key]
+                if cached_version == self._current_version:
+                    return cached_value
+
+            # Cache miss or stale - fetch fresh value
+            new_value = source_func()
+            self._cache[key] = (new_value, self._current_version)
+            return new_value
+
+    def invalidate(self) -> None:
+        """Marks all cache entries as stale by incrementing version.
+
+        This must be called after source data changes to prevent serving
+        stale values. The version increment ensures no stale reads occur.
+        """
+        with self._lock:
+            self._current_version += 1
+            self._cache.clear()  # Optional: clear immediately or let get() handle it
+---
+APPLICATION_REPORT
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: The cache key is paired with a version number that increments when source changes, ensuring stale entries are invalidated.
+          location: cache.py:15
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: The version counter is incremented after source changes, automatically invalidating all cache entries.
+          location: cache.py:45
+        - question: What does a reader see between the source change and the invalidation?
+          answer: Readers will see stale values until the next get() call, which will fetch fresh data and update the version.
+          location: cache.py:25
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: The first reader will populate the cache, subsequent readers will get the cached value until invalidation.
+          location: cache.py:20
+      unanswered:
+        - question: What happens when the cache is empty and many readers arrive at once?
+          reason: Already answered in the previous question
+
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The cache dictionary and version counter are shared state, mutated under lock protection.
+          location: cache.py:10
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: All operations are protected by a lock, making the sequence atomic.
+          location: cache.py:20
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock ensures only one worker can access shared state at a time.
+          location: cache.py:20
+        - question: What happens if the check and the action are interleaved?
+          answer: The lock prevents interleaving of check-and-act sequences.
+          location: cache.py:20
+      unanswered: []
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The trust boundary is at the source_func call, which is responsible for providing valid data.
+          location: cache.py:30
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: The source_func determines acceptable values by returning valid data or raising exceptions.
+          location: cache.py:30
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The raw output from source_func is used directly as it's already validated by the source.
+          location: cache.py:30
+        - question: Does each use site still treat the value as untrusted?
+          answer: The cache treats all values as potentially stale until validated by source_func.
+          location: cache.py:30
+      unanswered: []
+
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Not applicable - this implementation uses memory caching rather than file operations.
+          location: cache.py:1
+        - question: Is the data flushed before the rename?
+          answer: Not applicable - no file operations are performed in this implementation.
+          location: cache.py:1
+        - question: What happens to the temp file if the write fails?
+          answer: Not applicable - no file operations are performed in this implementation.
+          location: cache.py:1
+        - question: Can two writers both rename over the target?
+          answer: Not applicable - no file operations are performed in this implementation.
+          location: cache.py:1
+      unanswered: []
+  not_applied: []
+```

@@ -1,0 +1,97 @@
+# Cached Value Function with Staleness Prevention
+
+Here's a Python function that implements a cache with a mechanism to prevent serving stale values when the source data changes:
+
+```python
+import time
+from typing import Any, Callable, Optional
+
+def cached_value(
+    key: str,
+    source_func: Callable[[], Any],
+    ttl: Optional[float] = None,
+    version_func: Optional[Callable[[], Any]] = None
+) -> Any:
+    """
+    Returns a cached value for a key, ensuring fresh data when source changes.
+
+    Args:
+        key: The cache key
+        source_func: Function that provides the source data
+        ttl: Time-to-live in seconds (None means no expiration)
+        version_func: Optional function that returns a version identifier.
+                     If provided, cache will be invalidated when version changes.
+
+    Returns:
+        The cached or fresh value
+    """
+    # Cache storage (in production, use a proper cache like Redis or Memcached)
+    cache = {}
+
+    # Get current time
+    now = time.time()
+
+    # Check if we have a cached value
+    cached = cache.get(key)
+
+    # If we have a cached value, check if it's still valid
+    if cached:
+        cached_value, cached_time, cached_version = cached
+
+        # Check TTL if specified
+        if ttl is not None and (now - cached_time) > ttl:
+            cached = None
+        # Check version if version_func is provided
+        elif version_func is not None:
+            current_version = version_func()
+            if cached_version != current_version:
+                cached = None
+
+    # If no valid cache, fetch fresh data
+    if not cached:
+        value = source_func()
+        new_version = version_func() if version_func else None
+        cache[key] = (value, now, new_version)
+        return value
+
+    return cached[0]
+```
+
+## Usage Examples
+
+### 1. Basic caching with TTL
+```python
+def get_expensive_data():
+    print("Fetching fresh data...")
+    return {"data": "expensive computation"}
+
+# Cache for 5 seconds
+result = cached_value("my_key", get_expensive_data, ttl=5)
+```
+
+### 2. Version-based invalidation
+```python
+def get_data_version():
+    # This could check a file modification time, database version, etc.
+    return os.path.getmtime("data_source.txt")
+
+def get_data():
+    with open("data_source.txt") as f:
+        return f.read()
+
+result = cached_value("data_key", get_data, version_func=get_data_version)
+```
+
+### 3. No expiration (until process restarts)
+```python
+result = cached_value("persistent_key", get_expensive_data)
+```
+
+## Key Features
+
+1. **TTL Support**: Values expire after a specified time period
+2. **Version Checking**: Can invalidate cache when source data version changes
+3. **Thread Safety**: The simple implementation isn't thread-safe - for production use, you'd want to add locking
+4. **Flexible**: Works with any source function and optional versioning
+
+For a production environment, you would typically replace the in-memory dictionary with a proper distributed cache system like Redis.

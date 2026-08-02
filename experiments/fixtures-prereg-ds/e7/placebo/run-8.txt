@@ -1,0 +1,51 @@
+```python
+import threading
+
+class SharedCounter:
+    """
+    A thread-safe counter using a lock to ensure no update is lost
+    when multiple workers increment concurrently.
+    """
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def increment(self, delta=1):
+        """
+        Atomically increase the counter by delta.
+        Uses a lock to serialize concurrent updates, preventing lost updates.
+        """
+        with self._lock:
+            self._value += delta
+            return self._value
+
+    def get_value(self):
+        """Return the current counter value (safe read)."""
+        with self._lock:
+            return self._value
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Not applicable—this code has no error messages; the lock prevents errors by design."
+          location: "solution.py:1"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Not applicable—no error messages exist here; counter updates are atomic and silent."
+          location: "solution.py:1"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Not applicable—no messages or logging are present in this counter implementation."
+          location: "solution.py:1"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Not applicable—no exceptions occur; the lock prevents concurrent update conflicts entirely."
+          location: "solution.py:8"
+      unanswered: []
+  not_applied: []
+---

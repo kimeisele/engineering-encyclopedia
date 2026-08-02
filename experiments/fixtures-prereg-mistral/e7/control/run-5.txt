@@ -1,0 +1,92 @@
+# Thread-Safe Shared Counter with Locking Strategy
+
+Here's a Python implementation of a shared counter that uses a threading lock to ensure thread safety. This prevents lost updates when multiple workers try to increment the counter simultaneously.
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self._lock:
+            self._value += amount
+            return self._value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self._lock:
+            return self._value
+
+    def reset(self):
+        """Thread-safe reset operation"""
+        with self._lock:
+            self._value = 0
+            return self._value
+```
+
+## Alternative Implementation with Conflict Detection
+
+If you prefer a lock-free approach with conflict detection (using compare-and-swap), here's an alternative:
+
+```python
+import threading
+import time
+
+class AtomicCounter:
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+        self._version = 0  # For optimistic concurrency control
+
+    def increment(self, amount=1):
+        """Optimistic increment with retry on conflict"""
+        while True:
+            current_value = self._value
+            current_version = self._version
+
+            # Simulate some work
+            time.sleep(0.001)
+
+            # Try to update
+            if self._version == current_version:
+                if self._value == current_value:
+                    self._value += amount
+                    self._version += 1
+                    return self._value
+                # Else: value changed, retry
+            # Else: version changed, retry
+```
+
+## Usage Example
+
+```python
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.increment()
+
+# Create a shared counter
+counter = SharedCounter()
+
+# Create and start multiple worker threads
+threads = []
+for _ in range(5):
+    t = threading.Thread(target=worker, args=(counter, 1000))
+    threads.append(t)
+    t.start()
+
+# Wait for all threads to complete
+for t in threads:
+    t.join()
+
+print(f"Final counter value: {counter.get_value()}")  # Should be 5000
+```
+
+The locking strategy is generally preferred for simple counters because:
+1. It's straightforward and easy to understand
+2. It guarantees no lost updates
+3. The overhead is minimal for simple operations
+
+The conflict detection approach is more complex but avoids lock contention in some scenarios. Choose based on your specific requirements.

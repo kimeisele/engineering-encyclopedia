@@ -1,0 +1,126 @@
+Here's the implementation of a shared counter with an optimistic locking strategy to prevent lost updates, followed by the application report:
+
+```python
+import threading
+from typing import Optional
+
+class SharedCounter:
+    def __init__(self, initial_value: int = 0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+        self._version = 0
+
+    def increment(self, amount: int = 1) -> bool:
+        """Atomically increment the counter if no concurrent modifications occurred.
+
+        Returns:
+            bool: True if the increment succeeded, False if a conflict was detected.
+        """
+        with self._lock:
+            current_version = self._version
+            current_value = self._value
+
+        # Simulate some processing time
+        # In a real system, this would be the actual work being done
+
+        with self._lock:
+            if current_version != self._version:
+                return False  # Conflict detected
+
+            self._value = current_value + amount
+            self._version += 1
+            return True
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._value
+
+    @property
+    def version(self) -> int:
+        with self._lock:
+            return self._version
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: What identifies the version of the state being changed?
+          answer: The version field in the SharedCounter class identifies the state version.
+          location: "shared_counter.py:5"
+        - question: Is the conflict detected before or after the write?
+          answer: Conflict is detected before the write by comparing versions.
+          location: "shared_counter.py:20"
+        - question: How long is the lock held, and across what?
+          answer: The lock is held only during version/value reads and writes, not across processing.
+          location: "shared_counter.py:14-16,22-24"
+        - question: What happens when the conflict is detected?
+          answer: The operation fails and returns False, allowing the caller to retry.
+          location: "shared_counter.py:26"
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The counter value and version are shared and mutated in the SharedCounter class.
+          location: "shared_counter.py:5,27"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: No, but we make it atomic by using version checks and locks.
+          location: "shared_counter.py:14-24"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, because we use version numbers to detect concurrent modifications.
+          location: "shared_counter.py:20"
+        - question: What happens if the check and the action are interleaved?
+          answer: The version check detects the interleaving and prevents the update.
+          location: "shared_counter.py:20-26"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: N/A - this implementation doesn't use file operations.
+          location: "shared_counter.py:1"
+        - question: Is the data flushed before the rename?
+          answer: N/A - this implementation doesn't use file operations.
+          location: "shared_counter.py:1"
+        - question: What happens to the temp file if the write fails?
+          answer: N/A - this implementation doesn't use file operations.
+          location: "shared_counter.py:1"
+        - question: Can two writers both rename over the target?
+          answer: N/A - this implementation doesn't use file operations.
+          location: "shared_counter.py:1"
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: N/A - this implementation doesn't use caching.
+          location: "shared_counter.py:1"
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: N/A - this implementation doesn't use caching.
+          location: "shared_counter.py:1"
+        - question: What does a reader see between the source change and the invalidation?
+          answer: N/A - this implementation doesn't use caching.
+          location: "shared_counter.py:1"
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: N/A - this implementation doesn't use caching.
+          location: "shared_counter.py:1"
+  not_applied:
+    - node: concurrency.locking-strategy
+      reason: All questions from this node were answered in the applied section.
+    - node: concurrency.race-conditions
+      reason: All questions from this node were answered in the applied section.
+    - node: python.files.atomic-replacement
+      reason: The implementation doesn't use file operations, so these questions are not applicable.
+    - node: performance.cache-invalidation
+      reason: The implementation doesn't use caching, so these questions are not applicable.
+```

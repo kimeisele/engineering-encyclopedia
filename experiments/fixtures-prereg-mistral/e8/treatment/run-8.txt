@@ -1,0 +1,88 @@
+```python
+import threading
+from typing import Any, Callable, Optional
+
+class Cache:
+    def __init__(self):
+        self._cache: dict[Any, Any] = {}
+        self._lock = threading.RLock()
+        self._version: int = 0
+
+    def get(self, key: Any, source: Callable[[], Any]) -> Any:
+        with self._lock:
+            if key not in self._cache:
+                self._cache[key] = source()
+                return self._cache[key]
+
+            current_value = self._cache[key]
+            new_value = source()
+
+            if new_value != current_value:
+                self._version += 1
+                self._cache[key] = new_value
+            return self._cache[key]
+
+# Example usage:
+# cache = Cache()
+# value = cache.get("config_key", fetch_config_from_source)
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: The cache key combined with the source version (via value comparison) identifies the entry.
+          location: cache.py:12
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: The entry is invalidated when the source value changes (detected by comparison).
+          location: cache.py:18
+        - question: What does a reader see between the source change and the invalidation?
+          answer: The old cached value until the next get() call detects the change and updates.
+          location: cache.py:14
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: First reader populates cache; subsequent readers see cached value until invalidation.
+          location: cache.py:10
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The cache dictionary and version are shared; mutated under the lock.
+          location: cache.py:8,18
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: Yes, the entire get() operation is atomic under the lock.
+          location: cache.py:11
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock ensures only one worker accesses shared state at a time.
+          location: cache.py:11
+        - question: What happens if the check and the action are interleaved?
+          answer: The lock prevents interleaving; check and action are atomic.
+          location: cache.py:11
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The trust boundary is at the source() call; raw input is validated by comparison.
+          location: cache.py:18
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: Any value not equal to the cached value is rejected (replaced).
+          location: cache.py:18
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated (new) value is used downstream after cache update.
+          location: cache.py:19
+        - question: Does each use site still treat the value as untrusted?
+          answer: Yes, the cache does not alter the value's trust status.
+          location: cache.py:19
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: The implementation does not involve file system operations, so this node is not applicable.
+```

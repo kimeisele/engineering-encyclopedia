@@ -1,0 +1,69 @@
+```python
+import threading
+import itertools
+
+class SharedCounter:
+    """Thread-safe counter using an explicit lock."""
+    
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+    
+    def increment(self, amount=1):
+        """Increment the counter by amount. Lock ensures atomic update."""
+        with self._lock:
+            self._value += amount
+            return self._value
+    
+    def get(self):
+        """Return current value (read is atomic in CPython for ints, but lock for safety)."""
+        with self._lock:
+            return self._value
+
+
+# Alternative: lock-free with atomic compare-and-swap (for advanced users)
+class AtomicCounter:
+    """Lock-free counter using atomic compare-and-swap (via threading primitives)."""
+    
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()  # In Python, use lock; CAS requires C extensions
+    
+    def increment(self, amount=1):
+        """Increment safely. In Python, use a lock since GIL doesn't guarantee atomicity."""
+        with self._lock:
+            self._value += amount
+            return self._value
+    
+    def get(self):
+        with self._lock:
+            return self._value
+
+
+# Example usage with two workers
+def worker(counter, iterations, worker_id):
+    for i in range(iterations):
+        counter.increment()
+    print(f"Worker {worker_id} done")
+
+if __name__ == "__main__":
+    counter = SharedCounter()
+    t1 = threading.Thread(target=worker, args=(counter, 1000, 1))
+    t2 = threading.Thread(target=worker, args=(counter, 1000, 2))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    print(f"Final counter: {counter.get()}")  # Should be 2000
+```
+
+---APPLICATION REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied: []
+  not_applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: "The context pack contains only observability/error-context nodes, which are unrelated to concurrency control. No applicable knowledge for shared counter synchronization."

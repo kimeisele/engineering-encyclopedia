@@ -1,0 +1,254 @@
+Here's a comprehensive solution that ensures cached values are never stale by tracking source data changes:
+
+```python
+import time
+import threading
+from typing import Any, Callable, Dict, Optional, Tuple
+from collections import OrderedDict
+
+class CacheWithVersioning:
+    """
+    A cache that tracks source data versions to prevent serving stale data.
+    """
+    
+    def __init__(self, max_size: int = 100, ttl: Optional[float] = None):
+        self.max_size = max_size
+        self.ttl = ttl  # Optional time-to-live in seconds
+        self.cache: OrderedDict[str, Tuple[Any, Any, float]] = OrderedDict()  # key -> (value, version, timestamp)
+        self._lock = threading.Lock()
+    
+    def get(self, key: str, source_getter: Callable[[], Any], version_getter: Callable[[], Any] = None) -> Any:
+        """
+        Get or compute a value, ensuring it's not stale.
+        
+        Args:
+            key: Cache key
+            source_getter: Function to fetch fresh data from source
+            version_getter: Optional function to get source version. If None,
+                           we'll always refetch from source to check freshness.
+        
+        Returns:
+            The fresh cached value
+        """
+        with self._lock:
+            # Check if we have cached data
+            if key in self.cache:
+                cached_value, cached_version, timestamp = self.cache[key]
+                
+                # Check TTL if configured
+                if self.ttl is not None:
+                    if time.time() - timestamp > self.ttl:
+                        # Cache expired, need to refresh
+                        return self._refresh_and_cache(key, source_getter, version_getter)
+                
+                # Check version freshness
+                if version_getter is not None:
+                    current_version = version_getter()
+                    if current_version == cached_version:
+                        # Version matches, cache is fresh
+                        self.cache.move_to_end(key)  # LRU update
+                        return cached_value
+                    else:
+                        # Version changed, need to refresh
+                        return self._refresh_and_cache(key, source_getter, version_getter)
+                else:
+                    # No version getter provided, always fetch from source
+                    # to ensure freshness
+                    return self._refresh_and_cache(key, source_getter, None)
+            else:
+                # Not in cache, fetch fresh
+                return self._refresh_and_cache(key, source_getter, version_getter)
+    
+    def _refresh_and_cache(self, key: str, source_getter: Callable[[], Any], 
+                          version_getter: Optional[Callable[[], Any]] = None) -> Any:
+        """Fetch fresh data and update cache."""
+        # Fetch fresh value
+        fresh_value = source_getter()
+        
+        # Get version if provided
+        version = version_getter() if version_getter else None
+        
+        # Store in cache
+        self.cache[key] = (fresh_value, version, time.time())
+        self.cache.move_to_end(key)
+        
+        # Handle cache size
+        if len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)  # Remove oldest (LRU)
+        
+        return fresh_value
+    
+    def invalidate(self, key: str) -> None:
+        """Explicitly invalidate a cache entry."""
+        with self._lock:
+            self.cache.pop(key, None)
+    
+    def clear(self) -> None:
+        """Clear entire cache."""
+        with self._lock:
+            self.cache.clear()
+
+# Alternative approach: Using a hash/checksum of source data
+class ContentHashCache:
+    """
+    Cache that uses content hashing to detect changes in source data.
+    """
+    
+    def __init__(self, use_hash: Callable[[Any], str] = None):
+        self.use_hash = use_hash or self._default_hash
+        self.cache = {}
+        self._lock = threading.Lock()
+    
+    def _default_hash(self, data: Any) -> str:
+        """Default hash function - override for custom data types"""
+        import hashlib
+        import json
+        try:
+            return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
+        except (TypeError, ValueError):
+            return hashlib.md5(str(data).encode()).hexdigest()
+    
+    def get(self, key: str, source_getter: Callable[[], Any]) -> Any:
+        """
+        Get value ensuring it matches current source content.
+        """
+        with self._lock:
+            # Get fresh data from source
+            fresh_value = source_getter()
+            fresh_hash = self.use_hash(fresh_value)
+            
+            # Check if we have cached data with matching hash
+            cached_entry = self.cache.get(key)
+            if cached_entry and cached_entry[0] == fresh_hash:
+                # Cache is fresh (content hasn't changed)
+                return cached_entry[1]
+            
+            # Cache is stale or doesn't exist, update it
+            self.cache[key] = (fresh_hash, fresh_value)
+            return fresh_value
+
+# Practical example with a database
+class DatabaseCacheExample:
+    """
+    Example implementation for database-backed data with version tracking.
+    """
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.cache = {}
+        self._lock = threading.Lock()
+    
+    def get_user_data(self, user_id: int) -> Dict[str, Any]:
+        """
+        Get user data ensuring it's always fresh based on database version.
+        """
+        key = f"user:{user_id}"
+        
+        with self._lock:
+            # Get current database version for this user
+            current_version = self.db.get_version_with_transaction(
+                f"user.{user_id}"
+            )
+            
+            # Check cache
+            if key in self.cache:
+                cached_data, cached_version = self.cache[key]
+                if cached_version == current_version:
+                    return cached_data  # Cache is fresh
+            
+            # Cache is stale or missing, fetch from database
+            fresh_data = self.db.fetch_user(user_id)
+            self.cache[key] = (fresh_data, current_version)
+            return fresh_data
+
+# Usage examples
+def main():
+    # Example 1: File-based cache with version checking
+    class FileDataSource:
+        def __init__(self, filepath):
+            self.filepath = filepath
+            self.file_version = 0
+            
+        def update_file(self, new_content):
+            with open(self.filepath, 'w') as f:
+                f.write(new_content)
+            self.file_version += 1
+        
+        def read_file(self):
+            with open(self.filepath, 'r') as f:
+                return f.read()
+        
+        def get_version(self):
+            return self.file_version
+    
+    # Create a temporary file
+    import os
+    test_file = 'temp_file.txt'
+    
+    # Test data source
+    file_source = FileDataSource(test_file)
+    file_source.update_file("Initial data")
+    
+    cache = CacheWithVersioning(max_size=10)
+    
+    # First access - caches the data
+    print("First access:", cache.get('file', file_source.read_file, file_source.get_version))
+    
+    # Access again - should return cached data
+    print("Cached access:", cache.get('file', file_source.read_file, file_source.get_version))
+    
+    # Update the file
+    file_source.update_file("Updated data")
+    
+    # Access again - should fetch fresh data
+    print("After update:", cache.get('file', file_source.read_file, file_source.get_version))
+    
+    # Example 2: Content hash approach
+    content_cache = ContentHashCache()
+    
+    data_provider = {
+        'users': [{'id': 1, 'name': 'Alice'}, {'id': 2, 'name': 'Bob'}]
+    }
+    
+    print("\nContent hash cache:")
+    print("First access:", content_cache.get('users', lambda: data_provider['users']))
+    print("Cached access:", content_cache.get('users', lambda: data_provider['users']))
+    
+    # Change data
+    data_provider['users'].append({'id': 3, 'name': 'Charlie'})
+    print("After change:", content_cache.get('users', lambda: data_provider['users']))
+    
+    # Clean up
+    os.remove(test_file)
+
+if __name__ == "__main__":
+    main()
+```
+
+This solution provides several approaches to ensure cached values are never stale:
+
+## Key Features:
+
+1. **Version Tracking**: Uses a version getter function to track source data changes
+2. **TTL Support**: Optional time-to-live to prevent indefinite caching
+3. **Thread Safety**: Uses locks to handle concurrent access
+4. **LRU Eviction**: Maintains cache size limits
+5. **Multiple Strategies**: 
+   - Version-based checking
+   - Content hashing
+   - Database version tracking
+
+## How It Works:
+
+1. **On cache hit**, it checks if the source version has changed
+2. **If version unchanged**, returns cached value
+3. **If version changed or missing**, fetches fresh data from source
+4. **Always updates cache** with the latest version stamp
+
+## Usage Patterns:
+
+- **For static data that changes rarely**: Use version-based approach
+- **For frequently changing data**: Use content hashing
+- **For database-backed data**: Track database version per record
+
+This approach guarantees you never serve stale data while still benefiting from caching when data hasn't changed.

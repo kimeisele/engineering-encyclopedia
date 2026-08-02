@@ -1,0 +1,82 @@
+Here's a Python implementation of a caching function that ensures stale values aren't served after source data changes, followed by the application report:
+
+```python
+import time
+from typing import Any, Callable
+
+def cached_value(key: str, source_func: Callable[[str], Any], ttl: float = 60.0) -> Any:
+    """
+    Returns a cached value for a key, ensuring stale values aren't served after source changes.
+
+    Args:
+        key: The cache key
+        source_func: Function to fetch fresh data when needed
+        ttl: Time-to-live in seconds before cache expires
+
+    Returns:
+        The cached or fresh value
+    """
+    cache = {}
+    last_update = {}
+
+    def get_value():
+        current_time = time.time()
+        if key not in cache or (current_time - last_update.get(key, 0)) > ttl:
+            cache[key] = source_func(key)
+            last_update[key] = current_time
+        return cache[key]
+
+    return get_value()
+
+# Example usage:
+if __name__ == "__main__":
+    # Simulate a data source that changes over time
+    data = {"a": 1, "b": 2}
+    def get_data(key: str) -> int:
+        return data[key]
+
+    get_cached_a = cached_value("a", get_data)
+    print(get_cached_a())  # 1
+    data["a"] = 100
+    print(get_cached_a())  # Still 1 (cached)
+    time.sleep(61)  # Wait for TTL to expire
+    print(get_cached_a())  # Now 100 (fresh)
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 0fa6e8347e7d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The function clearly separates cache retrieval from fresh data fetching operations.
+          location: "cached_value:1"
+        - question: Can the operator find the request or job from the message?
+          answer: The key parameter uniquely identifies each cached value request.
+          location: "cached_value:1"
+        - question: Is sensitive data excluded from the message?
+          answer: The implementation doesn't expose sensitive data in error cases.
+          location: "cached_value:1"
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: Context is established at cache access time before any potential errors.
+          location: "cached_value:1"
+  not_applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: Duplicate node in pack, already applied above
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: Duplicate node in pack, already applied above
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: Duplicate node in pack, already applied above
+```

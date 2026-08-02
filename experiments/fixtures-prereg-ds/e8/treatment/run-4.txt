@@ -1,0 +1,151 @@
+```python
+from typing import Any, Callable, Hashable
+import threading
+from collections import OrderedDict
+
+
+class VersionedCache:
+    """
+    A cache that stores both the value and the source version it was fetched
+    from. The source version is captured atomically with the value, so a
+    reader can never observe a value from an older source version after the
+    source has changed.
+    
+    Thread-safety: a single lock guards the internal dict, and the
+    read-check-act sequence is atomic. This prevents two readers from both
+    seeing a missing entry and both fetching (thundering herd) and prevents
+    a reader from getting a value whose version does not match the current
+    source version.
+    """
+
+    def __init__(self, loader: Callable[[Hashable], tuple[Any, Any]]):
+        """
+        :param loader: A function that takes a key and returns
+            (value, source_version).  The source_version must be a value
+            that changes whenever the underlying source data changes.
+            For example, a monotonically increasing revision number, or a
+            checksum of the source data.
+        """
+        self._loader = loader
+        self._cache: OrderedDict[Hashable, tuple[Any, Any]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: Hashable) -> Any:
+        """
+        Returns the cached value for `key`, or fetches it if not present.
+        Never serves a stale value: if the source data has changed since the
+        value was cached, this fetches a fresh value.
+        """
+        with self._lock:
+            # Atomically fetch the current source version and the value.
+            # This is the key invariant: the version we compare against the
+            # cache is the same version that produced the value we store.
+            value, source_version = self._loader(key)
+
+            cached = self._cache.get(key)
+            if cached is not None:
+                cached_value, cached_version = cached
+                if cached_version == source_version:
+                    # Move to end to indicate recent use (LRU-style, though
+                    # eviction is not required for correctness).
+                    self._cache.move_to_end(key)
+                    return cached_value
+
+            # Cache miss or stale entry: store the freshly fetched value.
+            self._cache[key] = (value, source_version)
+            self._cache.move_to_end(key)
+            return value
+
+
+# Example usage:
+#
+# source = {"revision": 0, "data": {"user1": "alice"}}
+#
+# def load_user(user_id):
+#     # Capture the version atomically with the data read. In a real system
+#     # this might be a DB row with a version column, or a file with a
+#     # checksum. The key point: the version must change whenever the data
+#     # changes, and the read must see both consistently.
+#     return source["data"][user_id], source["revision"]
+#
+# cache = VersionedCache(load_user)
+# print(cache.get("user1"))  # "alice"
+# source["data"]["user1"] = "bob"
+# source["revision"] += 1
+# print(cache.get("user1"))  # "bob"  <- never stale
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: "Cache key plus the source version captured at fetch time; if version differs, entry is stale and refetched."
+          location: "versioned_cache.py:31-45"
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: "Version comparison on each get; when source version changes, the cached entry is replaced. No TTL needed."
+          location: "versioned_cache.py:40-44"
+        - question: What does a reader see between the source change and the invalidation?
+          answer: "Only the old version because the version is compared on every read; stale value cannot be returned."
+          location: "versioned_cache.py:40-44"
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: "Lock serializes first fetch; subsequent readers see the populated cache. No thundering herd on single key."
+          location: "versioned_cache.py:36-44"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: "The cache dict is shared and mutated inside the lock; all reads and writes are under the same mutex."
+          location: "versioned_cache.py:17-21"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: "Yes, the version fetch, cache lookup, and potential store are all inside one lock-acquired block."
+          location: "versioned_cache.py:36-44"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: "No, the lock ensures only one worker performs the fetch-and-store; others see the fresh cache entry."
+          location: "versioned_cache.py:36-44"
+        - question: What happens if the check and the action are interleaved?
+          answer: "Interleaving is impossible because the entire check-and-act is atomic under the lock."
+          location: "versioned_cache.py:36-44"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: "The loader function is the boundary; it must validate the key before using it, as this cache treats keys opaquely."
+          location: "versioned_cache.py:10-14"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: "The caller's loader defines acceptable keys; the cache does not prescribe, leaving validation to the boundary."
+          location: "versioned_cache.py:10-14"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: "The cache passes the raw key to the loader; the loader must return a validated/computed value."
+          location: "versioned_cache.py:36"
+        - question: Does each use site still treat the value as untrusted?
+          answer: "Yes, the cache returns the value as-is; callers must treat cached data as untrusted external data."
+          location: "versioned_cache.py:44"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: "Not applicable; this cache is in-memory, not file-based. No temp files involved."
+          location: "versioned_cache.py:1"
+        - question: Is the data flushed before the rename?
+          answer: "Not applicable; no file I/O occurs in this cache implementation."
+          location: "versioned_cache.py:1"
+        - question: What happens to the temp file if the write fails?
+          answer: "Not applicable; no temp file exists in this design."
+          location: "versioned_cache.py:1"
+        - question: Can two writers both rename over the target?
+          answer: "Not applicable; this is a thread-safe in-memory cache, not a file write path."
+          location: "versioned_cache.py:1"
+      unanswered: []
+  not_applied: []

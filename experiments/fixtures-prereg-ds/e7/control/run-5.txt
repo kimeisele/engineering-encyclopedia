@@ -1,0 +1,226 @@
+I'll provide a solution using a thread-safe counter with a locking strategy. Here's a comprehensive implementation:
+
+```python
+import threading
+import random
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+class SafeCounter:
+    """
+    A thread-safe counter using a lock to prevent lost updates.
+    """
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self._lock = threading.Lock()
+        # Track update statistics for verification
+        self.updates_completed = 0
+        self._stats_lock = threading.Lock()
+    
+    def increment(self, amount=1):
+        """
+        Update the counter safely using a lock.
+        """
+        with self._lock:
+            # Critical section - only one thread can execute this at a time
+            old_value = self.value
+            # Simulate some work to increase chance of race conditions without lock
+            time.sleep(0.001)
+            self.value = old_value + amount
+            
+            # Update statistics under a separate lock
+            with self._stats_lock:
+                self.updates_completed += 1
+    
+    def get_value(self):
+        """
+        Thread-safe read of the counter value.
+        """
+        with self._lock:
+            return self.value
+    
+    def get_stats(self):
+        """
+        Get counter statistics.
+        """
+        with self._stats_lock:
+            return {
+                'value': self.value,
+                'updates_completed': self.updates_completed
+            }
+
+class OptimisticCounter:
+    """
+    Alternative implementation using optimistic concurrency control.
+    This uses compare-and-swap style logic to detect conflicts.
+    """
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self._lock = threading.Lock()
+        self.updates_completed = 0
+        self.conflicts_detected = 0
+    
+    def increment(self, amount=1):
+        """
+        Update using optimistic approach - assumes no conflict, retries if one occurs.
+        """
+        while True:
+            # Read current value
+            with self._lock:
+                current_value = self.value
+                # Simulate some work
+                time.sleep(0.001)
+                expected_value = current_value
+            
+            # Try to update - in real systems this would be atomic
+            # Here we simulate with a lock-based check
+            with self._lock:
+                if self.value == expected_value:  # No conflict occurred
+                    self.value += amount
+                    self.updates_completed += 1
+                    break
+                else:
+                    # Conflict detected - another thread updated in between
+                    self.conflicts_detected += 1
+                    # Retry with new value
+        
+    def get_value(self):
+        """
+        Read current counter value.
+        """
+        with self._lock:
+            return self.value
+    
+    def get_stats(self):
+        """
+        Get counter statistics including conflict information.
+        """
+        with self._lock:
+            return {
+                'value': self.value,
+                'updates_completed': self.updates_completed,
+                'conflicts_detected': self.conflicts_detected
+            }
+
+def worker_function(counter, worker_id, num_updates):
+    """
+    Worker that performs multiple updates to the shared counter.
+    """
+    for i in range(num_updates):
+        counter.increment(1)
+        # Add some random delay to increase chance of concurrent updates
+        if random.random() < 0.3:
+            time.sleep(random.uniform(0, 0.005))
+
+def demonstrate_thread_safety():
+    """
+    Demonstrate the thread-safe counter with multiple workers.
+    """
+    num_workers = 5
+    updates_per_worker = 100
+    
+    print("=== Test 1: Lock-based Counter ===")
+    print("-" * 50)
+    
+    lock_counter = SafeCounter()
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(worker_function, lock_counter, f"Worker-{i}", updates_per_worker)
+            for i in range(num_workers)
+        ]
+        # Wait for all workers to complete
+        for future in futures:
+            future.result()
+    
+    stats = lock_counter.get_stats()
+    expected_value = num_workers * updates_per_worker
+    print(f"Expected value: {expected_value}")
+    print(f"Actual value: {stats['value']}")
+    print(f"Updates completed: {stats['updates_completed']}")
+    print(f"All updates preserved: {stats['value'] == expected_value}")
+    
+    print("\n=== Test 2: Optimistic Counter ===")
+    print("-" * 50)
+    
+    optimistic_counter = OptimisticCounter()
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(worker_function, optimistic_counter, f"Worker-{i}", updates_per_worker)
+            for i in range(num_workers)
+        ]
+        # Wait for all workers to complete
+        for future in futures:
+            future.result()
+    
+    stats = optimistic_counter.get_stats()
+    print(f"Expected value: {expected_value}")
+    print(f"Actual value: {stats['value']}")
+    print(f"Updates completed: {stats['updates_completed']}")
+    print(f"Conflicts detected: {stats['conflicts_detected']}")
+    print(f"All updates preserved: {stats['value'] == expected_value}")
+
+def show_unsafe_example():
+    """
+    Demonstrate what happens without proper synchronization.
+    """
+    print("\n=== UNSAFE Example (for comparison) ===")
+    print("-" * 50)
+    
+    class UnsafeCounter:
+        def __init__(self):
+            self.value = 0
+        
+        def increment(self):
+            # This is NOT thread-safe - race condition likely
+            current = self.value
+            time.sleep(0.001)  # Increase chance of race condition
+            self.value = current + 1
+    
+    unsafe_counter = UnsafeCounter()
+    num_workers = 5
+    updates_per_worker = 100
+    
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = [
+            executor.submit(worker_function, unsafe_counter, f"Worker-{i}", updates_per_worker)
+            for i in range(num_workers)
+        ]
+        for future in futures:
+            future.result()
+    
+    expected_value = num_workers * updates_per_worker
+    print(f"Expected value: {expected_value}")
+    print(f"Actual value: {unsafe_counter.value}")
+    print(f"Updates lost: {expected_value - unsafe_counter.value}")
+    print(f"All updates preserved: {unsafe_counter.value == expected_value}")
+
+if __name__ == "__main__":
+    # Set random seed for reproducibility
+    random.seed(42)
+    
+    demonstrate_thread_safety()
+    show_unsafe_example()
+```
+
+This implementation provides two strategies for handling concurrent updates:
+
+## Key Features:
+
+1. **Lock-based approach (SafeCounter)**: Uses a mutex (threading.Lock) to ensure only one thread can modify the counter at a time. This is the simplest and most reliable approach.
+
+2. **Optimistic approach (OptimisticCounter)**: Uses compare-and-swap logic to detect conflicts and retry if necessary. This can be more efficient in scenarios with low contention.
+
+## Design choices:
+
+- **Pessimistic locking**: The `SafeCounter` uses a simple lock around the critical section, guaranteeing no lost updates.
+- **Optimistic concurrency**: `OptimisticCounter` reads the value, simulates work, then checks if the value hasn't changed before updating. Retries if conflicts occur.
+
+## How it prevents lost updates:
+
+1. **Lock-based**: The lock ensures only one thread can read-modify-write at a time, serializing access to the critical section.
+
+2. **Optimistic**: Threads check if the value changed between reading and writing, retrying if another thread modified it in between.
+
+The demonstration shows that both approaches preserve all updates (the final value equals the expected total), while an unsafe implementation loses updates due to race conditions.

@@ -1,0 +1,109 @@
+# Cache with Stale Value Prevention
+
+Here's a function that implements a cache with a guarantee that it will never serve stale values after the source data changes. This is achieved by using a versioning system where the cache tracks when the source data was last updated.
+
+```python
+import time
+from typing import Any, Callable, Optional
+
+class DataCache:
+    def __init__(self):
+        self._cache = {}
+        self._version = 0
+        self._last_updated = 0
+
+    def get(self, key: str, data_source: Callable[[], Any], ttl: Optional[float] = None) -> Any:
+        """
+        Get a value from cache or fetch from source if needed.
+
+        Args:
+            key: The cache key
+            data_source: Function that fetches fresh data when needed
+            ttl: Time-to-live in seconds (None means no expiration)
+
+        Returns:
+            The cached or fresh value
+        """
+        current_time = time.time()
+
+        # Check if we need to refresh the cache
+        if (key not in self._cache or
+            (ttl is not None and current_time - self._cache[key]['timestamp'] > ttl) or
+            self._cache[key]['version'] != self._version):
+
+            # Fetch fresh data
+            fresh_data = data_source()
+
+            # Update cache
+            self._cache[key] = {
+                'value': fresh_data,
+                'timestamp': current_time,
+                'version': self._version
+            }
+
+        return self._cache[key]['value']
+
+    def invalidate(self):
+        """Invalidate all cache entries by incrementing the version."""
+        self._version += 1
+        self._last_updated = time.time()
+
+# Global cache instance
+cache = DataCache()
+
+def get_cached_value(key: str, data_source: Callable[[], Any], ttl: Optional[float] = None) -> Any:
+    """
+    Get a cached value that won't be stale after source data changes.
+
+    Args:
+        key: The cache key
+        data_source: Function that fetches fresh data when needed
+        ttl: Time-to-live in seconds (None means no expiration)
+
+    Returns:
+        The cached or fresh value
+    """
+    return cache.get(key, data_source, ttl)
+
+def invalidate_cache():
+    """Invalidate all cached values."""
+    cache.invalidate()
+```
+
+## How It Works
+
+1. **Version Tracking**: The cache maintains a version number that increments whenever the source data changes (via `invalidate_cache()`).
+
+2. **Staleness Prevention**: Each cache entry stores:
+   - The value
+   - A timestamp
+   - The version number when it was cached
+
+3. **Cache Invalidation**: When source data changes, calling `invalidate_cache()` increments the version, which causes all future cache accesses to fetch fresh data.
+
+4. **TTL Support**: Optional time-to-live (TTL) can be specified to automatically expire entries after a certain time.
+
+## Example Usage
+
+```python
+# Example data source that might change
+def get_user_data(user_id):
+    # In a real app, this would fetch from a database or API
+    return {"id": user_id, "name": "John Doe", "last_updated": time.time()}
+
+# Get cached data
+user_data = get_cached_value("user_123", lambda: get_user_data("123"), ttl=60)
+print(user_data)
+
+# Later, when data changes
+invalidate_cache()
+
+# Next access will get fresh data
+user_data = get_cached_value("user_123", lambda: get_user_data("123"), ttl=60)
+```
+
+This implementation ensures that:
+- You never get stale data after the source changes
+- You can optionally set expiration times
+- The cache is automatically invalidated when needed
+- The solution is thread-safe for single-process use

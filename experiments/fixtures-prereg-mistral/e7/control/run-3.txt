@@ -1,0 +1,92 @@
+# Thread-Safe Shared Counter with Locking
+
+Here's a Python implementation of a shared counter that uses a threading lock to ensure atomic updates:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+
+    def decrement(self, amount=1):
+        """Thread-safe decrement operation"""
+        with self.lock:
+            self.value -= amount
+            return self.value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self.lock:
+            return self.value
+```
+
+## Alternative Implementation with Context Manager
+
+For a simpler interface, you could use a context manager:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def update(self, amount):
+        """Thread-safe update operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+
+    def get(self):
+        """Thread-safe read operation"""
+        with self.lock:
+            return self.value
+```
+
+## Usage Example
+
+```python
+counter = SharedCounter()
+
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.update(1)
+
+# Create and start threads
+threads = []
+for _ in range(10):
+    t = threading.Thread(target=worker, args=(counter, 1000))
+    threads.append(t)
+    t.start()
+
+# Wait for all threads to complete
+for t in threads:
+    t.join()
+
+print(f"Final counter value: {counter.get()}")  # Should be 10,000
+```
+
+## Why This Works
+
+1. **Locking Strategy**: The `threading.Lock` ensures that only one thread can access the critical section (the counter update) at a time.
+2. **Atomic Operations**: The `with self.lock` statement creates a context where the lock is acquired before the operation and released afterward, even if an exception occurs.
+3. **No Lost Updates**: Since only one thread can modify the counter at any time, no increments or decrements will be lost.
+
+## Alternative Strategies
+
+If you're working in a distributed system rather than a multi-threaded one, you might consider:
+
+1. **Compare-and-Swap (CAS)**: Atomic operations that check and update in one step
+2. **Optimistic Concurrency Control**: Detect conflicts and retry
+3. **Database Transactions**: Use database-level locking or transactions
+
+The locking approach shown above is simplest for multi-threaded Python applications.

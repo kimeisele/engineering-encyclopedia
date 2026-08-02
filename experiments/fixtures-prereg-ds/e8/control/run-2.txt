@@ -1,0 +1,270 @@
+Here's a comprehensive solution for a cache that invalidation based on source data changes:
+
+```python
+import time
+import threading
+from typing import Any, Callable, Optional, Dict, Tuple
+from collections import OrderedDict
+import hashlib
+import json
+
+class SourceAwareCache:
+    """
+    A cache that automatically invalidates entries when the source data changes.
+    Uses a combination of data fingerprinting and time-based checks.
+    """
+    
+    def __init__(self, max_size: int = 100, check_interval: float = 1.0):
+        """
+        Initialize the cache.
+        
+        Args:
+            max_size: Maximum number of entries to store
+            check_interval: How often to check for source changes (in seconds)
+        """
+        self.cache: OrderedDict[str, Tuple[Any, str, float]] = OrderedDict()
+        self.max_size = max_size
+        self.check_interval = check_interval
+        self.lock = threading.Lock()
+        self.source_fingerprints: Dict[str, str] = {}
+        
+    def _create_fingerprint(self, source_data: Any) -> str:
+        """Create a fingerprint of the source data to detect changes."""
+        try:
+            # Handle different data types
+            if isinstance(source_data, (dict, list, tuple)):
+                return hashlib.md5(
+                    json.dumps(source_data, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            elif isinstance(source_data, (str, int, float, bool, type(None))):
+                return hashlib.md5(str(source_data).encode()).hexdigest()
+            else:
+                # For other objects, use their repr
+                return hashlib.md5(repr(source_data).encode()).hexdigest()
+        except Exception:
+            # Fallback to a timestamp-based fingerprint
+            return f"{time.time()}_{id(source_data)}"
+    
+    def _extract_data(self, source_callable: Callable, *args, **kwargs) -> Tuple[Any, str]:
+        """
+        Extract data from source and create its fingerprint.
+        Returns (data, fingerprint).
+        """
+        data = source_callable(*args, **kwargs)
+        fingerprint = self._create_fingerprint(data)
+        return data, fingerprint
+    
+    def get(self, key: str, source_callable: Callable, *args, **kwargs) -> Any:
+        """
+        Get a cached value for a key. If not cached or source has changed,
+        fetch fresh data from the source callable.
+        
+        Args:
+            key: Cache key
+            source_callable: Callable that returns the source data
+            *args, **kwargs: Arguments for the source callable
+            
+        Returns:
+            The cached value (fresh or from cache if source hasn't changed)
+        """
+        with self.lock:
+            # Check if we have a cached value
+            if key in self.cache:
+                cached_data, cached_fingerprint, timestamp = self.cache[key]
+                
+                # Get current data from source to check if it changed
+                try:
+                    current_data, current_fingerprint = self._extract_data(source_callable, *args, **kwargs)
+                    
+                    # If fingerprints match, source hasn't changed, return cached
+                    if cached_fingerprint == current_fingerprint:
+                        return cached_data
+                    else:
+                        # Source has changed, update cache with new data
+                        self.cache[key] = (current_data, current_fingerprint, time.time())
+                        self._evict_if_needed()
+                        return current_data
+                        
+                except Exception as e:
+                    # If source call fails, return cached value (or raise if no cached)
+                    if cached_data is not None:
+                        print(f"Warning: Source call failed, using cached value. Error: {e}")
+                        return cached_data
+                    raise
+            else:
+                # No cached value, fetch from source
+                data, fingerprint = self._extract_data(source_callable, *args, **kwargs)
+                self.cache[key] = (data, fingerprint, time.time())
+                self._evict_if_needed()
+                return data
+    
+    def _evict_if_needed(self):
+        """Evict least recently used entries if cache is full."""
+        while len(self.cache) > self.max_size:
+            self.cache.popitem(last=False)  # Remove oldest entry
+    
+    def invalidate(self, key: str):
+        """Manually invalidate a cache entry."""
+        with self.lock:
+            if key in self.cache:
+                del self.cache[key]
+    
+    def clear(self):
+        """Clear all cached values."""
+        with self.lock:
+            self.cache.clear()
+    
+    def get_stats(self) -> Dict:
+        """Return cache statistics."""
+        with self.lock:
+            return {
+                'size': len(self.cache),
+                'max_size': self.max_size,
+                'keys': list(self.cache.keys())
+            }
+
+# Alternative implementation with proactive invalidation
+class ProactiveSourceAwareCache:
+    """
+    Cache that actively monitors source changes using a background thread.
+    More efficient for frequently changing sources with many cache entries.
+    """
+    
+    def __init__(self, max_size: int = 100, monitor_interval: float = 5.0):
+        self.cache: Dict[str, Tuple[Any, str]] = {}
+        self.source_fingerprints: Dict[str, str] = {}
+        self.max_size = max_size
+        self.monitor_interval = monitor_interval
+        self.lock = threading.Lock()
+        self.monitoring = False
+        self.monitor_thread = None
+        self.source_callables: Dict[str, tuple] = {}  # key -> (callable, args, kwargs)
+        
+    def _start_monitoring(self):
+        """Start background thread to monitor source changes."""
+        if not self.monitoring:
+            self.monitoring = True
+            self.monitor_thread = threading.Thread(target=self._monitor_sources, daemon=True)
+            self.monitor_thread.start()
+    
+    def _monitor_sources(self):
+        """Background monitoring of all sources for changes."""
+        while self.monitoring:
+            time.sleep(self.monitor_interval)
+            with self.lock:
+                for key, (callable_ref, args, kwargs) in self.source_callables.items():
+                    try:
+                        current_data = callable_ref(*args, **kwargs)
+                        current_fp = self._create_fingerprint(current_data)
+                        
+                        cached_fp = self.source_fingerprints.get(key)
+                        if cached_fp and current_fp != cached_fp:
+                            # Source changed, update cache
+                            self.cache[key] = (current_data, current_fp)
+                            self.source_fingerprints[key] = current_fp
+                            print(f"Cache entry '{key}' invalidated due to source change")
+                    except Exception:
+                        pass  # Ignore polling errors
+    
+    def _create_fingerprint(self, data: Any) -> str:
+        """Create fingerprint for data change detection."""
+        try:
+            return hashlib.md5(
+                json.dumps(data, sort_keys=True, default=str).encode()
+            ).hexdigest()
+        except:
+            return repr(data)
+    
+    def get(self, key: str, source_callable: Callable, *args, **kwargs) -> Any:
+        """Get cached value with proactive invalidation."""
+        self._start_monitoring()  # Ensure monitoring is running
+        
+        with self.lock:
+            # Store source callable for monitoring
+            self.source_callables[key] = (source_callable, args, kwargs)
+            
+            # Fetch current data and fingerprint
+            current_data = source_callable(*args, **kwargs)
+            current_fp = self._create_fingerprint(current_data)
+            
+            # Check if we have a cached version
+            if key in self.cache:
+                cached_data, cached_fp = self.cache[key]
+                if cached_fp == current_fp:
+                    return cached_data
+            
+            # Either not cached or source changed, update cache
+            self.cache[key] = (current_data, current_fp)
+            self.source_fingerprints[key] = current_fp
+            
+            # Evict if cache is full
+            while len(self.cache) > self.max_size:
+                # Remove oldest entry (we'll use insertion order approximation)
+                oldest_key = next(iter(self.cache))
+                del self.cache[oldest_key]
+                if oldest_key in self.source_fingerprints:
+                    del self.source_fingerprints[oldest_key]
+            
+            return current_data
+    
+    def stop_monitoring(self):
+        """Stop background monitoring."""
+        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=1.0)
+
+# Example usage
+if __name__ == "__main__":
+    # Example 1: Database-like source
+    class Database:
+        def __init__(self):
+            self.data = {"user": "Alice", "age": 30}
+        
+        def get_user(self):
+            return self.data.copy()  # Return a copy to avoid mutation
+        
+        def update_user(self, name=None, age=None):
+            if name: self.data["user"] = name
+            if age: self.data["age"] = age
+    
+    db = Database()
+    cache = SourceAwareCache(max_size=10)
+    
+    # First call - fetches from source
+    user1 = cache.get("user_profile", db.get_user)
+    print(f"First call: {user1}")
+    
+    # Second call - returns cached value (source hasn't changed)
+    user2 = cache.get("user_profile", db.get_user)
+    print(f"Second call: {user2} (cached)")
+    
+    # Update the source data
+    db.update_user(name="Bob")
+    
+    # Third call - source has changed, fetches fresh data
+    user3 = cache.get("user_profile", db.get_user)
+    print(f"Third call: {user3} (fresh, source changed)")
+    
+    # Example 2: File content caching
+    import os
+    import tempfile
+    
+    def read_file_content():
+        with open("example.txt", "r") as f:
+            return f.read()
+    
+    # Create initial file
+    with open("example.txt", "w") as f:
+        f.write("Version 1")
+    
+    cache2 = SourceAwareCache(max_size=5)
+    content1 = cache2.get("file_content", read_file_content)
+    print(f"File content (cached): {content1}")
+    
+    # Modify the file
+    with open("example.txt", "w") as f:
+        f.write("Version 2")
+    
+    content2 = cache2.get("file_content", read_file_content)
+    print(f"File content (after change): {content2}")
+```

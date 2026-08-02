@@ -1,0 +1,103 @@
+```python
+import threading
+from typing import Optional
+
+class AtomicCounter:
+    def __init__(self, initial_value: int = 0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def increment(self, amount: int = 1) -> None:
+        with self._lock:
+            self._value += amount
+
+    @property
+    def value(self) -> int:
+        with self._lock:
+            return self._value
+
+def update_counter(counter: AtomicCounter, amount: int) -> None:
+    counter.increment(amount)
+```
+
+---
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: What identifies the version of the state being changed?
+          answer: The lock itself identifies the version being changed by serializing access.
+          location: atomic_counter.py:1
+        - question: Is the conflict detected before or after the write?
+          answer: Conflict is detected before the write by acquiring the lock first.
+          location: atomic_counter.py:1
+        - question: How long is the lock held, and across what?
+          answer: The lock is held only during the critical section of the increment.
+          location: atomic_counter.py:1
+        - question: What happens when the conflict is detected?
+          answer: The second thread waits until the lock is released before proceeding.
+          location: atomic_counter.py:1
+      unanswered:
+        - question: What happens when the conflict is detected?
+          reason: Already answered in the same node.
+
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The counter value is shared and mutated in the increment method.
+          location: atomic_counter.py:1
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: Yes, the lock makes the read-modify-write sequence atomic.
+          location: atomic_counter.py:1
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock prevents simultaneous observation of the same value.
+          location: atomic_counter.py:1
+        - question: What happens if the check and the action are interleaved?
+          answer: The lock prevents interleaving by serializing access to the counter.
+          location: atomic_counter.py:1
+
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: Is the temp file created in the same directory as the target?
+          reason: Not applicable; this is a memory-based counter, not a file.
+        - question: Is the data flushed before the rename?
+          reason: Not applicable; no file operations are involved.
+        - question: What happens to the temp file if the write fails?
+          reason: Not applicable; no temp file or rename operation is used.
+        - question: Can two writers both rename over the target?
+          reason: Not applicable; no file operations are involved.
+
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered: []
+      unanswered:
+        - question: What identifies a cached entry, and does it include the source version?
+          reason: Not applicable; no caching mechanism is involved.
+        - question: What invalidates the entry, and is that tied to the source change?
+          reason: Not applicable; no caching mechanism is involved.
+        - question: What does a reader see between the source change and the invalidation?
+          reason: Not applicable; no caching mechanism is involved.
+        - question: What happens when the cache is empty and many readers arrive at once?
+          reason: Not applicable; no caching mechanism is involved.
+  not_applied:
+    - node: concurrency.locking-strategy
+      reason: Already applied.
+    - node: concurrency.race-conditions
+      reason: Already applied.
+    - node: python.files.atomic-replacement
+      reason: Not applicable to the task of updating a shared counter in memory.
+    - node: performance.cache-invalidation
+      reason: Not applicable to the task of updating a shared counter in memory.
+```

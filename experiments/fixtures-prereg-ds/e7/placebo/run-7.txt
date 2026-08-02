@@ -1,0 +1,78 @@
+```python
+import threading
+import itertools
+
+class SharedCounter:
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+        self._id_counter = itertools.count(1)
+
+    def increment(self, amount=1):
+        """Atomically add `amount` to the counter.
+        
+        Uses a lock to ensure that read-modify-write cycles are atomic,
+        so concurrent updates never lose increments.
+        
+        Returns the new counter value.
+        """
+        with self._lock:
+            self._value += amount
+            return self._value
+
+    def get_value(self):
+        with self._lock:
+            return self._value
+
+    def __repr__(self):
+        return f"SharedCounter(value={self._value})"
+
+
+# Alternative implementation using a threading.Condition-based approach
+# (also safe, but the Lock-based version above is simpler and sufficient)
+class SharedCounterConditional:
+    def __init__(self, initial=0):
+        self._value = initial
+        self._cond = threading.Condition()
+
+    def increment(self, amount=1):
+        with self._cond:
+            self._value += amount
+            return self._value
+
+    def get_value(self):
+        with self._cond:
+            return self._value
+
+
+# Example usage with two worker threads (demonstration)
+if __name__ == "__main__":
+    counter = SharedCounter()
+    worker_count = 2
+    increments_per_worker = 1000
+
+    def worker():
+        for _ in range(increments_per_worker):
+            counter.increment(1)
+
+    threads = [threading.Thread(target=worker) for _ in range(worker_count)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    expected = worker_count * increments_per_worker
+    actual = counter.get_value()
+    print(f"Expected: {expected}, Actual: {actual}, Match: {expected == actual}")
+```
+
+---APPLICATION REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied: []
+  not_applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      reason: The context pack node is about error message context and observability, which is unrelated to the requested task of implementing a thread-safe shared counter. No error-handling or logging requirements were specified.

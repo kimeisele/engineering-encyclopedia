@@ -1,0 +1,114 @@
+Here's the implementation using optimistic locking with a version field to detect conflicts:
+
+```python
+import threading
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class Counter:
+    value: int
+    version: int
+
+class CounterUpdater:
+    def __init__(self):
+        self._counter = Counter(value=0, version=0)
+        self._lock = threading.Lock()
+
+    def increment(self) -> bool:
+        """Increment the counter atomically.
+        Returns True if successful, False if conflict detected."""
+        while True:
+            with self._lock:
+                current = self._counter
+
+            # Simulate some processing time before update
+            # (In real code this might be network/database I/O)
+            new_value = current.value + 1
+
+            with self._lock:
+                # Verify version hasn't changed since we read it
+                if self._counter.version != current.version:
+                    continue  # Conflict detected, retry
+
+                # Update with new version
+                self._counter = Counter(value=new_value, version=current.version + 1)
+                return True
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: What identifies the version of the state being changed?
+          answer: The version field in the Counter dataclass identifies the state version.
+          location: counter.py:5
+        - question: Is the conflict detected before or after the write?
+          answer: Conflict is detected before the write by comparing versions.
+          location: counter.py:24
+        - question: How long is the lock held, and across what?
+          answer: Lock is held only during read and write operations, not across I/O.
+          location: counter.py:15,23
+        - question: What happens when the conflict is detected?
+          answer: The operation retries with the new version when conflict is detected.
+          location: counter.py:25
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The Counter object is shared and mutated in the increment method.
+          location: counter.py:5,27
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: No, but we make it effectively atomic with version checking.
+          location: counter.py:15-27
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, version checking ensures only one worker can claim an update.
+          location: counter.py:24
+        - question: What happens if the check and the action are interleaved?
+          answer: Version check prevents interleaving from causing lost updates.
+          location: counter.py:24
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: N/A - this implementation doesn't use file operations.
+          location: N/A
+        - question: Is the data flushed before the rename?
+          answer: N/A - this implementation doesn't use file operations.
+          location: N/A
+        - question: What happens to the temp file if the write fails?
+          answer: N/A - this implementation doesn't use file operations.
+          location: N/A
+        - question: Can two writers both rename over the target?
+          answer: N/A - this implementation doesn't use file operations.
+          location: N/A
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: N/A - this implementation doesn't use caching.
+          location: N/A
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: N/A - this implementation doesn't use caching.
+          location: N/A
+        - question: What does a reader see between the source change and the invalidation?
+          answer: N/A - this implementation doesn't use caching.
+          location: N/A
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: N/A - this implementation doesn't use caching.
+          location: N/A
+  not_applied:
+    - node: performance.cache-invalidation
+      reason: Not relevant to the counter update problem which doesn't involve caching
+```

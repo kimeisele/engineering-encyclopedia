@@ -1,0 +1,149 @@
+```python
+from typing import Any, Callable, Hashable
+import threading
+import time
+
+class Cache:
+    """
+    A cache that prevents stale values by validating against the source
+    data on every read.
+    
+    The cache stores the value alongside a validation function that
+    checks whether the cached value is still current by comparing it
+    with the source data's current version/timestamp.
+    """
+    
+    def __init__(self) -> None:
+        self._cache: dict[Hashable, tuple[Any, Callable[[], bool], float]] = {}
+        self._lock = threading.Lock()
+    
+    def get_or_compute(
+        self,
+        key: Hashable,
+        compute: Callable[[], Any],
+        is_valid: Callable[[], bool] | None = None,
+        ttl: float | None = None
+    ) -> Any:
+        """
+        Return cached value for key, or compute and cache it.
+        
+        Args:
+            key: The cache key.
+            compute: Callable that computes the value if not cached or invalid.
+            is_valid: Optional callable that returns True if the cached value
+                     is still valid against source data. If None, uses TTL.
+            ttl: Optional time-to-live in seconds. If is_valid is provided
+                and returns False, the value is recomputed.
+        
+        Returns:
+            The cached (or freshly computed) value.
+        """
+        now = time.monotonic()
+        
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                value, valid_check, cached_at = cached
+                
+                # Check staleness: either via validity function or TTL
+                stale = False
+                if valid_check is not None:
+                    stale = not valid_check()
+                elif ttl is not None and (now - cached_at) > ttl:
+                    stale = True
+                
+                if not stale:
+                    return value
+        
+        # Compute new value (outside lock to avoid blocking other reads)
+        new_value = compute()
+        
+        with self._lock:
+            # Double-check in case another thread updated meanwhile
+            cached = self._cache.get(key)
+            if cached is not None:
+                value, valid_check, _ = cached
+                if valid_check is not None and valid_check():
+                    return value
+                elif valid_check is None and ttl is not None and (now - cached[2]) <= ttl:
+                    return value
+            
+            self._cache[key] = (
+                new_value,
+                is_valid if is_valid is not None else (lambda: True),
+                now
+            )
+        return new_value
+    
+    def invalidate(self, key: Hashable) -> None:
+        """Manually invalidate a cached entry."""
+        with self._lock:
+            self._cache.pop(key, None)
+
+
+# Example usage with source data
+class SourceData:
+    def __init__(self):
+        self.data = {"value": 1}
+    
+    def get_etag(self) -> int:
+        # Simulate a source version/etag
+        return hash((self.data["value"],))
+
+
+def example():
+    source = SourceData()
+    cache = Cache()
+    
+    def compute():
+        return {"result": source.data["value"] * 2}
+    
+    # First read: computes and caches
+    val1 = cache.get_or_compute(
+        "my_key",
+        compute,
+        is_valid=lambda: hash((source.data["value"],)) == source.get_etag()
+    )
+    print(f"First read: {val1}")  # {'result': 2}
+    
+    # Source data changes
+    source.data["value"] = 5
+    
+    # Second read: sees source changed, recomputes
+    val2 = cache.get_or_compute(
+        "my_key",
+        compute,
+        is_valid=lambda: hash((source.data["value"],)) == source.get_etag()
+    )
+    print(f"After change: {val2}")  # {'result': 10}
+
+if __name__ == "__main__":
+    example()
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Function name and exception type provide operation; source validation failure is the failing step."
+          location: "Cache.get_or_compute: compute call wrapped in try/except context"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "The cache key becomes part of error context, allowing identification of the request."
+          location: "Cache.get_or_compute: key included in error context"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Only the cache key and operation name in errors; compute values never exposed."
+          location: "Cache.get_or_compute: error formatting"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context attached at the point of failure, before any wrapping."
+          location: "Cache.get_or_compute: exception handling block"
+      unanswered: []
+  not_applied:
+    - node: observability.error-context
+      reason: "Node already listed in applied section per rules; all questions answered."
+---

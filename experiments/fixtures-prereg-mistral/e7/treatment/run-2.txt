@@ -1,0 +1,117 @@
+Here's the implementation using optimistic locking with a version field to detect conflicts:
+
+```python
+import threading
+from dataclasses import dataclass
+
+@dataclass
+class Counter:
+    value: int
+    version: int = 0
+
+class CounterService:
+    def __init__(self):
+        self._counter = Counter(0)
+        self._lock = threading.Lock()
+
+    def increment(self) -> bool:
+        """Atomically increment the counter if no concurrent updates occurred.
+        Returns True if the increment succeeded, False if a conflict was detected."""
+        with self._lock:
+            current = self._counter
+            new_value = current.value + 1
+            new_version = current.version + 1
+
+        # Simulate potential concurrent update here
+        # In real code, this would be the actual update operation
+
+        # Try to commit the update
+        with self._lock:
+            if self._counter.version != current.version:
+                return False  # Conflict detected
+            self._counter = Counter(new_value, new_version)
+            return True
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: What identifies the version of the state being changed?
+          answer: The version field in the Counter dataclass identifies the state version.
+          location: file:counter_service.py:5
+        - question: Is the conflict detected before or after the write?
+          answer: Conflict is detected after the read but before the write commit.
+          location: file:counter_service.py:25
+        - question: How long is the lock held, and across what?
+          answer: Lock is held only during read and commit phases, not across I/O.
+          location: file:counter_service.py:15
+        - question: What happens when the conflict is detected?
+          answer: The operation returns False indicating the update was lost.
+          location: file:counter_service.py:26
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The Counter object is shared and mutated in the CounterService class.
+          location: file:counter_service.py:5
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: No, but we make it effectively atomic using version checks.
+          location: file:counter_service.py:15
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, because we use version numbers to detect concurrent access.
+          location: file:counter_service.py:25
+        - question: What happens if the check and the action are interleaved?
+          answer: The version check detects the interleaving and prevents lost updates.
+          location: file:counter_service.py:25
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Not applicable - we're not using file operations in this solution.
+          location: file:counter_service.py:1
+        - question: Is the data flushed before the rename?
+          answer: Not applicable - no file operations are performed.
+          location: file:counter_service.py:1
+        - question: What happens to the temp file if the write fails?
+          answer: Not applicable - no temp files are created.
+          location: file:counter_service.py:1
+        - question: Can two writers both rename over the target?
+          answer: Not applicable - no file operations are performed.
+          location: file:counter_service.py:1
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: Not applicable - we're not using caching in this solution.
+          location: file:counter_service.py:1
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: Not applicable - no caching is involved.
+          location: file:counter_service.py:1
+        - question: What does a reader see between the source change and the invalidation?
+          answer: Not applicable - no caching is involved.
+          location: file:counter_service.py:1
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: Not applicable - no caching is involved.
+          location: file:counter_service.py:1
+  not_applied:
+    - node: concurrency.locking-strategy
+      reason: All questions were answered for this node.
+    - node: concurrency.race-conditions
+      reason: All questions were answered for this node.
+    - node: python.files.atomic-replacement
+      reason: All questions were answered for this node (with "not applicable" answers).
+    - node: performance.cache-invalidation
+      reason: All questions were answered for this node (with "not applicable" answers).
+```
