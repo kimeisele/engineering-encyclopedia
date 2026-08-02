@@ -36,6 +36,33 @@ When writing a node:
 Evidence: `docs/UNDERDETERMINED_NODES.md`,
 `docs/CONVERGENCE_ANALYSIS.md`, `docs/CONVERGENCE_PREREGISTRATION_RESULTS.md`.
 
+## Review rule: a node must not merely list options
+
+A review rule, not a schema field — `encyclopedia validate` will not
+enforce it; a human reviewer must. Reject any proposed node that does
+nothing but list equivalent options. Every node must satisfy **at least
+one** of three escape clauses:
+
+1. **It names a safe default technique** — one primary technique the task
+   should take (`python.files.atomic-replacement`: write a temp file,
+   fsync, then `os.replace`; `reliability.circuit-breaker`: a
+   rolling-window failure threshold with a single half-open probe).
+2. **Its questions decide between the alternatives** — concrete, answerable
+   questions (each with a location in the report contract) whose answers
+   settle which alternative applies to the task at hand.
+3. **It states plainly what information the task is missing** — an explicit
+   "choose this when X is known / Y is known" boundary, so the node
+   underdetermines deliberately rather than by omission.
+
+A node that lists options with conditions the task cannot settle
+(`performance.cache-invalidation` is the documented example) fails this
+rule: it underdetermines convergence — the pre-registered e8 test measured
+the two providers moving in opposite directions.
+
+This extends the decide-versus-list guidance above: that section describes
+how nodes behave across providers; this rule is what a reviewer checks
+before a node enters the corpus.
+
 ## Node schema and limits
 
 Nodes live in `knowledge/<area>/<name>.yaml` and must satisfy the Section 3
