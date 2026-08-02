@@ -1,0 +1,85 @@
+id: apis.partial-updates
+version: 1
+title: Partial updates
+kind: pattern
+status: established
+
+summary: >
+  PUT replaces the whole resource; PATCH applies a partial update. A PUT
+  that merges fields instead breaks clients that rely on full replacement,
+  and PATCH semantics (merge versus RFC 7396) must be declared.
+
+intent_signals:
+  - update one field
+  - put endpoint
+  - patch
+  - partial update
+  - merge fields
+  - overwrite the record
+  - update just the name
+  - save the changes
+
+applies_when:
+  - an endpoint mutates a stored resource
+  - clients update a subset of fields at a time
+
+does_not_apply_when:
+  - the resource is created and replaced atomically with no partial state
+
+does_not_imply:
+  - that PATCH is always a shallow merge
+  - that omitted fields are never cleared
+  - that PUT cannot be used for partial intent
+  - that concurrent updates cannot be lost
+
+questions:
+  - Does PUT replace the resource entirely, or does it merge fields?
+  - Is PATCH's semantics declared — merge, JSON Patch, or custom?
+  - What happens to fields omitted from a partial update — unchanged or cleared?
+  - Are concurrent partial updates applied atomically, or are last-write-wins losses accepted?
+
+techniques:
+  - PUT means full replace, PATCH means declared partial semantics
+  - explicit null handling where null clears and absence leaves unchanged
+  - optimistic concurrency via a version or etag field
+  - whole-document read-modify-write with a lock or compare-and-swap
+
+risks:
+  - a PUT that merges instead of replacing
+  - a PATCH that silently clears omitted fields
+  - lost concurrent updates with no conflict signal
+  - null meaning both remove and unset depending on the field
+
+tradeoffs:
+  - technique: merge semantics
+    benefit: simple for clients
+    cost: ambiguity about clears
+    choose_when: most fields are simple scalars
+  - technique: RFC 7396 JSON Patch
+    benefit: explicit operations
+    cost: more complex clients
+    choose_when: array or nested-field updates dominate
+
+relations:
+  related:
+    - apis.versioning
+  requires_consideration_of:
+    - concurrency.race-conditions
+
+contexts:
+  languages: [any]
+  project_types: [web-service, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    PUT-that-merges and silent field clearing are recurring contract
+    defects; declaring replace-versus-partial is the design decision this
+    node forces. The concurrency relation records that partial updates
+    race with each other.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [put, patch, partial updates, merge, resource replacement, updates]

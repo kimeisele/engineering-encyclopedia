@@ -1,0 +1,86 @@
+id: apis.request-timeouts
+version: 1
+title: Request timeouts
+kind: guideline
+status: established
+
+summary: >
+  Every outbound call has a timeout — connect and read. A missing timeout
+  turns a slow dependency into a hung caller; the default of no timeout is
+  the failure, not a convenience.
+
+intent_signals:
+  - timeout
+  - request hangs
+  - no timeout
+  - connect timeout
+  - read timeout
+  - call never returns
+  - slow api
+  - hung request
+
+applies_when:
+  - the process makes outbound network calls
+  - a dependency can be slow, overloaded, or dead
+
+does_not_apply_when:
+  - a pure local computation with no I/O
+
+does_not_imply:
+  - that a timeout alone fixes a slow dependency
+  - that retrying after a timeout is always safe
+  - that a single global timeout fits every dependency
+  - that firing a timeout stops the underlying work
+
+questions:
+  - Does every outbound client set a connect and a read timeout?
+  - What happens when the timeout fires, and is the error surfaced?
+  - Is the timeout value chosen per dependency, not one global constant?
+  - Is the caller's own deadline propagated through the call?
+
+techniques:
+  - explicit per-call connect and read timeouts
+  - deadline and context propagation across calls
+  - timeout errors mapped to retryable or non-retryable outcomes
+  - distinguishing connect failures from read timeouts
+
+risks:
+  - an infinite default that hangs the caller
+  - one global timeout for fast and slow dependencies alike
+  - a timeout that fires while the work keeps running
+  - swallowing timeout errors and returning empty results
+
+tradeoffs:
+  - technique: short timeouts with retries
+    benefit: fast failure
+    cost: retry amplification under load
+    choose_when: the dependency is fast
+  - technique: generous timeouts without retries
+    benefit: fewer duplicate requests
+    cost: longer worst-case latency
+    choose_when: the dependency is slow but stable
+
+relations:
+  related:
+    - reliability.retry-semantics
+  requires_consideration_of:
+    - reliability.circuit-breaker
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, cli, automation]
+  lifecycle_stages: [implementation, review, debugging]
+
+provenance:
+  origin: curated
+  rationale: >
+    Hung requests from missing timeouts are a recurring operational
+    failure; setting and propagating deadlines is a per-call design
+    decision. The retry relation records that a timeout is the classic
+    retryable signal, and the circuit relation that repeated timeouts
+    should trip a breaker.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [timeouts, deadlines, connect timeout, read timeout, hangs, propagation]

@@ -73,3 +73,25 @@
 - query: "write the query with parameters so user input cannot cause sql injection"
   required: [security.injection]
   forbidden_to_dominate: [security.input-validation]
+
+# Batch B (Slice 6): APIs and compatibility nodes
+
+- query: "we are changing the api and old clients will break"
+  required: [apis.versioning]
+  forbidden_to_dominate: [apis.partial-updates]
+
+- query: "list all the users in one request"
+  required: [apis.pagination]
+  forbidden_to_dominate: [performance.cache-invalidation]
+
+- query: "return an error response with the right status code"
+  required: [apis.http-status-semantics]
+  forbidden_to_dominate: [reliability.retry-semantics]
+
+- query: "the http call hangs forever, add a timeout"
+  required: [apis.request-timeouts]
+  forbidden_to_dominate: [reliability.circuit-breaker]
+
+- query: "update just one field of the resource"
+  required: [apis.partial-updates]
+  forbidden_to_dominate: [apis.versioning]

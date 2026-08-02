@@ -1,0 +1,85 @@
+id: apis.pagination
+version: 1
+title: Pagination
+kind: pattern
+status: established
+
+summary: >
+  List endpoints return bounded pages with a stable order. Offset
+  pagination breaks when rows change between requests; cursor pagination
+  does not. Never return an unbounded list.
+
+intent_signals:
+  - list all
+  - paginate
+  - next page
+  - offset
+  - cursor
+  - large result set
+  - fetch every record
+  - page size
+
+applies_when:
+  - an endpoint can return many rows
+  - rows can be inserted or deleted while consumers page
+
+does_not_apply_when:
+  - the result set is small and bounded by construction
+
+does_not_imply:
+  - that a page size alone makes ordering stable
+  - that cursors hide internal ids from clients
+  - that total counts are cheap to compute
+  - that pagination replaces filtering
+
+questions:
+  - Is every list endpoint bounded by a page size?
+  - What orders the rows, and is that order stable across pages?
+  - Does offset drift under concurrent inserts or deletes — is a cursor needed?
+  - Is the total-count computation cheap enough to run per request?
+
+techniques:
+  - cursor or keyset pagination over a stable sort key
+  - bounded page size enforced server-side
+  - opaque next-page tokens
+  - count queries only when the caller needs the total
+
+risks:
+  - unbounded full-table fetches
+  - offset drift under inserts or deletes
+  - ordering that changes between pages
+  - exposing internal ids or offsets in cursors
+
+tradeoffs:
+  - technique: offset pagination
+    benefit: simple and jumpable
+    cost: unstable when rows change
+    choose_when: static or append-only data
+  - technique: cursor pagination
+    benefit: stable under concurrent writes
+    cost: no arbitrary jumps
+    choose_when: data changes while consumers page
+
+relations:
+  related:
+    - apis.http-status-semantics
+  requires_consideration_of:
+    - performance.cache-invalidation
+
+contexts:
+  languages: [any]
+  project_types: [web-service, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Unbounded list endpoints and offset drift are recurring failures; the
+    cursor-versus-offset choice is a genuine design decision the task must
+    settle. The cache relation records that paged results go stale when
+    rows change.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [pagination, cursors, offset, keyset, page size, list endpoints]

@@ -1,0 +1,87 @@
+id: apis.versioning
+version: 1
+title: API versioning
+kind: principle
+status: established
+
+summary: >
+  A published API contract is a promise. Changes are additive first;
+  breaking changes need a deprecation path and a versioned alternative,
+  never a silent removal or a renamed field with different semantics.
+
+intent_signals:
+  - breaking change
+  - api version
+  - v2 endpoint
+  - deprecate
+  - backward compatible
+  - removed a field
+  - contract change
+  - old clients break
+
+applies_when:
+  - a contract is consumed outside the owning team
+  - responses or requests are stored or cached by consumers
+  - a field's meaning or presence is changing
+
+does_not_apply_when:
+  - the API has no consumers yet and nothing is published
+
+does_not_imply:
+  - that versioning removes the need for care
+  - that internal services are exempt
+  - that any addition is safe
+  - that URL versioning alone protects the body
+
+questions:
+  - Is the change additive, or does it alter or remove existing behavior?
+  - Is there a deprecation path with a deadline for consumers?
+  - How is the version signalled, and is the old version still served?
+  - Is the old contract still tested during the transition?
+
+techniques:
+  - additive fields with defaults that preserve behavior
+  - versioned routes or headers with old versions still served
+  - deprecation notices plus a documented removal schedule
+  - dual-run and comparison of old and new behavior
+
+risks:
+  - removing a field silently
+  - reusing a name with different semantics
+  - versioning the URL while changing the body anyway
+  - a new required field breaking existing consumers
+
+tradeoffs:
+  - technique: additive-only changes
+    benefit: no consumer coordination
+    cost: accumulates legacy surface
+    choose_when: the contract is widely consumed
+  - technique: explicit major versions
+    benefit: clean contract boundaries
+    cost: parallel implementations to maintain
+    choose_when: breaking changes are frequent
+
+relations:
+  related:
+    - apis.partial-updates
+    - apis.pagination
+  requires_consideration_of:
+    - testing.coverage-limitations
+
+contexts:
+  languages: [any]
+  project_types: [web-service, library, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Breaking published contracts is a recurring failure class in generated
+    code, which tends to edit fields in place. The questions force the
+    transition path to be named, and the coverage relation records that the
+    old contract needs tests during the transition.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [api versioning, breaking changes, deprecation, backward compatibility, contract]
