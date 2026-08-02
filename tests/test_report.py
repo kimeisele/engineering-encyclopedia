@@ -395,6 +395,77 @@ class TestVerifyReport(unittest.TestCase):
         codes = [f["code"] for f in failures]
         self.assertTrue(any(c in ("unreadable", "invalid_yaml") for c in codes), codes)
 
+    # -- mechanical --root location checks (Slice 3) --------------------------
+
+    def _verify_with_root(self, report=None):
+        root = self.tmpdir / "root"
+        (root / "sub").mkdir(parents=True, exist_ok=True)
+        (root / "worker.py").write_text(
+            "\n".join(f"line {i}" for i in range(1, 50)), encoding="utf-8"
+        )
+        (root / "sub" / "deep.py").write_text("x\ny\nz\n", encoding="utf-8")
+        report = report or yaml.safe_load(yaml.safe_dump(self.report))
+        path = self.tmpdir / "root_report.yaml"
+        path.write_text(yaml.safe_dump(report, sort_keys=True), encoding="utf-8")
+        return verify_report(path, self.pack_path, self.nodes, root=root)
+
+    def _set_locations(self, locations):
+        report = yaml.safe_load(yaml.safe_dump(self.report))
+        qa = report["application_report"]["applied"][0]["questions_answered"]
+        for i, location in enumerate(locations):
+            qa[i]["location"] = location
+        return report
+
+    def test_root_accepts_valid_locations(self):
+        ok, failures, _ = self._verify_with_root(
+            self._set_locations(
+                ["worker.py:3", "worker.py:3-48", "sub/deep.py:2", "worker.py:49"]
+            )
+        )
+        self.assertTrue(ok, msg=failures)
+        self.assertEqual(failures, [])
+
+    def test_root_rejects_bad_format(self):
+        ok, failures, _ = self._verify_with_root(self._set_locations(["worker.py"]))
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "location_format" for f in failures))
+
+    def test_root_rejects_path_traversal(self):
+        ok, failures, _ = self._verify_with_root(
+            self._set_locations(["../secrets.py:1"])
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "location_traversal" for f in failures))
+
+    def test_root_rejects_absolute_path(self):
+        ok, failures, _ = self._verify_with_root(
+            self._set_locations(["/etc/passwd:1"])
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "location_traversal" for f in failures))
+
+    def test_root_rejects_missing_file(self):
+        ok, failures, _ = self._verify_with_root(self._set_locations(["nope.py:1"]))
+        self.assertFalse(ok)
+        self.assertTrue(any(f["code"] == "location_file_missing" for f in failures))
+
+    def test_root_rejects_out_of_range_line(self):
+        ok, failures, _ = self._verify_with_root(self._set_locations(["worker.py:99"]))
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(f["code"] == "location_line_out_of_range" for f in failures)
+        )
+
+    def test_root_checks_every_answered_location(self):
+        # fixing only the first location must not pass: every answered
+        # location is checked, and the rest still resolve outside the root
+        report = self._set_locations(["worker.py:1"])
+        ok, failures, _ = self._verify_with_root(report)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(f["code"] == "location_file_missing" for f in failures)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
