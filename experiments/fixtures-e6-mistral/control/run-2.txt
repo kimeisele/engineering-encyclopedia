@@ -1,0 +1,5 @@
+The report claims:
+
+1. "process() records each completed job before returning" (worker.py:5) — **Not supported**. The diff shows that `process()` raises a `ValueError` if `compute(job_id)` returns `None`, but there is no code in the diff that records or tracks completed jobs.
+
+2. "retries are bounded to three attempts" (worker.py:15) — **Not supported**. The diff does not show any retry logic or bounded attempts. The `run()` function iterates over `range(3)` and calls `process(job)` once per job, with no retry mechanism.

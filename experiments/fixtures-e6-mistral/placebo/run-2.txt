@@ -1,0 +1,60 @@
+The report claims two things that are not supported by the diff or raw output:
+
+1. "process() records each completed job before returning" (worker.py:5) - The diff shows no code related to recording completed jobs at line 5 (which is the `compute(job_id)` function definition).
+2. "retries are bounded to three attempts" (worker.py:15) - The diff shows no retry logic at line 15 (which is the `print(process(job))` line in the `run()` function). There is no evidence of retry attempts in the code.
+
+---
+
+APPLICATION_REPORT
+knowledge_revision: a5484fc23ed4
+context_pack_hash: 2771a9b666ad
+applied:
+  - node: 20ed9656a731
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error message identifies the job but not the operation or failing step.
+        location: worker.py:10
+      - question: Can the operator find the request or job from the message?
+        answer: Yes, the job ID is included in the error message.
+        location: worker.py:10
+      - question: Is sensitive data excluded from the message?
+        answer: No sensitive data is present in the message.
+        location: worker.py:10
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at raise time (bare ValueError).
+        location: worker.py:10
+  - node: 20ed9656a731
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error message identifies the job but not the operation or failing step.
+        location: worker.py:10
+      - question: Can the operator find the request or job from the message?
+        answer: Yes, the job ID is included in the error message.
+        location: worker.py:10
+      - question: Is sensitive data excluded from the message?
+        answer: No sensitive data is present in the message.
+        location: worker.py:10
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at raise time (bare ValueError).
+        location: worker.py:10
+  - node: 20ed9656a731
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error message identifies the job but not the operation or failing step.
+        location: worker.py:10
+      - question: Can the operator find the request or job from the message?
+        answer: Yes, the job ID is included in the error message.
+        location: worker.py:10
+      - question: Is sensitive data excluded from the message?
+        answer: No sensitive data is present in the message.
+        location: worker.py:10
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at raise time (bare ValueError).
+        location: worker.py:10
+not_applied: []

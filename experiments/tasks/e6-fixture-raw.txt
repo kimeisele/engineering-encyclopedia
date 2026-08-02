@@ -1,0 +1,5 @@
+$ python worker.py
+0
+2
+error: job 1 failed
+4

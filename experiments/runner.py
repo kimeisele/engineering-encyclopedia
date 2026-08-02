@@ -171,9 +171,37 @@ def rubric_for(task: str) -> Dict[str, Any]:
     return data
 
 
+# E6 location metric: a finding without a resolvable location is not a
+# finding. The E6 task's diff defines the only valid locations — file
+# "worker.py", new-file lines 1..22 (see experiments/tasks/e6-fixture-diff.txt).
+E6_VALID_LOCATIONS = {("worker.py", n) for n in range(1, 23)}
+
+
+def e6_locations(artifact: str) -> Dict[str, int]:
+    """Count cited and resolvable file:line locations in an E6 review.
+
+    A citation is ``worker.py:<n>`` (or a bare ``line <n>`` reference) and is
+    resolvable iff that exact line exists in the E6 diff's new file.
+    """
+    cited = set()
+    for match in re.finditer(r"\bworker\.py\s*[:@]\s*(\d+)", artifact):
+        cited.add(("worker.py", int(match.group(1))))
+    for match in re.finditer(r"\bline\s+(\d+)\b", artifact, re.IGNORECASE):
+        cited.add(("worker.py", int(match.group(1))))
+    resolvable = {loc for loc in cited if loc in E6_VALID_LOCATIONS}
+    return {"cited": len(cited), "resolvable": len(resolvable)}
+
+
 def score_code(task: str, code: str) -> Dict[str, Any]:
     rubric = rubric_for(task)
-    artifact = strip_comments(extract_artifact(code))
+    # e6's artifact is prose (a review): strip_comments would eat "#" (e.g.
+    # "PR #7"); extract_artifact is still applied to drop the model's own
+    # application_report section below the delimiter. See the e6 rubric's
+    # description (scoring caveat).
+    if task == "e6":
+        artifact = extract_artifact(code)
+    else:
+        artifact = strip_comments(extract_artifact(code))
     results = []
     score = 0
     for criterion in rubric["criteria"]:

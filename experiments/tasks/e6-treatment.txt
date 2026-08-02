@@ -1,0 +1,190 @@
+TASK
+A change was made to worker.py. Below are the diff, a report describing the change, and the raw output of a test run.
+
+DIFF:
+--- a/worker.py
++++ b/worker.py
+@@ -0,0 +1,22 @@
++import time
++import random
++
++def process(job_id):
++    result = compute(job_id)
++    if result is None:
++        raise ValueError(f"job {job_id} failed")
++    return result
++
++def compute(job_id):
++    time.sleep(0.5)
++    return job_id * 2
++
++def run():
++    for job in range(3):
++        try:
++            print(process(job))
++        except ValueError as e:
++            print(f"error: {e}")
++
++if __name__ == "__main__":
++    run()
+
+REPORT:
+The change makes processing idempotent: process() records each completed job
+before returning (worker.py:5), and retries are bounded to three attempts
+(worker.py:15). The test run completed without errors (see raw output).
+
+RAW OUTPUT:
+$ python worker.py
+0
+2
+error: job 1 failed
+4
+
+Review the report against the diff and the raw output. Return every claim in the report that is not supported, each with a location (file and line that actually exist in the diff). If a claim is supported, do not list it.
+
+CONTEXT PACK
+You receive the following context pack of engineering knowledge.
+
+context_pack:
+  primary:
+  - does_not_imply:
+    - that every claim needs a quote
+    - that a location makes a claim true
+    - that more questions make the review stricter
+    - that the reviewer's verdict replaces the evidence
+    hash: 51fcb6b65bce
+    id: review.unsupported-claims
+    questions:
+    - Which claim in the report is not covered by the raw output?
+    - Which part of the order is unaddressed?
+    - Which alternative explanation was not excluded?
+    - Which contradiction with an earlier decision exists?
+    - What was smoothed over that should remain open?
+    relevance: verify the report against the raw output
+    risks:
+    - questions answerable without looking at the artifact
+    - a verdict that restates the report instead of checking it
+    - locations that name the file but not the claim
+    - an attitude word instead of a check
+    summary: 'A review instruction is only verifiable when it is a contract: fixed
+      questions that must be answered with a location in the artifact under review.
+      "Verify, don''t believe" is an attitude; "which claim is not covered by the
+      raw output" is a check. The decision is which questions make a claim falsifiable
+      against the diff, the report and the raw output.
+
+      '
+    version: 1
+  - does_not_imply:
+    - exactly-once delivery
+    - absence of concurrency
+    - transactional safety across systems
+    - that a retry loop is now correct
+    hash: 4cbc1598c0d7
+    id: reliability.idempotency
+    questions:
+    - What value identifies one logical operation, and where does it come from?
+    - Where is completion recorded, and is that record durable before the effect?
+    - What state remains after a failure between effect and completion record?
+    - Can two workers observe the same operation as not-yet-done simultaneously?
+    relevance: a worker must not process the same job twice
+    risks:
+    - check-then-act races between the completion lookup and the effect
+    - deduplication state that is not durable across process restart
+    - keys derived from timestamps or request arrival order
+    summary: 'An idempotent operation can be repeated for the same logical intent
+      without producing unintended additional effects. Repetition is made safe by
+      identity and recorded completion, not by hoping the operation runs only once.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that the operation is idempotent
+    - that retrying will eventually succeed
+    - that more attempts make the system more reliable
+    - that backoff alone prevents overload
+    hash: 5f6b8be02160
+    id: reliability.retry-semantics
+    questions:
+    - What happens when the same attempt is delivered more than once?
+    - How many attempts are allowed, and what happens after the last one?
+    - How is the wait between attempts chosen, and is jitter added?
+    - Is the retry budget shared across workers or per attempt?
+    relevance: retry the job after it fails
+    risks:
+    - retry storms when many clients retry in lockstep
+    - retrying operations that are not idempotent
+    - unbounded retries masking a real outage
+    summary: 'A retry repeats an operation that failed. Retrying is only correct when
+      the operation is safe to repeat, the retry budget is explicit, and backoff prevents
+      amplification; a retry without a policy is a loop that hides the failure.
+
+      '
+    version: 1
+  supporting: []
+context_pack_hash: 25cfc708c44a
+knowledge_revision: 96bf58e88848
+request:
+  original: 'A change was made to worker.py. Below are the diff, a report describing
+    the change, and the raw output of a test run. DIFF: --- a/worker.py +++ b/worker.py
+    @@ -0,0 +1,22 @@ +import time +import random + +def process(job_id): + result
+    = compute(job_id) + if result is None: + raise ValueError(f"job {job_id} failed")
+    + return result + +def compute(job_id): + time.sleep(0.5) + return job_id * 2
+    + +def run(): + for job in range(3): + try: + print(process(job)) + except ValueError
+    as e: + print(f"error: {e}") + +if __name__ == "__main__": + run() REPORT: The
+    change makes processing idempotent: process() records each completed job before
+    returning (worker.py:5), and retries are bounded to three attempts (worker.py:15).
+    The test run completed without errors (see raw output). RAW OUTPUT: $ python worker.py
+    0 2 error: job 1 failed 4 Review the report against the diff and the raw output.
+    Return every claim in the report that is not supported, each with a location (file
+    and line that actually exist in the diff). If a claim is supported, do not list
+    it.'
+retrieval_backend: fts5
+trace:
+  excluded:
+  - testing.evaluation-contamination
+  - python.processes.subprocess-safety
+  - concurrency.race-conditions
+  - testing.coverage-limitations
+  - reliability.outbox-pattern
+  selected:
+  - review.unsupported-claims
+  - reliability.idempotency
+  - reliability.retry-semantics
+  truncated: true
+
+APPLICATION REPORT
+Alongside your code, return an application report in this exact YAML form:
+
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: <node id from the pack>
+      version: <version of that node>
+      hash: <hash of that node>
+      questions_answered:
+        - question: "<a question of that node, copied verbatim>"
+          answer: "<your answer, non-empty, at most 40 words>"
+          location: "<file:line where you applied it>"
+      unanswered:
+        - question: "<a question of that node, copied verbatim>"
+          reason: "<why you did not answer it>"
+  not_applied:
+    - node: <any other node id from the pack>
+      reason: "<why you did not apply it>"
+
+Rules:
+- Every node in the pack must appear exactly once across `applied` and
+  `not_applied`. Omission, duplication and double-listing all fail.
+- Questions must be copied verbatim from the node's `questions` list in the
+  pack; altered question text fails.
+- Every question of an applied node must appear in `questions_answered` or
+  `unanswered`.
+- Answers are non-empty and at most 40 words; locations are non-empty;
+  every `not_applied` entry has a non-empty reason.
+
+FORMAT
+Separate your implementation from the application report with the exact
+line: ---APPLICATION_REPORT---
+Everything above that line is the artifact to be evaluated; everything
+below it is the report.

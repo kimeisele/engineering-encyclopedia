@@ -1,0 +1,32 @@
+The report claims that "process() records each completed job before returning" and "retries are bounded to three attempts", but neither claim is supported by the diff or raw output.
+
+- The diff shows no code related to recording completed jobs (worker.py:5)
+- The diff shows no retry logic or bounded attempts (worker.py:15)
+
+application_report:
+  knowledge_revision: a5484fc23ed4
+  context_pack_hash: 2771a9b666ad
+  applied:
+    - node: 20ed9656a731
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: No, the error message only shows the job ID but not the failing step.
+          location: worker.py:10
+        - question: Can the operator find the request or job from the message?
+          answer: Yes, the job ID is included in the error message.
+          location: worker.py:10
+        - question: Is sensitive data excluded from the message?
+          answer: N/A - no sensitive data in message.
+          location: worker.py:10
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: N/A - no exception wrapping occurs.
+          location: worker.py:10
+      unanswered: []
+  not_applied:
+    - node: 20ed9656a731
+      reason: duplicate node (same hash and content)
+    - node: 20ed9656a731
+      reason: duplicate node (same hash and content)
+---APPLICATION_REPORT---

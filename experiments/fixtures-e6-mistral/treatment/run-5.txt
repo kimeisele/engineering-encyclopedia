@@ -1,0 +1,50 @@
+The report claims that the change makes processing idempotent by recording completed jobs before returning (worker.py:5) and that retries are bounded to three attempts (worker.py:15). However, the diff shows no such recording mechanism in `process()` (line 5) or any retry logic in `run()` (line 15). The raw output also shows no retries—only a single attempt per job. Thus, the claims about idempotency and bounded retries are unsupported.
+
+---
+
+APPLICATION_REPORT
+knowledge_revision: 96bf58e88848
+context_pack_hash: 25cfc708c44a
+applied:
+  - node: review.unsupported-claims
+    version: 1
+    hash: 51fcb6b65bce
+    questions_answered:
+      - question: "Which claim in the report is not covered by the raw output?"
+        answer: "The claim about retries bounded to three attempts is not covered."
+        location: "worker.py:15"
+      - question: "Which part of the order is unaddressed?"
+        answer: "No retry logic or completion recording is implemented."
+        location: "worker.py:5"
+    unanswered: []
+  - node: reliability.idempotency
+    version: 1
+    hash: 4cbc1598c0d7
+    questions_answered:
+      - question: "What value identifies one logical operation, and where does it come from?"
+        answer: "No operation identifier exists; job_id is used but not recorded."
+        location: "worker.py:5"
+      - question: "Where is completion recorded, and is that record durable before the effect?"
+        answer: "No completion record is written before returning."
+        location: "worker.py:5"
+    unanswered:
+      - question: "What state remains after a failure between effect and completion record?"
+        reason: "No completion record is written, so state is undefined."
+      - question: "Can two workers observe the same operation as not-yet-done simultaneously?"
+        reason: "No deduplication mechanism exists."
+  - node: reliability.retry-semantics
+    version: 1
+    hash: 5f6b8be02160
+    questions_answered:
+      - question: "What happens when the same attempt is delivered more than once?"
+        answer: "No retry logic exists; each job runs once."
+        location: "worker.py:15"
+      - question: "How many attempts are allowed, and what happens after the last one?"
+        answer: "No attempts are allowed; only one attempt per job."
+        location: "worker.py:15"
+    unanswered:
+      - question: "How is the wait between attempts chosen, and is jitter added?"
+        reason: "No retry mechanism exists."
+      - question: "Is the retry budget shared across workers or per attempt?"
+        reason: "No retry budget exists."
+not_applied: []

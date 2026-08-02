@@ -1,0 +1,10 @@
+The report contains several claims that are not supported by the diff:
+
+1. **"process() records each completed job before returning (worker.py:5)"**  
+   - The diff shows no recording or persistence mechanism anywhere in `process()`. Line 5 in the diff is `result = compute(job_id)`, which does not involve recording.
+
+2. **"retries are bounded to three attempts (worker.py:15)"**  
+   - The diff shows no retry logic at all. Line 15 in the diff is `def run():`, and there is no loop with retries. The `run()` function iterates over `range(3)` but does not retry failed jobs—it simply catches the exception once and moves on. The claim of "bounded retries" is unsupported.
+
+3. **"The test run completed without errors"**  
+   - The raw output shows `error: job 1 failed` which is an explicit error message printed by the program. Therefore, the test run did not complete "without errors"—it encountered a failure (job 1) and logged it.

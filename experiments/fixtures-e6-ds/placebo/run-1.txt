@@ -1,0 +1,43 @@
+The report contains three claims. Let me verify each against the diff and raw output.
+
+**Claim 1: "process() records each completed job before returning (worker.py:5)"**
+- The diff shows worker.py lines 1-22. Line 5 is `return result` inside `process()`. There is no code that records anything. The function just computes and returns. This claim is not supported.
+
+**Claim 2: "retries are bounded to three attempts (worker.py:15)"**
+- The diff shows line 15 is `print(f"error: {e}")`. The `run()` function has a simple `for job in range(3)` loop, which iterates over jobs 0, 1, 2. There is no retry logic anywhere — no retry loop, no attempt counter. The loop runs three jobs, not three retries of the same job. This claim is not supported.
+
+**Claim 3: "The test run completed without errors"**
+- Raw output shows: `error: job 1 failed`. This is an error message printed to output. The run did encounter a failure (though it was caught). The claim says "without errors" — while the script didn't crash, it did print an error. The claim is misleading and not supported by the raw output.
+
+Now, locations in the diff:
+- For Claim 1: the diff has no line 5 containing "records" — the actual line 5 is `return result`. Since the claim references worker.py:5, and that line exists in the diff (line 5), we point to it.
+- For Claim 2: worker.py:15 exists in the diff (the print error line), so we point there.
+- For Claim 3: there is no specific line for "completed without errors" — the raw output contradicts it, so the claim is not supported at all. But the report doesn't cite a line for that claim. Since we must give a location, we can cite the whole file or a relevant line. The most defensible is to cite line 13-17 where the loop and error handling occur, but the diff shows line 15 is the error print. We'll cite that.
+
+**Answer format**: Return every unsupported claim, each with location. Don't list supported claims. (None are supported here.)
+
+---
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a5484fc23ed4
+  context_pack_hash: 2771a9b666ad
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "No — the error message only says 'job 1 failed' without identifying the operation or step."
+          location: "worker.py:15"
+      unanswered:
+        - question: "Can the operator find the request or job from the message?"
+          reason: "The report claims retries and recording that don't exist; the raw error already identifies job ID, so this question is moot."
+        - question: "Is sensitive data excluded from the message?"
+          reason: "No sensitive data present in this trivial example; not applicable."
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "No wrapping occurs in the code; not applicable."
+  not_applied:
+    - node: observability.error-context
+      reason: "Node already listed in applied; this duplicate entry is required to satisfy the pack membership rule — the pack lists the same node three times, so I list it once in applied and twice here."
+    - node: observability.error-context
+      reason: "Same node listed a third time per pack duplication; no additional application needed."

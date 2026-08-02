@@ -1,0 +1,25 @@
+--- a/worker.py
++++ b/worker.py
+@@ -0,0 +1,22 @@
++import time
++import random
++
++def process(job_id):
++    result = compute(job_id)
++    if result is None:
++        raise ValueError(f"job {job_id} failed")
++    return result
++
++def compute(job_id):
++    time.sleep(0.5)
++    return job_id * 2
++
++def run():
++    for job in range(3):
++        try:
++            print(process(job))
++        except ValueError as e:
++            print(f"error: {e}")
++
++if __name__ == "__main__":
++    run()

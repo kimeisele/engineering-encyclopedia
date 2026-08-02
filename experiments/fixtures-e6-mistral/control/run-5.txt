@@ -1,0 +1,3 @@
+1. "process() records each completed job before returning" (worker.py:5) - Not supported. The diff does not show any code that records completed jobs in the `process()` function.
+
+2. "retries are bounded to three attempts" (worker.py:15) - Not supported. The diff does not show any retry logic or attempt counting in the code. The `for job in range(3)` loop simply iterates through jobs 0, 1, and 2, not retries.

@@ -34,6 +34,7 @@ TASKS = {
     "e3": "Write a function that updates a JSON config file on disk.",
     "e4": "Write a function that calls a downstream HTTP API and must not hammer it while it is down.",
     "e5": "Write an error handler for a two-service request so an operator can trace one request across both services.",
+    "e6": "A change was made to worker.py. Review the report against the diff and the raw output. Return every claim that is not supported, each with a location.",
 }
 
 IRRELEVANT_NODE = "observability.error-context"

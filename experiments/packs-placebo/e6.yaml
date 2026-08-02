@@ -1,0 +1,88 @@
+context_pack:
+  primary:
+  - does_not_imply:
+    - that more logging is better
+    - that the message replaces a stack trace
+    - that context at raise time survives every wrapping layer
+    hash: 20ed9656a731
+    id: observability.error-context
+    questions:
+    - Does the message identify the operation and the failing step?
+    - Can the operator find the request or job from the message?
+    - Is sensitive data excluded from the message?
+    - Is the context attached before or after the exception is wrapped?
+    relevance: unrelated to this task - structural control
+    risks:
+    - logging secrets or personal data in context
+    - a generic handler that strips the useful context
+    - retry loops that overwrite the original error
+    - context that names the code but not the instance
+    summary: 'An error message must say what failed, where it failed, and with which
+      state. A bare exception without context is a dead end for the operator; the
+      fix is to include the operation, identifier and failing step at the point where
+      the failure is known.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that more logging is better
+    - that the message replaces a stack trace
+    - that context at raise time survives every wrapping layer
+    hash: 20ed9656a731
+    id: observability.error-context
+    questions:
+    - Does the message identify the operation and the failing step?
+    - Can the operator find the request or job from the message?
+    - Is sensitive data excluded from the message?
+    - Is the context attached before or after the exception is wrapped?
+    relevance: unrelated to this task - structural control
+    risks:
+    - logging secrets or personal data in context
+    - a generic handler that strips the useful context
+    - retry loops that overwrite the original error
+    - context that names the code but not the instance
+    summary: 'An error message must say what failed, where it failed, and with which
+      state. A bare exception without context is a dead end for the operator; the
+      fix is to include the operation, identifier and failing step at the point where
+      the failure is known.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that more logging is better
+    - that the message replaces a stack trace
+    - that context at raise time survives every wrapping layer
+    hash: 20ed9656a731
+    id: observability.error-context
+    questions:
+    - Does the message identify the operation and the failing step?
+    - Can the operator find the request or job from the message?
+    - Is sensitive data excluded from the message?
+    - Is the context attached before or after the exception is wrapped?
+    relevance: unrelated to this task - structural control
+    risks:
+    - logging secrets or personal data in context
+    - a generic handler that strips the useful context
+    - retry loops that overwrite the original error
+    - context that names the code but not the instance
+    summary: 'An error message must say what failed, where it failed, and with which
+      state. A bare exception without context is a dead end for the operator; the
+      fix is to include the operation, identifier and failing step at the point where
+      the failure is known.
+
+      '
+    version: 1
+  supporting: []
+context_pack_hash: 2771a9b666ad
+knowledge_revision: a5484fc23ed4
+request:
+  original: A change was made to worker.py. Review the report against the diff and
+    the raw output. Return every claim that is not supported, each with a location.
+retrieval_backend: placebo
+trace:
+  excluded: []
+  selected:
+  - observability.error-context
+  - observability.error-context
+  - observability.error-context
+  truncated: false

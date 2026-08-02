@@ -1,0 +1,60 @@
+The report claims that "process() records each completed job before returning" and "retries are bounded to three attempts", but neither claim is supported by the diff or raw output.
+
+- "process() records each completed job before returning" is not supported (worker.py does not show any recording mechanism)
+- "retries are bounded to three attempts" is not supported (worker.py does not show any retry logic)
+
+---
+
+APPLICATION_REPORT
+knowledge_revision: a5484fc23ed4
+context_pack_hash: 2771a9b666ad
+applied:
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error message includes the job ID but not the operation or failing step.
+        location: worker.py:6
+      - question: Can the operator find the request or job from the message?
+        answer: Yes, the job ID is included in the error message.
+        location: worker.py:6
+      - question: Is sensitive data excluded from the message?
+        answer: No sensitive data is involved in this message.
+        location: worker.py:6
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of raising the exception.
+        location: worker.py:6
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error message includes the job ID but not the operation or failing step.
+        location: worker.py:6
+      - question: Can the operator find the request or job from the message?
+        answer: Yes, the job ID is included in the error message.
+        location: worker.py:6
+      - question: Is sensitive data excluded from the message?
+        answer: No sensitive data is involved in this message.
+        location: worker.py:6
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of raising the exception.
+        location: worker.py:6
+  - node: observability.error-context
+    version: 1
+    hash: 20ed9656a731
+    questions_answered:
+      - question: Does the message identify the operation and the failing step?
+        answer: The error message includes the job ID but not the operation or failing step.
+        location: worker.py:6
+      - question: Can the operator find the request or job from the message?
+        answer: Yes, the job ID is included in the error message.
+        location: worker.py:6
+      - question: Is sensitive data excluded from the message?
+        answer: No sensitive data is involved in this message.
+        location: worker.py:6
+      - question: Is the context attached before or after the exception is wrapped?
+        answer: Context is attached at the point of raising the exception.
+        location: worker.py:6
+not_applied: []
