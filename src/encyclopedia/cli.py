@@ -231,10 +231,10 @@ def cmd_query(args: argparse.Namespace) -> int:
 
 def cmd_verify_report(args: argparse.Namespace) -> int:
     nodes, _ = _load_all()
-    ok, failures = verify_report(
+    ok, failures, corpus = verify_report(
         Path(args.report_path), Path(args.pack), nodes
     )
-    _emit({"ok": ok, "failures": failures}, args.format)
+    _emit({"ok": ok, "failures": failures, "corpus": corpus}, args.format)
     return 0 if ok else 1
 
 
