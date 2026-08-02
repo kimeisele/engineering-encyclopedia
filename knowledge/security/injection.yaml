@@ -1,0 +1,85 @@
+id: security.injection
+version: 1
+title: Query injection
+kind: pitfall
+status: established
+
+summary: >
+  Injection happens when user input is concatenated into a statement
+  string — SQL, NoSQL, LDAP, templates. Parameterized statements keep code
+  and data separate; validating the shape of input does not stop injection.
+
+intent_signals:
+  - sql injection
+  - parameterized query
+  - f-string in a query
+  - string concat in where
+  - escape the input
+  - prepared statement
+  - user input in a query
+  - raw query with variables
+
+applies_when:
+  - user input reaches a query, statement, or template string
+  - identifiers (table or column names) are derived from input
+
+does_not_apply_when:
+  - values flow exclusively through parameters or data-binding APIs
+
+does_not_imply:
+  - that input validation prevents injection
+  - that escaping is a substitute for parameterization
+  - that an ORM is immune unless raw queries are used
+  - that only SQL is affected
+
+questions:
+  - Is any input concatenated into a statement or template string?
+  - Are values passed as parameters or placeholders everywhere, including ORM raw queries?
+  - Is user input ever used as an identifier (table or column name)?
+  - Are dynamic identifiers taken from an allowlist, not from the input?
+
+techniques:
+  - parameterized statements everywhere values appear
+  - query builders that accept parameters, never interpolated strings
+  - identifiers resolved through an allowlist
+  - a single raw-query chokepoint that is reviewed
+
+risks:
+  - f-strings or concatenation inside SQL
+  - safe escaping schemes that miss edge cases
+  - ORM raw() or execute() with concatenated input
+  - dynamic identifiers built from user input
+
+tradeoffs:
+  - technique: full ORM with parameters
+    benefit: injection surface removed by construction
+    cost: complexity for exotic queries
+    choose_when: standard CRUD dominates
+  - technique: hand-written parameterized SQL
+    benefit: explicit and reviewable
+    cost: discipline on every query
+    choose_when: complex or optimized queries
+
+relations:
+  related:
+    - python.processes.subprocess-safety
+    - security.input-validation
+  requires_consideration_of:
+    - security.deserialization
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, automation]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Query injection is the classic parameterization failure; the sibling
+    node subprocess-safety covers the command variant. The negative
+    confusions record that validation and escaping are not defenses.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [injection, sql, parameterization, prepared statements, injection attacks]

@@ -1,0 +1,86 @@
+id: security.authorization
+version: 1
+title: Authorization
+kind: principle
+status: established
+
+summary: >
+  Authorization decides whether a caller may perform an action. It is
+  enforced server-side at every trust boundary, with a default of deny, and
+  it never trusts a role or tenant the client claims for itself.
+
+intent_signals:
+  - users must not see each other's data
+  - role-based access
+  - permission denied
+  - admin only
+  - tenant isolation
+  - check who is allowed
+  - authorize the request
+  - access control
+
+applies_when:
+  - more than one user or tenant can reach the same code path
+  - an action has side effects beyond the caller's own data
+  - delegation or service-to-service calls cross a boundary
+
+does_not_apply_when:
+  - a single-user local tool with no trust boundary
+
+does_not_imply:
+  - authentication
+  - input validation
+  - that a UI-level check is a server-side check
+  - defense against a compromised server
+
+questions:
+  - What is the trust boundary, and where is the check executed relative to it?
+  - Who is the principal, and how is the claim verified rather than read from the client?
+  - Is the decision default-deny for every path, including new endpoints?
+  - Is the check on the server, or only in client-visible code?
+
+techniques:
+  - default-deny policies with explicit allow rules
+  - server-side checks on every request path, including new endpoints
+  - principal derived from a verified session, never from client fields
+  - object-level checks before reading or mutating a resource
+
+risks:
+  - trusting client-supplied role or tenant fields
+  - checks only in the UI or only at the endpoint, not per object
+  - missing checks on endpoints added later
+  - confusing endpoint-level and object-level authorization
+
+tradeoffs:
+  - technique: central policy engine
+    benefit: one place to audit
+    cost: indirection and deployment coupling
+    choose_when: many services or complex roles
+  - technique: inline per-endpoint checks
+    benefit: obvious and local
+    cost: easy to forget on new endpoints
+    choose_when: a small service with few endpoints
+
+relations:
+  related:
+    - security.input-validation
+    - security.secrets-handling
+  requires_consideration_of:
+    - observability.error-context
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, automation, library]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Authorization failure is a recurring high-severity class: object-level
+    access control is routinely missing, and client-supplied identity is
+    trusted. The questions force a boundary and a principal to be named.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [authorization, access control, roles, tenants, default deny, authz]

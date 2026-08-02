@@ -1,7 +1,7 @@
-"""Corpus tests: exactly sixteen nodes, schema rules, hard limits, relations,
-taxonomy bindings (Sections 3 and 4 of the founding brief; corpus extended
-from eight to sixteen nodes by owner decision, see docs/CORPUS_RULE.md and
-DEVIATIONS D10-D13)."""
+"""Corpus tests: exactly the current node set (asserted below), schema
+rules, hard limits, relations, taxonomy bindings (Sections 3 and 4 of the
+founding brief; the corpus grew by owner decision — docs/CORPUS_RULE.md and
+DEVIATIONS D10-D13, Slice 6 batches)."""
 
 import unittest
 from pathlib import Path
@@ -35,6 +35,11 @@ EXPECTED_IDS = {
     "observability.correlation-id",
     "concurrency.locking-strategy",
     "review.unsupported-claims",
+    "security.authorization",
+    "security.secrets-handling",
+    "security.deserialization",
+    "security.tls-validation",
+    "security.injection",
 }
 
 REQUIRED_FIELDS = {
@@ -49,13 +54,14 @@ LIST_FIELDS = ENTRY_WORD_CHECKED_FIELDS
 
 
 class TestCorpus(unittest.TestCase):
-    def test_exactly_sixteen_nodes(self):
+    def test_exactly_twenty_one_nodes(self):
         # The count is asserted: a short corpus fails rather than lowering
-        # the expectation (Section 10). Raised 8 -> 10 -> 11 -> 15 -> 16 by
-        # owner decision — an intentional corpus change (docs/CORPUS_RULE.md,
-        # DEVIATIONS D10/D11/D12/D13), not a weakened test.
+        # the expectation (Section 10). Raised by owner decision across the
+        # corpus expansions — an intentional corpus change
+        # (docs/CORPUS_RULE.md, DEVIATIONS D10/D11/D12/D13, Slice 6 batch A),
+        # not a weakened test.
         nodes = load_nodes()
-        self.assertEqual(len(nodes), 16)
+        self.assertEqual(len(nodes), 21)
         self.assertEqual({n.id for n in nodes}, EXPECTED_IDS)
 
     def test_no_duplicate_ids(self):
