@@ -1,13 +1,46 @@
 # Experiment results
 
-Three tasks from the founding brief, Section 8, plus two out-of-sample
-tasks. Five runs per arm per provider. Rubrics are fixed and deterministic
+Three tasks from the founding brief, Section 8, plus out-of-sample and
+pre-registered tasks. Rubrics are fixed and deterministic
 (`experiments/rubrics/`); the score is the count of satisfied criteria.
 Scoring pipeline: `runner.py score` applies `extract_artifact` (report
 excluded) and `strip_comments` (Python `#` comments removed) before the
-rubric, and the rubrics were **repaired in the instrument-fix cycle**
+rubric; the rubrics were **repaired in the instrument-fix cycle**
 (see the instrument-repair section below). All numbers below are scored
 with the repaired rubrics unless stated otherwise.
+
+**The primary claim is convergence** — the pack makes output the same shape
+across vendors and runs — and its status is recorded first; the mean
+(quality) results are reported honestly beside it.
+
+## Primary claim: convergence
+
+- **In-sample (e1–e3, both providers):** convergence holds on **four of
+  six tasks** in the full re-analysis (`docs/CONVERGENCE_ANALYSIS.md`):
+  treatment collapses the between-provider gap and the providers'
+  criterion disagreements to 0/6 on e2, e3, e4 and e6, and on e3/e4 makes
+  both providers emit the same structural constructs where control had them
+  completely apart. e1 is the exception (`docs/E1_EXCEPTION.md`); e5 was
+  already converged (vacuous).
+- **Pre-registered out-of-sample test (e7, e8):** **NULL.** Markers and
+  the decision rule were committed before any run
+  (`docs/CONVERGENCE_PREREGISTRATION.md`). e7 passed both conditions (gap
+  0.30→0.10, marker-diff 0.10→0.03); e8 failed the marker-diff condition
+  (gap 1.00→0.60 but marker-diff 0.10→0.38 — treatment converged the means
+  while diverging the constructs). Per the pre-registered rule, a failure
+  on either task is a null for the claim
+  (`docs/CONVERGENCE_PREREGISTRATION_RESULTS.md`).
+- **Status: the convergence claim is in-sample.** It does not generalise
+  under the pre-registered test.
+
+## Mean (quality) results — reported beside convergence
+
+In-sample the pack also makes output better: treatment out-scored control
+on all six provider×task cells (e1–e3) with the placebo at or below
+control on five of six. **Out-of-sample the mean effect does not
+generalise: exactly one of six cells is clean** (e4-Mistral +3.07). The
+corpus rule is unsupported out-of-sample; `review.*` does not demonstrate
+an effect. Every negative result is kept visible below.
 
 **Three arms per provider, unpooled:** control / treatment / placebo (a
 structurally identical pack with irrelevant content).

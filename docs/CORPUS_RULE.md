@@ -111,3 +111,14 @@ control on neither the rubric nor the resolvable-location count, and the
 placebo outscored the treatment on both providers' rubric and DeepSeek's
 locations. A review instruction written as a machine contract is a
 defensible design, but the data does not show it changing agent output.
+
+## Convergence claim status
+
+The repository's primary claim — the pack makes output the same shape
+across vendors and runs — is **in-sample only**. It holds on four of six
+in-sample tasks (`docs/CONVERGENCE_ANALYSIS.md`; e1 is the exception,
+`docs/E1_EXCEPTION.md`), and its pre-registered out-of-sample test
+(e7, e8; markers and decision rule committed before any run) returned a
+**null**: e8 failed the pre-registered marker-diff condition
+(`docs/CONVERGENCE_PREREGISTRATION_RESULTS.md`). The convergence claim does
+not generalise; it is recorded as an in-sample finding.
