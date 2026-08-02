@@ -1,0 +1,149 @@
+# Integration: consuming a context pack from another repository
+
+Minimal integration path. Another repository can use the knowledge base
+without reading its source: generate a pack, hand it to an agent with the
+request, get back an application report, and verify it offline. Everything
+below was run exactly as written.
+
+## 1. Install
+
+From this repository:
+
+```sh
+pip install .
+```
+
+The only runtime dependency is PyYAML; everything works offline.
+
+## 2. Generate a pack
+
+```sh
+encyclopedia query "make sure this worker doesn't process the same job twice" --detail guidance > pack.yaml
+```
+
+The output is a context pack: the request, `knowledge_revision` (the
+corpus's identity), `context_pack_hash` (a SHA-256[:12] of the pack's
+content), `retrieval_backend`, and `context_pack` with `primary` and
+`supporting` nodes. Every node carries `id`, `version`, `hash`,
+`relevance`, `summary`, `questions`, `does_not_imply` and `risks`. A real
+excerpt (this run, corpus revision `96bf58e88848`):
+
+```yaml
+knowledge_revision: 96bf58e88848
+context_pack_hash: f70a481b60ee
+context_pack:
+  primary:
+    - id: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions:
+        - What value identifies one logical operation, and where does it come from?
+        - Where is completion recorded, and is that record durable before the effect?
+        - What state remains after a failure between effect and completion record?
+        - Can two workers observe the same operation as not-yet-done simultaneously?
+```
+
+`context_pack_hash` is what binds the whole exchange: pass the pack to the
+agent **verbatim** (do not reformat it), and require the agent's report to
+echo it.
+
+## 3. Ask the agent to return an application report
+
+Give the agent the request, the pack, and the instruction to return, next
+to its work, an `application_report` in this shape:
+
+```yaml
+application_report:
+  knowledge_revision: <from the pack>
+  context_pack_hash: <from the pack>
+  applied:
+    - node: <node id from the pack>
+      version: <version>
+      hash: <hash>
+      questions_answered:
+        - question: "<a question of that node, verbatim>"
+          answer: "<non-empty, at most 40 words>"
+          location: "<file:line where you applied it>"
+      unanswered:
+        - question: "<a question of that node, verbatim>"
+          reason: "<why you did not answer it>"
+  not_applied:
+    - node: <any other node id from the pack>
+      reason: "<why you did not apply it>"
+```
+
+The contract: every pack node appears exactly once across `applied` and
+`not_applied`; questions are copied verbatim; every question of an applied
+node is answered with a location or explicitly marked unanswered.
+
+## 4. Verify — offline, no model
+
+```sh
+encyclopedia verify-report report.yaml --pack pack.yaml
+```
+
+Exit code 0 on pass, 1 on failure, with a machine-readable failure list.
+`verify-report` proves: the report's `context_pack_hash` and
+`knowledge_revision` match the pack; the pack's content hashes to its
+declared hash; every pack node is disposed of exactly once; every question
+of an applied node is answered or marked unanswered; answers are non-empty
+and ≤ 40 words with a non-empty location; `not_applied` entries carry a
+reason.
+
+## Worked end-to-end example (run exactly as written)
+
+1. `encyclopedia query "make sure this worker doesn't process the same job
+   twice" --detail guidance > pack.yaml` — pack `f70a481b60ee`, revision
+   `96bf58e88848`, nodes: reliability.idempotency, concurrency.race-conditions,
+   concurrency.locking-strategy, python.files.atomic-replacement,
+   reliability.retry-semantics.
+2. The agent applies `reliability.idempotency` and returns this report
+   (other pack nodes are `not_applied`):
+
+```yaml
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: f70a481b60ee
+  applied:
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: In the processed_jobs table, written in the same transaction as the charge.
+          location: worker.py:41
+      unanswered:
+        - question: What value identifies one logical operation, and where does it come from?
+          reason: The job id is the identity; no separate key is introduced.
+        - question: What state remains after a failure between effect and completion record?
+          reason: The failure path aborts before the charge; nothing to reconcile.
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          reason: Single-worker deployment in this task; not applicable.
+  not_applied:
+    - node: concurrency.race-conditions
+      reason: No shared mutable state in this change.
+    - node: concurrency.locking-strategy
+      reason: No concurrent writers in this change.
+    - node: python.files.atomic-replacement
+      reason: No file writes in this change.
+    - node: reliability.retry-semantics
+      reason: No retries in this change.
+```
+
+3. `encyclopedia verify-report report.yaml --pack pack.yaml` → exit 0,
+   `ok: true`.
+
+A failure looks like this — if the agent silently skips a question:
+
+```yaml
+failures:
+  - code: omitted_question
+    detail: 'reliability.idempotency: question ''Can two workers observe the
+      same operation as not-yet-done simultaneously?'' is neither answered
+      nor unanswered'
+ok: false
+```
+
+Exit code 1. A skipped question, a dropped pack node, an altered question
+or a claim without a location all fail verification instead of passing
+silently.
