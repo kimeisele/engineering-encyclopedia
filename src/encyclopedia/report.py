@@ -1,16 +1,25 @@
-"""Application Report verification (Section 7 — the actual product).
+"""Application Report verification (Section 7 — optional audit path).
 
 ``verify-report`` is deterministic and offline: it requires the original
-context pack (``--pack`` is mandatory) and checks that the report is bound to
-that pack, bound to the corpus, and bound to the node content. A report alone
-cannot reveal a silently dropped node; the pack supplies the missing half of
-the evidence.
+context pack (``--pack`` is mandatory) and checks that the report is bound
+to that pack. It proves **completeness and binding** — the report is the
+pack's, every pack node is disposed exactly once, every question of an
+applied node is answered or marked unanswered, answers carry a non-empty
+location. It does **not** prove that the claims about the code are true:
+verification is syntactic and offline, and the pack is the primary truth
+(Slice 2), not the current corpus.
+
+An optional ``--root`` mode adds purely mechanical location checks
+(format ``path:41`` / ``path:41-48``, file inside root, file exists, line
+range exists, no path traversal) — still nothing semantic, no LLM, no AST.
 
 Exit code 0 on pass, 1 on failure, with a machine-readable failure list.
 """
 
 from __future__ import annotations
 
+import itertools
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,6 +31,10 @@ from .words import count_words
 
 MAX_ANSWER_WORDS = 40
 
+# location format: ``path:41`` or ``path:41-48`` — a relative path (no
+# leading slash, no ``..`` segment) followed by a positive line range.
+_LOCATION_RE = re.compile(r"^(?P<path>.+?):(?P<start>\d+)(?:-(?P<end>\d+))?$")
+
 
 def _load_yaml(path: Path) -> Optional[Any]:
     """Load report/pack YAML with the shared size and complexity guards."""
@@ -32,12 +45,116 @@ def _fail(failures: List[Dict[str, str]], code: str, detail: str) -> None:
     failures.append({"code": code, "detail": detail})
 
 
+def _verify_mechanical_locations(
+    app: Dict[str, Any], root: Path, failures: List[Dict[str, str]]
+) -> None:
+    """Mechanical ``--root`` location checks (Slice 3).
+
+    Checks only the location syntax of every answered question: format
+    ``path:41`` / ``path:41-48``, no path traversal, the file is inside
+    *root*, exists, and the line range exists in it. Nothing semantic —
+    this never reads whether the answer is actually true.
+    """
+    try:
+        root_resolved = root.resolve()
+    except OSError as exc:
+        _fail(failures, "root_unreadable", f"cannot resolve --root {root}: {exc}")
+        return
+    for entry in app.get("applied", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        node_id = entry.get("node", "?")
+        for question in entry.get("questions_answered", []) or []:
+            if not isinstance(question, dict):
+                continue
+            location = question.get("location")
+            if not isinstance(location, str) or not location.strip():
+                continue  # empty_location is already a pack-bound failure
+            match = _LOCATION_RE.match(location.strip())
+            if match is None:
+                _fail(
+                    failures,
+                    "location_format",
+                    f"{node_id}: location {location!r} is not 'path:41' or 'path:41-48'",
+                )
+                continue
+            rel = match.group("path")
+            start = int(match.group("start"))
+            end = int(match.group("end")) if match.group("end") else start
+            if start < 1 or end < start:
+                _fail(
+                    failures,
+                    "location_format",
+                    f"{node_id}: location {location!r} has an invalid line range",
+                )
+                continue
+            rel_path = Path(rel)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                _fail(
+                    failures,
+                    "location_traversal",
+                    f"{node_id}: location {location!r} escapes --root",
+                )
+                continue
+            candidate = root_resolved / rel_path
+            try:
+                candidate_resolved = candidate.resolve()
+            except OSError as exc:
+                _fail(
+                    failures,
+                    "location_traversal",
+                    f"{node_id}: cannot resolve {location!r}: {exc}",
+                )
+                continue
+            try:
+                candidate_resolved.relative_to(root_resolved)
+            except ValueError:
+                _fail(
+                    failures,
+                    "location_outside_root",
+                    f"{node_id}: location {location!r} resolves outside --root",
+                )
+                continue
+            if not candidate_resolved.is_file():
+                _fail(
+                    failures,
+                    "location_file_missing",
+                    f"{node_id}: file {rel!r} does not exist under --root",
+                )
+                continue
+            try:
+                with open(candidate_resolved, "r", encoding="utf-8") as handle:
+                    line_count = sum(1 for _ in itertools.islice(handle, end))
+            except OSError as exc:
+                _fail(
+                    failures,
+                    "location_unreadable",
+                    f"{node_id}: cannot read {rel!r}: {exc}",
+                )
+                continue
+            if line_count < end:
+                _fail(
+                    failures,
+                    "location_line_out_of_range",
+                    f"{node_id}: {rel!r} has {line_count} lines, location ends at {end}",
+                )
+
+
 def verify_report(
     report_path: Path,
     pack_path: Path,
     nodes: List[Node],
+    root: Optional[Path] = None,
 ) -> Tuple[bool, List[Dict[str, str]], Dict[str, Any]]:
     """Verify an Application Report against its context pack.
+
+    Proves **completeness and binding** only: the report is bound to the
+    supplied pack, every pack node is disposed exactly once, every question
+    of an applied node is answered or marked unanswered, answers are
+    non-empty and ≤ 40 words, locations are non-empty. It does **not** prove
+    that the claims about the code are true — verification is syntactic and
+    offline. With *root* set, purely mechanical location checks run on every
+    answered location (see ``_verify_mechanical_locations``).
 
     Primary truth is the **supplied pack** (Slice 2): pack hash and
     ``knowledge_revision`` binding, node presence, versions and hashes as
@@ -47,7 +164,8 @@ def verify_report(
     on, so past reports are never retroactively invalidated by a node edit.
 
     Returns ``(ok, failures, corpus)``:
-    - ``ok``/``failures`` cover only the pack-bound checks above;
+    - ``ok``/``failures`` cover the pack-bound checks above (plus the
+      mechanical ``--root`` location checks when *root* is given);
     - ``corpus`` is a **separate, non-fatal** cross-check against the current
       corpus: ``{"status": "current" | "drifted" | "stale" | "unknown",
       "details": [...]}``. It runs fully only when the report's
@@ -321,5 +439,9 @@ def verify_report(
                 f"{report_revision!r}; the corpus has moved on"
             ],
         }
+
+    # --- optional mechanical --root location checks (Slice 3) -------------
+    if root is not None:
+        _verify_mechanical_locations(app, root, failures)
 
     return (not failures, failures, corpus)

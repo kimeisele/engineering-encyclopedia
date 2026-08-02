@@ -99,12 +99,24 @@ encyclopedia verify-report report.yaml --pack pack.yaml
 ```
 
 Exit code 0 on pass, 1 on failure, with a machine-readable failure list.
-`verify-report` proves: the report's `context_pack_hash` and
-`knowledge_revision` match the pack; the pack's content hashes to its
-declared hash; every pack node is disposed of exactly once; every question
-of an applied node is answered or marked unanswered; answers are non-empty
-and ≤ 40 words with a non-empty location; `not_applied` entries carry a
-reason.
+`verify-report` proves **completeness and binding**: the report's
+`context_pack_hash` and `knowledge_revision` match the pack; the pack's
+content hashes to its declared hash; every pack node is disposed of exactly
+once; every question of an applied node is answered or marked unanswered;
+answers are non-empty and ≤ 40 words with a non-empty location;
+`not_applied` entries carry a reason. That is all it proves — it does
+**not** prove that the claims about the code are true: verification is
+syntactic and offline, and the pack is the primary truth (not the current
+corpus, so historical packs stay verifiable after the corpus grows).
+
+Optional mechanical location checks — verify that each location is
+`path:41` / `path:41-48` shaped, stays inside the given root, names a file
+that exists, and points at a line range that exists (no path traversal;
+nothing semantic):
+
+```sh
+encyclopedia verify-report report.yaml --pack pack.yaml --root .
+```
 
 ## Worked end-to-end example (run exactly as written)
 

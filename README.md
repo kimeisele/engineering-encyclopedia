@@ -119,6 +119,13 @@ takes the agent's report and the exact pack the agent was given, and proves
   or explicitly marked unanswered (**no question can be skipped**),
 - the questions are the node's own (altered wording fails).
 
+That is all it proves. It does **not** prove that the claims about the
+code are true — verification is syntactic and offline; the pack is the
+primary truth, not the code. With `--root <dir>` it additionally checks,
+mechanically, that every location is `path:41` or `path:41-48` shaped,
+stays inside `<dir>`, names a file that exists, and points at a line range
+that exists (no path traversal). Still nothing semantic — no LLM, no AST.
+
 Worked example. An agent was given the `reliability.idempotency` node and
 returns this report fragment:
 

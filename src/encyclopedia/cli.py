@@ -104,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("verify-report", help="verify an Application Report against its pack")
     p.add_argument("report_path", help="path to the application report YAML")
     p.add_argument("--pack", required=True, help="path to the context pack YAML (mandatory)")
+    p.add_argument(
+        "--root",
+        default=None,
+        help="optional: root directory for mechanical location checks "
+        "(format path:41 / path:41-48, file inside root, file exists, line "
+        "range exists, no path traversal)",
+    )
     _common_options(p)
 
     return parser
@@ -232,7 +239,10 @@ def cmd_query(args: argparse.Namespace) -> int:
 def cmd_verify_report(args: argparse.Namespace) -> int:
     nodes, _ = _load_all()
     ok, failures, corpus = verify_report(
-        Path(args.report_path), Path(args.pack), nodes
+        Path(args.report_path),
+        Path(args.pack),
+        nodes,
+        root=Path(args.root) if args.root else None,
     )
     _emit({"ok": ok, "failures": failures, "corpus": corpus}, args.format)
     return 0 if ok else 1
