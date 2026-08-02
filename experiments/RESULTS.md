@@ -31,7 +31,11 @@ across vendors and runs — and its status is recorded first; the mean
   on either task is a null for the claim
   (`docs/CONVERGENCE_PREREGISTRATION_RESULTS.md`).
 - **Status: the convergence claim is in-sample.** It does not generalise
-  under the pre-registered test.
+  under the pre-registered test. The e8 divergence (DeepSeek moved to
+  version-in-key, Mistral dropped TTL — same node, opposite directions) is
+  not filed as a plain null: it is recorded as an observation that the
+  node lists valid answers without deciding between them, where e3/e4's
+  nodes decide (`docs/UNDERDETERMINED_NODES.md`).
 
 ## Mean (quality) results — reported beside convergence
 
