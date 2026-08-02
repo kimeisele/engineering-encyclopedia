@@ -6,9 +6,36 @@ make output CONVERGE — across providers, across runs, in structure and
 vocabulary — so that a non-technical operator and a second agent encounter
 the same shape of solution regardless of which model produced it?
 Convergence is invisible in a mean comparison; this document re-reads the
-data for it. All numbers are scored with the repaired instrument. n per
-cell: 10 (e1–e3, e6), 30 (e4, e5); placebo for e1–e3 from the separate
-placebo sets.
+data for it. Sections 1, 2 and 4 use the repaired rubric scores; Section 3
+uses the structural markers defined below — observable constructs
+independent of the rubric (e.g. a bare `CLOSED` constant counts as a named
+state even where the rubric's `success_resets` pattern would not, which is
+why a marker rate and a criterion rate can differ for the same cell). n per
+cell: 10 (e1–e3, e6) and 30 (e4, e5) pooled across providers (5+5,
+15+15); per-provider n is 5 or 15.
+
+## Structural markers (exact definitions)
+
+Regexes matched with `re.search` + `re.DOTALL` over the scored artifact
+(extraction + comment stripping for code tasks; extraction only for e6):
+
+- **e1**: `dedup_record` = `processed|done|handled|dedup`;
+  `check_before` = `if\s+.*(processed|exists|already|done)`;
+  `same_tx` = `transaction|atomic|unique|ON CONFLICT|conflict`
+- **e2**: `argv_list` =
+  `\.(run|Popen|call|check_output|check_call)\s*\(\s*(\[|[A-Za-z_]\w*\s*[,)])`;
+  `validation` = `re\.(match|fullmatch|search)|startswith|valid|whitelist|allowed|safe|branches`
+- **e3**: `temp_file` = `tempfile|mkstemp|NamedTemporaryFile|\.tmp|\btmp`;
+  `atomic_rename` = `os\.replace|os\.rename|Path\.replace`;
+  `fsync` = `\.flush\s*\(|os\.fsync|fsync`
+- **e4**: `named_states` = `closed|open|half[- ]?open|is_open|CLOSED|OPEN`;
+  `threshold` = `max_failures|failure_threshold|threshold|failures\s*[>=]`;
+  `reset_path` = `state\s*=\s*['\"]closed|_reset\s*\(|CLOSED|failures\s*=\s*0`;
+  `fail_fast` = `if\s+.*(is_open|state|circuit).{0,40}(raise|return|fail)`
+- **e5**: `id_parameter` = `correlation_id|request_id|trace_id`;
+  `id_header` = `X-Request-Id|x-request-id|headers`
+- **e6**: `file_line_cited` = `worker\.py\s*[:@]\s*\d+|\blines?\s+\d+`;
+  `unsupported_phrasing` = `not supported|unsupported`
 
 ## 1. Between-provider convergence (mean gap per task per arm)
 
@@ -44,10 +71,9 @@ drift slightly upward (both from already-low control sd).
 
 ## 3. Structural convergence — the metric that matches the claim
 
-Markers per task (e.g. for e4: named circuit states, an explicit threshold,
-a reset path, a fail-fast guard; for e3: temp file, atomic rename, fsync).
-Per arm: mean |rate_DS − rate_MR| across the task's markers (0 = identical
-profiles), and the marker detail for the two largest divergences.
+Markers per task (exact regexes above). Per arm: mean |rate_DS − rate_MR|
+across the task's markers (0 = identical profiles), and the marker detail
+for the two largest divergences.
 
 | Task | Control | Treatment | Placebo |
 |---|---|---|---|
@@ -102,7 +128,9 @@ e5 and e6, whose means were null.
   four lenses — the gap collapses (1.20 → 0.00, both moving to the same
   mean) but within-run variance increases on both providers, criterion
   disagreement stays at 2/6, and the structural profiles do not converge.
-  On e1 the null stays null under this lens too.
+  On e1 the null stays null under this lens too. (The e1 placebo happens to
+  reach gap 0.20 and 0/6 disagreements — better than treatment on those two
+  numbers — which is why e1 is excluded rather than credited.)
 
 The convergence claim is therefore supported on four of six tasks, absent
 on e1, and vacuous-but-not-negative on e5 — reported separately, not
