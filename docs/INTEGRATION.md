@@ -1,9 +1,10 @@
 # Integration: consuming a context pack from another repository
 
 Minimal integration path. Another repository can use the knowledge base
-without reading its source: generate a pack, hand it to an agent with the
-request, get back an application report, and verify it offline. Everything
-below was run exactly as written.
+without reading its source. The measured effect comes from the pack alone:
+handing the pack to the agent *before* the work changes what it writes. No
+report is required to get that effect — the report/verify flow below is an
+optional audit variant. Everything below was run exactly as written.
 
 ## 1. Install
 
@@ -20,7 +21,7 @@ carries the corpus (`knowledge/`, `taxonomy/`), so the installed
 To use a different corpus, set `ENCYCLOPEDIA_ROOT` to a directory
 containing `knowledge/` and `taxonomy/`.
 
-## 2. Generate a pack
+## 2. The simple path: generate a pack
 
 ```sh
 encyclopedia query "make sure this worker doesn't process the same job twice" --detail guidance > pack.yaml
@@ -50,18 +51,22 @@ context_pack:
         - Can two workers observe the same operation as not-yet-done simultaneously?
 ```
 
-`context_pack_hash` is what binds the whole exchange: pass the pack to the
-agent **verbatim** (do not reformat it), and require the agent's report to
-echo it. The pack's exact content depends on the retrieval backend active
-in the generating environment (`retrieval_backend`: `fts5` or
-`token-overlap`); whichever backend produced the pack, the hash binds the
-pack you actually passed — verify against that file, not a regenerated
-one.
+## 3. The simple path: hand the pack to the agent, done
 
-## 3. Ask the agent to return an application report
+Give the agent the request plus the pack, verbatim, and let it work. That
+is the whole integration: the pack changes what the model writes. Keep the
+exact `pack.yaml` you handed over — if you later want auditability, the
+report binds to it via `context_pack_hash`, so verify against that file,
+not a regenerated one. (The pack's exact content depends on the retrieval
+backend active in the generating environment — `retrieval_backend`: `fts5`
+or `token-overlap` — which is why you verify against the file you
+actually passed.)
 
-Give the agent the request, the pack, and the instruction to return, next
-to its work, an `application_report` in this shape:
+## 4. Optional: auditable evidence
+
+Where you want proof that the agent engaged with the pack — not just the
+effect — ask the agent to return, next to its work, an `application_report`
+in this shape:
 
 ```yaml
 application_report:
@@ -87,7 +92,7 @@ The contract: every pack node appears exactly once across `applied` and
 `not_applied`; questions are copied verbatim; every question of an applied
 node is answered with a location or explicitly marked unanswered.
 
-## 4. Verify — offline, no model
+Verify — offline, no model:
 
 ```sh
 encyclopedia verify-report report.yaml --pack pack.yaml
@@ -103,13 +108,16 @@ reason.
 
 ## Worked end-to-end example (run exactly as written)
 
-1. `encyclopedia query "make sure this worker doesn't process the same job
-   twice" --detail guidance > pack.yaml` — pack `f70a481b60ee`, revision
-   `96bf58e88848`, nodes: reliability.idempotency, concurrency.race-conditions,
-   concurrency.locking-strategy, python.files.atomic-replacement,
-   reliability.retry-semantics.
-2. The agent applies `reliability.idempotency` and returns this report
-   (other pack nodes are `not_applied`):
+**Simple path.** `encyclopedia query "make sure this worker doesn't process
+the same job twice" --detail guidance > pack.yaml` — pack `f70a481b60ee`,
+revision `96bf58e88848`, nodes: reliability.idempotency,
+concurrency.race-conditions, concurrency.locking-strategy,
+python.files.atomic-replacement, reliability.retry-semantics. Hand the pack
+to the agent with the request. Done.
+
+**Optional variant: verified.** Ask for the `application_report` and get
+this (the agent applies `reliability.idempotency`; other pack nodes are
+`not_applied`):
 
 ```yaml
 application_report:
@@ -141,8 +149,8 @@ application_report:
       reason: No retries in this change.
 ```
 
-3. `encyclopedia verify-report report.yaml --pack pack.yaml` → exit 0,
-   `ok: true`.
+`encyclopedia verify-report report.yaml --pack pack.yaml` → exit 0,
+`ok: true`.
 
 A failure looks like this — if the agent silently skips a question:
 
