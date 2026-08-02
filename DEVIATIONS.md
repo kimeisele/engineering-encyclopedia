@@ -230,3 +230,23 @@ owner decides before any runs. Personas and role text remain excluded.
 Alternative rejected: a review node without verifiable questions — that is
 exactly what the placebo arm punished.
 Reversibility: easy (remove the node and revert the count assertion)
+
+### D14 — Product restatement: the questions are the product, not the Application Report
+Section: 7
+Brief says: "The product is therefore not the retrieval engine. The product
+is the Application Report" (Section 7) — the mechanism by which an agent
+names the node it applied, the question it answered, and where it answered
+it.
+Problem: our own measurement contradicts this. The effect comes from the
+pack alone — Mistral went 0/10 to 10/10 on atomic-replacement with the
+pack, placebo-controlled, with no report involved at any point. The report
+contributes nothing measurable to the effect.
+Decision: the questions are the product; a pack delivered before the work
+changes what the model writes. The Application Report and `verify-report`
+are an optional audit path — shipped, tested, useful where auditable
+evidence is wanted, not the headline and not required for the effect.
+README, AGENTS.md and INTEGRATION.md state this; `docs/FOUNDING BRIEF
+v2.md` is kept unchanged as the historical spec (Slice 4 does not edit
+results or the founding document).
+Reversibility: a doc-only deviation; reverted by restoring the brief's
+framing if new evidence warrants it.
