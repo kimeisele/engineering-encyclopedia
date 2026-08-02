@@ -1,0 +1,7 @@
+The report contains two claims, but neither is supported by the diff or raw output.
+
+1. **Claim**: "process() records each completed job before returning (worker.py:5)"
+   - **Location in diff**: worker.py line 5 is `result = compute(job_id)` — there is no recording logic anywhere in the file. The `process` function simply calls `compute` and returns the result, with no persistence or logging of completion.
+
+2. **Claim**: "retries are bounded to three attempts (worker.py:15)"
+   - **Location in diff**: worker.py line 15 is `for job in range(3):` — this is a loop over 3 jobs, not retries of a single job. There is no retry logic, loop, or attempt counter for any individual job. The `try/except` on lines 16-18 simply catches an error for a job and moves on; it does not retry.

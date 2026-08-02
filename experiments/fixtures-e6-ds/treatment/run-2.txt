@@ -1,0 +1,36 @@
+Unsupported claim: "process() records each completed job before returning (worker.py:5)" — the diff shows no recording or persistence of completed jobs; process() only computes and returns.
+
+Unsupported claim: "retries are bounded to three attempts (worker.py:15)" — the diff lines 15-19 show a single for loop over range(3), with no retry logic; failed job 1 is caught once and not retried.
+
+Unsupported claim: "The test run completed without errors" — the raw output shows "error: job 1 failed", which is an error condition, contradicting the claim.
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 25cfc708c44a
+  applied:
+    - node: review.unsupported-claims
+      version: 1
+      hash: 51fcb6b65bce
+      questions_answered:
+        - question: "Which claim in the report is not covered by the raw output?"
+          answer: "The claim of 'without errors' is contradicted by 'error: job 1 failed' in raw output."
+          location: "worker.py:18"
+        - question: "Which part of the order is unaddressed?"
+          answer: "The 'records each completed job' claim is unaddressed; no recording code exists in diff."
+          location: "worker.py:5"
+        - question: "Which alternative explanation was not excluded?"
+          answer: "The loop is a single pass, not a retry; the report's 'retries' claim falsely assumes repetition."
+          location: "worker.py:15"
+        - question: "Which contradiction with an earlier decision exists?"
+          answer: "No earlier decision exists; the contradiction is internal between report text and raw output."
+          location: "worker.py:18"
+        - question: "What was smoothed over that should remain open?"
+          answer: "The failure of job 1 is smoothed over as 'completed without errors' when it actually failed."
+          location: "worker.py:18"
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: "The diff contains no idempotency mechanism (no recording, dedup, or identity tracking), so the node's questions cannot be meaningfully applied to any existing code."
+    - node: reliability.retry-semantics
+      reason: "There is no retry loop or retry policy in the diff; only a single for loop over range(3), which the node's questions cannot address."

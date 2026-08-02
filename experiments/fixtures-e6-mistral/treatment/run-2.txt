@@ -1,0 +1,60 @@
+The report claims that "process() records each completed job before returning (worker.py:5)" and "retries are bounded to three attempts (worker.py:15)", but neither claim is supported by the diff or raw output.
+
+1. "process() records each completed job before returning (worker.py:5)" - There is no recording of completed jobs in the diff (worker.py line 5 is `result = compute(job_id)`). No durability or recording mechanism is shown.
+2. "retries are bounded to three attempts (worker.py:15)" - The diff shows no retry logic at all (worker.py line 15 is `for job in range(3):`). The loop is just iterating through jobs, not retrying failed attempts.
+
+---
+APPLICATION_REPORT
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: review.unsupported-claims
+      version: 1
+      hash: 51fcb6b65bce
+      questions_answered:
+        - question: Which claim in the report is not covered by the raw output?
+          answer: The claim about recording completed jobs and retry bounds is not supported by the diff or output.
+          location: worker.py:5, worker.py:15
+        - question: Which part of the order is unaddressed?
+          answer: No retry mechanism or completion recording is present in the diff.
+          location: worker.py:5, worker.py:15
+        - question: Which alternative explanation was not excluded?
+          answer: The report assumes idempotency and retry bounds without showing them in code.
+          location: worker.py:5, worker.py:15
+      unanswered: []
+    - node: reliability.idempotency
+      version: 1
+      hash: 4cbc1598c0d7
+      questions_answered:
+        - question: What value identifies one logical operation, and where does it come from?
+          answer: No operation identity or recording mechanism is shown in the diff.
+          location: worker.py:5
+        - question: Where is completion recorded, and is that record durable before the effect?
+          answer: No completion record exists in the diff.
+          location: worker.py:5
+        - question: What state remains after a failure between effect and completion record?
+          answer: No state or recording mechanism is present in the diff.
+          location: worker.py:5
+        - question: Can two workers observe the same operation as not-yet-done simultaneously?
+          answer: No deduplication or idempotency mechanism is shown in the diff.
+          location: worker.py:5
+      unanswered: []
+    - node: reliability.retry-semantics
+      version: 1
+      hash: 5f6b8be02160
+      questions_answered:
+        - question: What happens when the same attempt is delivered more than once?
+          answer: No retry logic exists in the diff to handle repeated attempts.
+          location: worker.py:15
+        - question: How many attempts are allowed, and what happens after the last one?
+          answer: No retry attempts or bounds are implemented in the diff.
+          location: worker.py:15
+        - question: How is the wait between attempts chosen, and is jitter added?
+          answer: No retry mechanism or timing is present in the diff.
+          location: worker.py:15
+        - question: Is the retry budget shared across workers or per attempt?
+          answer: No retry logic exists in the diff to share or limit attempts.
+          location: worker.py:15
+      unanswered: []
+  not_applied: []

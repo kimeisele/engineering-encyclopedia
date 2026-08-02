@@ -1,0 +1,5 @@
+The report contains the following claims that are not supported by the diff and the raw output:
+
+1. "process() records each completed job before returning" - This claim is not supported. There is no code in the diff that records completed jobs (no logging, no state tracking, no database update, etc.). The diff only shows a simple computation and error handling. Location: worker.py:5 (the line where `process()` is defined).
+
+2. "retries are bounded to three attempts" - This claim is not supported. The diff does not show any retry logic. The `run()` function iterates over `range(3)` (which could be misinterpreted as retries), but it simply processes jobs 0, 1, and 2 sequentially, not retrying failed jobs. The raw output also shows only one attempt per job. Location: worker.py:15 (the line where `range(3)` is used in `run()`).

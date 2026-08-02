@@ -1,0 +1,40 @@
+UNSUPPORTED CLAIMS
+
+1. **"The change makes processing idempotent"** — the diff contains no recording of completed jobs, no deduplication, and no idempotency mechanism. The `process()` function simply calls `compute()` and returns the result; if `compute()` were called twice with the same `job_id`, it would compute twice. Location: worker.py:5
+
+2. **"process() records each completed job before returning (worker.py:5)"** — the diff at worker.py:5 shows `result = compute(job_id)`, with no state recording, no storage, no persistence, and no memory of completed jobs. Location: worker.py:5
+
+3. **"retries are bounded to three attempts (worker.py:15)"** — the diff at worker.py:15 shows `for job in range(3):`, which iterates over three distinct jobs (0, 1, 2), not three attempts at the same job. There is no retry logic anywhere in the code. Location: worker.py:15
+
+4. **"The test run completed without errors"** — the raw output contains `error: job 1 failed`, which is an explicit error message. This contradicts the claim. Location: worker.py:17 (the `except` handler that prints this error)
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: review.unsupported-claims
+      version: 1
+      hash: 51fcb6b65bce
+      questions_answered:
+        - question: "Which claim in the report is not covered by the raw output?"
+          answer: "The claim that tests completed without errors is contradicted by the raw output showing 'error: job 1 failed'."
+          location: "worker.py:17"
+        - question: "Which part of the order is unaddressed?"
+          answer: "The diff contains no completion recording, no retry logic, and no idempotency—all claimed features are absent from the code."
+          location: "worker.py:5"
+        - question: "Which alternative explanation was not excluded?"
+          answer: "Three jobs in the loop could be three distinct jobs, not three retry attempts of one job—the report conflates these."
+          location: "worker.py:15"
+        - question: "Which contradiction with an earlier decision exists?"
+          answer: "The report claims idempotency but the code recomputes on every call; nothing prevents duplicate processing."
+          location: "worker.py:5"
+        - question: "What was smoothed over that should remain open?"
+          answer: "The report glosses over the failure output entirely, calling it a clean run despite the printed error."
+          location: "worker.py:17"
+      unanswered: []
+  not_applied:
+    - node: reliability.idempotency
+      reason: "The claim is unsupported because no idempotency mechanism exists; this node's detailed check of recording and deduplication is moot when the feature is entirely absent."
+    - node: reliability.retry-semantics
+      reason: "The report claims retries but the diff has no retry loop, so retry-policy questions cannot apply to nonexistent code."

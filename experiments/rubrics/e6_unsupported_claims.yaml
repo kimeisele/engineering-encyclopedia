@@ -6,11 +6,11 @@ description: >
   with located, evidence-backed claims? Every criterion is a boolean (regex
   matched with re.search + re.DOTALL over the scored artifact); the score is
   the count of satisfied criteria. Patterns are draft proposals for owner
-  approval. Scoring caveat for the owner: the e6 artifact is prose, so the
-  e6 run must NOT apply strip_comments/extract_artifact the way code tasks
-  do — a review may contain "PR #7" (a # would eat the rest of the line) and
-  may quote application_report: (the report-boundary cut would truncate it).
-  The scorer must branch on task before e6 is run.
+  approval. Scoring caveat (implemented): the e6 artifact is prose, so
+  strip_comments is NOT applied (a review may contain "PR #7" — a # would
+  eat the rest of the line); extract_artifact IS applied to drop the
+  model's own application_report section below the delimiter. The runner
+  branches on task in score_code.
 
 criteria:
   - id: claims_located

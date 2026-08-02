@@ -1,0 +1,42 @@
+A change was made to worker.py. Below are the diff, a report describing the change, and the raw output of a test run.
+
+DIFF:
+--- a/worker.py
++++ b/worker.py
+@@ -0,0 +1,22 @@
++import time
++import random
++
++def process(job_id):
++    result = compute(job_id)
++    if result is None:
++        raise ValueError(f"job {job_id} failed")
++    return result
++
++def compute(job_id):
++    time.sleep(0.5)
++    return job_id * 2
++
++def run():
++    for job in range(3):
++        try:
++            print(process(job))
++        except ValueError as e:
++            print(f"error: {e}")
++
++if __name__ == "__main__":
++    run()
+
+REPORT:
+The change makes processing idempotent: process() records each completed job
+before returning (worker.py:5), and retries are bounded to three attempts
+(worker.py:15). The test run completed without errors (see raw output).
+
+RAW OUTPUT:
+$ python worker.py
+0
+2
+error: job 1 failed
+4
+
+Review the report against the diff and the raw output. Return every claim in the report that is not supported, each with a location (file and line that actually exist in the diff). If a claim is supported, do not list it.

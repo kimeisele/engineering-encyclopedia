@@ -1,0 +1,39 @@
+The diff shows a newly created worker.py file with functions `process`, `compute`, and `run`. The report claims:
+
+1. "The change makes processing idempotent: process() records each completed job before returning (worker.py:5)" — **Not supported**: There is no recording or persistence of completed jobs anywhere in the diff. `process()` (line 3-7) simply calls `compute()` and returns the result or raises an error. No state is stored. The line 5 in the diff is `if result is None:` which does not record anything.
+
+2. "and retries are bounded to three attempts (worker.py:15)" — **Not supported**: There is no retry logic in the diff. The `run()` function (lines 13-20) has a simple `for` loop iterating over range(3) which processes jobs 0, 1, 2 once each. There are no retries, no attempts counting, and no bounded retry mechanism. Line 15 in the diff is `try:` inside the loop, not a retry.
+
+3. "The test run completed without errors (see raw output)" — **Partially supported**: The raw output shows "error: job 1 failed" which indicates an error occurred during the run. The script caught the ValueError and printed it, so the script itself completed without crashing, but the claim "without errors" is misleading since an error was raised and caught. However, the output shows a clean exit. This claim is somewhat ambiguous, but the explicit error message suggests errors did occur, so this claim is not fully supported.
+
+The first two claims are clearly unsupported. The third is weakly supported at best but the wording "without errors" conflicts with the printed "error:" line, so I'll list it as unsupported too.
+
+Locations:
+- Claim 1: worker.py:5 (the line referenced in the report, which exists in the diff as `if result is None:`)
+- Claim 2: worker.py:15 (the line referenced in the report, which exists in the diff as `try:`)
+- Claim 3: raw output shows error line, no specific file line; but the claim references the run which occurs at worker.py:13-20. I'll cite worker.py:16 (the `except ValueError` line) where the error is printed.
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a5484fc23ed4
+  context_pack_hash: 2771a9b666ad
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "No. The ValueError message only says 'job 1 failed', naming the job but not the operation or failing step."
+          location: "worker.py:6"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, the job id is included in the message, though it's minimal and lacks operation context."
+          location: "worker.py:6"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes, only the job id is exposed; no sensitive data present in this simple example."
+          location: "worker.py:6"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "No exception wrapping occurs here; the error is raised directly without added context beyond the job id."
+          location: "worker.py:6"
+      unanswered: []
+  not_applied: []
+---APPLICATION_REPORT---

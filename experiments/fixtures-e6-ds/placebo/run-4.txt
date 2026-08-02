@@ -1,0 +1,30 @@
+The report claims:
+
+1. "process() records each completed job before returning (worker.py:5)" — **Not supported**: The diff shows no recording/persistence logic. `process()` simply calls `compute()` and returns the result or raises an error. There is no storage or record-keeping. Location: worker.py:5 (line 5 is `result = compute(job_id)`).
+
+2. "retries are bounded to three attempts (worker.py:15)" — **Not supported**: The code at worker.py:15 is `print(process(job))` inside a loop of `range(3)`. There is no retry logic; if `process()` raises, it's caught and printed, but the job is not retried. The loop iterates over 3 distinct jobs, not retries of a single job. Location: worker.py:15.
+
+3. "The test run completed without errors" — **Not supported**: Raw output shows `error: job 1 failed`, which is an error message printed from the `except ValueError` block. The run did not complete without errors. Location: worker.py:14 (the `except ValueError as e:` line that prints the error).
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a5484fc23ed4
+  context_pack_hash: 2771a9b666ad
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "The error message includes job_id but not which step failed; compute() is the only step."
+          location: "worker.py:5"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes, job_id is included in the error message, allowing identification of the failing job."
+          location: "worker.py:7"
+      unanswered:
+        - question: "Is sensitive data excluded from the message?"
+          reason: "No sensitive data is present in the code or output; question not applicable."
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "No exception wrapping occurs in the code; question not applicable."
+  not_applied: []
+---APPLICATION_REPORT---

@@ -1,0 +1,67 @@
+I reviewed the report against the diff and raw output.
+
+**Claim 1:** "The change makes processing idempotent: process() records each completed job before returning (worker.py:5)."
+
+- **Not supported.** The diff shows no recording or persistence of completed jobs anywhere. Line 5 is `result = compute(job_id)`, which does no recording. The word "idempotent" is not reflected in any code behavior.
+
+**Claim 2:** "retries are bounded to three attempts (worker.py:15)."
+
+- **Not supported.** The diff has no retry logic at all. The `run()` function (line 15 is `except ValueError as e:`) loops over jobs with a simple `for job in range(3)` (line 14), which is three initial attempts, not three retries. No retry loop exists. No retry mechanism is present, so "bounded to three attempts" is false — there are zero retries.
+
+**Claim 3:** "The test run completed without errors."
+
+- **Not supported.** The raw output shows `error: job 1 failed` — a clear error was printed. The test run did not complete without errors; it encountered and reported a failure.
+
+**Claim 4:** "process() records each completed job before returning."
+
+- **Unsupported** (same as Claim 1, no recording exists).
+
+**Claim 5:** "retries are bounded to three attempts (worker.py:15)."
+
+- Same as Claim 2, unsupported.
+
+**Claim 6:** "The change makes processing idempotent."
+
+- **Unsupported** — no idempotency logic (no deduplication, no state storage) exists in the diff.
+
+**Summary of unsupported claims:**
+
+1. "The change makes processing idempotent" — no idempotency mechanism.
+2. "process() records each completed job before returning (worker.py:5)" — line 5 only computes, does not record.
+3. "retries are bounded to three attempts (worker.py:15)" — no retries exist; line 15 is exception handling in a loop.
+4. "The test run completed without errors" — raw output shows `error: job 1 failed`.
+
+**Locations for unsupported claims:**
+
+- For idempotency claim: the whole file (worker.py:1-22) shows no recording; cite worker.py:5 (where recording is claimed).
+- For retry claim: worker.py:14-15 (the `for` loop and `except` are not retries; no `retry` or recursive call).
+- For "no errors" claim: the raw output contradicts it; cite worker.py:17 (`print(f"error: {e}")`).
+
+Thus, all four claims in the report are unsupported.
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a5484fc23ed4
+  context_pack_hash: 2771a9b666ad
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "No — the error message only names the job number; it does not identify the compute step or operation context."
+          location: "worker.py:10"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Partially — the job ID is included, but no request metadata or trace ID is present."
+          location: "worker.py:10"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes — the message contains only the job ID, no sensitive data is leaked."
+          location: "worker.py:10"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Context is raised directly; no wrapping occurs, so this question does not apply — answered as N/A."
+          location: "worker.py:10"
+      unanswered:
+        - question: "Is the context attached before or after the exception is wrapped?"
+          reason: "No wrapping exists in the code; the exception is raised and caught directly without any wrapper layer."
+  not_applied: []
+---

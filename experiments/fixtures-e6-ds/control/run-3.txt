@@ -1,0 +1,10 @@
+The report contains several claims that are not supported by the diff and raw output:
+
+1. **Claim**: "process() records each completed job before returning (worker.py:5)"  
+   **Location**: worker.py:5 (in the diff, line 5 is `result = compute(job_id)`, but the diff contains no code that records/saves completed jobs—no database write, no list append, no state mutation.)
+
+2. **Claim**: "retries are bounded to three attempts (worker.py:15)"  
+   **Location**: worker.py:15 (in the diff, line 15 is `for job in range(3):` which is a loop over 3 jobs, not a retry mechanism. There is no code that attempts the same job multiple times or tracks retry counts.)
+
+3. **Claim**: "The test run completed without errors"  
+   **Location**: The raw output shows `error: job 1 failed` printed, which is an error message. The run did not complete entirely without errors—one job failed and was reported.

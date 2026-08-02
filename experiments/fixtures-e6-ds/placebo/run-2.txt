@@ -1,0 +1,34 @@
+The report makes three claims that need to be checked against the diff and raw output:
+
+1. **"process() records each completed job before returning (worker.py:5)"** — The diff shows the entire worker.py as newly added (lines 1–22). Looking at the `process` function (lines 3–7), there is no code that records or stores completed jobs. The function only calls `compute()`, checks for `None`, raises on failure, and returns. There is no recording, logging, or persistence. This claim is **not supported**.
+
+2. **"retries are bounded to three attempts (worker.py:15)"** — Line 15 in the diff is `for job in range(3):` which loops over jobs 0, 1, 2 — but this is **not a retry mechanism**. It's an iteration over three distinct jobs. There is no retry loop anywhere in the code; each job is processed exactly once, and if it fails, the error is caught and printed without any retry. This claim is **not supported**.
+
+3. **"The test run completed without errors (see raw output)"** — The raw output contains: `0`, `2`, `error: job 1 failed`, `4`. The presence of the error line `error: job 1 failed` means the run did **not** complete without errors. This claim is **not supported**.
+
+---
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a5484fc23ed4
+  context_pack_hash: 2771a9b666ad
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "No; the error message only names the job id, not the operation or failing step."
+          location: "worker.py:6"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Yes; the job id is included in the error and printed output."
+          location: "worker.py:6"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Yes; only an integer job id is exposed in the error."
+          location: "worker.py:6"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Not applicable; no exception wrapping occurs in this code."
+          location: "worker.py:6"
+      unanswered: []
+  not_applied: []
+---APPLICATION_REPORT---

@@ -1,0 +1,3 @@
+The change makes processing idempotent: process() records each completed job
+before returning (worker.py:5), and retries are bounded to three attempts
+(worker.py:15). The test run completed without errors (see raw output).

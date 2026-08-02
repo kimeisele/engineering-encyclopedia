@@ -170,6 +170,40 @@ e5-Mistral (+0.27 vs 0.73) remains too small to call. Extending to n=15 did
 rule still rests on a single node (circuit-breaker on Mistral). Placebo at
 n=15 is at or below control on all four cells.
 
+## E6 — review.unsupported-claims (machine-checkable output)
+
+The first node whose own output is machine-checkable. The task provides a
+fixed diff (`worker.py`, new-file lines 1–22), a report with three claims
+(none of which the diff or raw output supports), and raw output; the review
+must return the unsupported claims, each with a location that exists in the
+diff. 30 completions (3 arms × 2 providers × 5), 0 failures. Scored two
+ways: the e6 rubric, and the **resolvable-location count** — a finding
+without a resolvable location is not a finding.
+
+| Provider | Arm | Rubric mean | Resolvable locations mean |
+|---|---|---|---|
+| DeepSeek | control | 3.00 | 2.00 |
+| DeepSeek | treatment | 3.20 | 2.40 |
+| DeepSeek | placebo | 3.60 | 3.60 |
+| Mistral | control | 2.40 | 2.00 |
+| Mistral | treatment | 3.20 | 2.00 |
+| Mistral | placebo | 3.00 | 1.60 |
+
+Plain reading: **E6 is a null result.** The treatment pack produced no
+measurable improvement on either metric. On DeepSeek the **placebo** arm
+scored highest on both the rubric and the resolvable-location count
+(3.60 / 3.60 vs treatment 3.20 / 2.40); on Mistral the treatment's
+resolvable-location count equals control (2.00 = 2.00). The treatment
+reviews do find the claims (e.g. DeepSeek treatment run-2 names all three
+and quotes the diff), but the machine-contract questions did not translate
+into higher location counts. The differences that exist are structural —
+any structured pack, placebo included, pushes more verbose, location-rich
+reviews — not knowledge. E6 is the third out-of-sample node without a clean
+effect, which further weakens the corpus rule and also the
+baseline-headroom hypothesis (E6 control baselines are low, 3.00 / 2.40,
+so headroom existed and the treatment still did not lift the metrics).
+e4-Mistral remains the sole clean effect in the out-of-sample set.
+
 ## Judgment (corpus rule, repaired instrument, n=15)
 
 With the repaired instrument and n=15 per out-of-sample arm, the corpus

@@ -1,0 +1,9 @@
+The report contains two unsupported claims:
+
+1. Claim: "process() records each completed job before returning (worker.py:5)"  
+   - Location: worker.py:5  
+   - Reason: The diff shows line 5 is `result = compute(job_id)`, which does not record anything. The function neither stores nor logs completed jobs.
+
+2. Claim: "retries are bounded to three attempts (worker.py:15)"  
+   - Location: worker.py:15  
+   - Reason: The diff shows line 15 is `for job in range(3):`, which iterates over three *distinct* jobs (0, 1, 2), not retries of the same job. There is no retry logic anywhere in the code. Additionally, the raw output shows "error: job 1 failed" only once, with no retry for job 1.
