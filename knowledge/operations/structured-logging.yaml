@@ -1,0 +1,74 @@
+id: operations.structured-logging
+version: 1
+title: Structured logging
+kind: guideline
+status: established
+
+summary: >
+  Logs are machine-parseable key-value records with a stable schema, not
+  formatted prose. Structured fields let operators filter, correlate and
+  alert; string-soup logs are a debugging dead end.
+
+intent_signals:
+  - log the error
+  - log message
+  - structured logs
+  - json logging
+  - key value log
+  - log level
+  - print statements
+  - logging config
+
+applies_when:
+  - a process emits logs that operators will search or alert on
+  - multiple services need to be correlated
+
+does_not_apply_when:
+  - a throwaway local script with no operator
+
+does_not_imply:
+  - that a pretty message replaces a structured record
+  - that logging is observability
+  - that more logging is better
+  - that levels are enforced automatically
+
+questions:
+  - Are log lines emitted as structured key-value records with a stable schema?
+  - Is the request or correlation id present on every line?
+  - Are levels used consistently, and is the error path distinct from the happy path?
+  - Does each log statement carry enough context to reproduce the event?
+
+techniques:
+  - key-value or JSON records with stable field names
+  - the correlation id threaded onto every line
+  - consistent level usage with error paths at error
+  - context fields attached at the boundary, not in every statement
+
+risks:
+  - f-string prose logs that cannot be filtered
+  - missing correlation ids on the error path
+  - logging secrets or payloads (see secrets-handling)
+  - per-iteration logging that drowns the signal
+
+relations:
+  related:
+    - observability.correlation-id
+  requires_consideration_of:
+    - security.secrets-handling
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, automation]
+  lifecycle_stages: [implementation, review, debugging, operation]
+
+provenance:
+  origin: curated
+  rationale: >
+    String-soup logging is a recurring operational failure that only shows
+    up under incident pressure. The questions force schema, correlation and
+    levels to be named; the secrets relation records the log-leak hazard.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [structured logging, key-value logs, json logs, log levels, observability]

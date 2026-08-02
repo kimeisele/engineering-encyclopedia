@@ -80,7 +80,7 @@
   required: [apis.versioning]
   forbidden_to_dominate: [apis.partial-updates]
 
-- query: "list all the users in one request"
+- query: "paginate the list of users with a next page token"
   required: [apis.pagination]
   forbidden_to_dominate: [performance.cache-invalidation]
 
@@ -95,3 +95,21 @@
 - query: "update just one field of the resource"
   required: [apis.partial-updates]
   forbidden_to_dominate: [apis.versioning]
+
+# Batch C (Slice 6): operations nodes
+
+- query: "log the error so we can search the logs"
+  required: [operations.structured-logging]
+  forbidden_to_dominate: [observability.error-context]
+
+- query: "add a health endpoint the scheduler can probe"
+  required: [operations.health-checks]
+  forbidden_to_dominate: [apis.http-status-semantics]
+
+- query: "stop the worker without losing in-flight jobs"
+  required: [operations.graceful-shutdown]
+  forbidden_to_dominate: [reliability.idempotency]
+
+- query: "the job queue is growing too fast for the slow consumer"
+  required: [operations.backpressure]
+  forbidden_to_dominate: [reliability.retry-semantics]

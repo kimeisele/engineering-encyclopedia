@@ -1,0 +1,84 @@
+id: operations.backpressure
+version: 1
+title: Backpressure
+kind: principle
+status: established
+
+summary: >
+  When producers outpace a consumer, buffers must be bounded: reject or
+  slow the producer. An unbounded queue converts a burst into an OOM or a
+  months-long catch-up.
+
+intent_signals:
+  - backpressure
+  - queue grows
+  - bounded queue
+  - too many requests
+  - slow consumer
+  - drop or reject
+  - buffer size
+  - load shedding
+
+applies_when:
+  - a producer and consumer are decoupled by a queue or buffer
+  - arrival rate can exceed processing rate
+
+does_not_apply_when:
+  - a synchronous request where the caller already waits
+
+does_not_imply:
+  - that dropping work is the only answer
+  - that a large buffer is backpressure
+  - that rejection without a signal is acceptable
+  - that retries make backpressure disappear
+
+questions:
+  - Is every buffer or queue bounded, and what happens when it fills?
+  - Is the rejection explicit and visible to the caller?
+  - Can the consumer signal its capacity to the producer?
+  - Is the bound tuned per stage, not one global number?
+
+techniques:
+  - bounded queues with an explicit overflow policy
+  - producer-side rate limiting or batching
+  - explicit rejection signals such as 429 or 503
+  - load shedding with a clear priority
+
+risks:
+  - an unbounded queue that grows without limit
+  - silent dropping of work
+  - retries that amplify the overload (see retry-semantics)
+  - rejection without a signal, so callers retry blindly
+
+tradeoffs:
+  - technique: reject overload
+    benefit: bounded memory and fast failure
+    cost: work is lost unless retried elsewhere
+    choose_when: the producer can retry later
+  - technique: slow the producer
+    benefit: no work lost
+    cost: coupling and latency
+    choose_when: the producer can wait
+
+relations:
+  related:
+    - reliability.retry-semantics
+  requires_consideration_of:
+    - apis.http-status-semantics
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, automation]
+  lifecycle_stages: [design, implementation, operation]
+
+provenance:
+  origin: curated
+  rationale: >
+    Unbounded buffers are a recurring overload failure; the bounded-queue
+    decision with an explicit overflow policy is what this node forces.
+    The retry relation records that retries amplify backpressure.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [backpressure, bounded queues, load shedding, overflow, "429", "503"]

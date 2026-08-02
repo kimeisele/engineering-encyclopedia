@@ -45,6 +45,10 @@ EXPECTED_IDS = {
     "apis.http-status-semantics",
     "apis.request-timeouts",
     "apis.partial-updates",
+    "operations.structured-logging",
+    "operations.health-checks",
+    "operations.graceful-shutdown",
+    "operations.backpressure",
 }
 
 REQUIRED_FIELDS = {
@@ -59,14 +63,14 @@ LIST_FIELDS = ENTRY_WORD_CHECKED_FIELDS
 
 
 class TestCorpus(unittest.TestCase):
-    def test_exactly_twenty_six_nodes(self):
+    def test_exactly_thirty_nodes(self):
         # The count is asserted: a short corpus fails rather than lowering
         # the expectation (Section 10). Raised by owner decision across the
         # corpus expansions — an intentional corpus change
         # (docs/CORPUS_RULE.md, DEVIATIONS D10/D11/D12/D13, Slice 6 batch A),
         # not a weakened test.
         nodes = load_nodes()
-        self.assertEqual(len(nodes), 26)
+        self.assertEqual(len(nodes), 30)
         self.assertEqual({n.id for n in nodes}, EXPECTED_IDS)
 
     def test_no_duplicate_ids(self):
