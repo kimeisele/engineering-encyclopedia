@@ -154,6 +154,68 @@ class TestPackLimits(unittest.TestCase):
                 )
 
 
+class TestNoMatch(unittest.TestCase):
+    """Slice 1: retrieval must not invent relevance.
+
+    A zero-score node must never be selected as primary; a query with no
+    overlap at all yields an empty pack marked ``no_match`` with a trace
+    reason. Both backends behave identically in this case.
+    """
+
+    UNKNOWN = "zyxwvutsrqponmlkjihgfedcba quux plugh frobnicate"
+    VAGUE = "the and of it to"
+    NEAR_MISS = "a worker queue that charges the same customer job twice"
+
+    def _indexes(self, nodes):
+        backends = ["token-overlap"] + (["fts5"] if fts5_available() else [])
+        return [RetrievalIndex(nodes, backend=b) for b in backends]
+
+    def test_completely_unknown_query_emits_no_match_pack(self):
+        nodes = load_nodes()
+        for index in self._indexes(nodes):
+            with self.subTest(backend=index.backend):
+                pack = compose_pack(nodes, index, self.UNKNOWN, PackOptions())
+                self.assertTrue(pack["trace"]["no_match"])
+                self.assertEqual(pack["context_pack"]["primary"], [])
+                self.assertEqual(pack["context_pack"]["supporting"], [])
+                self.assertEqual(pack["trace"]["selected"], [])
+                self.assertTrue(pack["trace"]["reason"])
+                self.assertEqual(len(pack["context_pack_hash"]), 12)
+
+    def test_zero_score_nodes_never_primary(self):
+        # The invariant behind the no-match rule: whatever the query, every
+        # primary node carries a positive score; ties no longer promote
+        # alphabetically-early zero-score nodes to primary.
+        nodes = load_nodes()
+        for index in self._indexes(nodes):
+            for query in (self.UNKNOWN, self.VAGUE, self.NEAR_MISS):
+                with self.subTest(backend=index.backend, query=query[:24]):
+                    ranked = dict(index.search(query))
+                    pack = compose_pack(nodes, index, query, PackOptions())
+                    for entry in pack["context_pack"]["primary"]:
+                        self.assertGreater(ranked[entry["id"]], 0.0, entry["id"])
+
+    def test_vague_query_still_selects(self):
+        # A query of function words matches everything at a small positive
+        # score; the pack is not empty and selection is deterministic.
+        # no_match is reserved for zero overlap, not for low signal.
+        nodes = load_nodes()
+        for index in self._indexes(nodes):
+            with self.subTest(backend=index.backend):
+                pack = compose_pack(nodes, index, self.VAGUE, PackOptions())
+                self.assertFalse(pack["trace"].get("no_match", False))
+                self.assertTrue(pack["context_pack"]["primary"])
+
+    def test_near_miss_query_selects_the_near_node(self):
+        nodes = load_nodes()
+        for index in self._indexes(nodes):
+            with self.subTest(backend=index.backend):
+                pack = compose_pack(nodes, index, self.NEAR_MISS, PackOptions())
+                self.assertFalse(pack["trace"].get("no_match", False))
+                primary_ids = {e["id"] for e in pack["context_pack"]["primary"]}
+                self.assertIn("reliability.idempotency", primary_ids)
+
+
 def _hash_without_own_field(pack):
     import hashlib
 
