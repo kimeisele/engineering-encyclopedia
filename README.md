@@ -55,8 +55,10 @@ providers, one in-sample anomaly. The knowledge is **supported** by the
 in-sample result, never claimed as proven; **out of sample the corpus rule
 is not supported** — the only clean effect is a single cell (e4-Mistral,
 on one provider, on one node), which cannot carry a rule, so the rule is
-retained as an unsupported hypothesis. Full detail, raw scores and
-caveats: `experiments/RESULTS.md`.
+retained as an unsupported hypothesis. The `review.*` namespace (node 16)
+does not demonstrate an effect — its E6 null survived a measurement audit
+(`docs/OOS_E6_AUDIT.md`), the third instrument defect the project has
+caught. Full detail, raw scores and caveats: `experiments/RESULTS.md`.
 
 ## Repository layout
 
