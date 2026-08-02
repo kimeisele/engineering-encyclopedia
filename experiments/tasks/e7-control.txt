@@ -1,0 +1,1 @@
+Write a function that updates a shared counter. Two workers may update it at the same time; choose a locking or conflict-detection strategy so that no update is ever lost.

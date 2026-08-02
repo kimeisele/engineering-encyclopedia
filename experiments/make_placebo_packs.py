@@ -35,6 +35,8 @@ TASKS = {
     "e4": "Write a function that calls a downstream HTTP API and must not hammer it while it is down.",
     "e5": "Write an error handler for a two-service request so an operator can trace one request across both services.",
     "e6": "A change was made to worker.py. Review the report against the diff and the raw output. Return every claim that is not supported, each with a location.",
+    "e7": "Write a function that updates a shared counter. Two workers may update it at the same time; choose a locking or conflict-detection strategy so that no update is ever lost.",
+    "e8": "Write a function that returns a cached value for a key, and must not serve a stale value after the source data changes.",
 }
 
 IRRELEVANT_NODE = "observability.error-context"

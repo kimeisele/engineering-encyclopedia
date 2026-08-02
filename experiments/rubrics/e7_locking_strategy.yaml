@@ -1,0 +1,33 @@
+task: e7
+node: concurrency.locking-strategy
+description: >
+  Deterministic rubric for E7 (pre-registered convergence test): does the
+  produced counter increment lose no update under concurrent workers?
+  Fixed before any run. Every criterion is a boolean (re.search + re.DOTALL
+  over the scored artifact); the score is the count of satisfied criteria.
+
+criteria:
+  - id: atomic_guard
+    description: "the increment is atomic or conflict-guarded (CAS, unique, transaction, atomic)"
+    kind: present
+    pattern: "(atomic|compare[- ]?and[- ]?swap|\\bCAS\\b|UPDATE .* SET|INSERT.*ON CONFLICT|insert or ignore|unique)"
+  - id: explicit_lock
+    description: "an explicit lock or mutex protects the critical section"
+    kind: present
+    pattern: "(Lock\\(\\)|RLock\\(|mutex|acquire\\(|release\\(|with .*lock)"
+  - id: version_or_cas_field
+    description: "a version / expected-value field detects the conflict"
+    kind: present
+    pattern: "(version|updated_at|expected|WHERE [a-z_]+ =)"
+  - id: guarded_read_modify_write
+    description: "read and write happen inside one guard"
+    kind: present
+    pattern: "(with .*lock:|with atomic|atomic\\s*\\(|CAS\\s*\\()"
+  - id: contention_handling
+    description: "conflict or contention is handled (retry, except, conflict)"
+    kind: present
+    pattern: "(retry|except|conflict)"
+  - id: no_timestamp_identity
+    description: "the value identity is not derived from a timestamp"
+    kind: absent
+    pattern: "(time\\.time\\(\\)|datetime\\.now|perf_counter)"

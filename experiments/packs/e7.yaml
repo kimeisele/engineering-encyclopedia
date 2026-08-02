@@ -1,0 +1,119 @@
+context_pack:
+  primary:
+  - does_not_imply:
+    - that a lock makes the surrounding logic correct
+    - that optimistic locking needs no retry handling
+    - that pessimistic locking scales
+    - that any lock beats a unique constraint
+    hash: 808d887672aa
+    id: concurrency.locking-strategy
+    questions:
+    - What identifies the version of the state being changed?
+    - Is the conflict detected before or after the write?
+    - How long is the lock held, and across what?
+    - What happens when the conflict is detected?
+    relevance: two writers update the same row
+    risks:
+    - locks held across network or slow io
+    - version fields that never change
+    - optimistic retries without a bound
+    - a global lock that serialises everything
+    summary: 'Locks are a decision, not a default: choose optimistic or pessimistic
+      control, identify the version that detects conflict, and scope the lock to the
+      critical section. The wrong strategy is a deadlock or a race dressed up as safety.
+
+      '
+    version: 1
+  - does_not_imply:
+    - that locks are the only answer
+    - that a mutex makes the surrounding logic correct
+    - that a race will show up in tests
+    - that the bug is in the last code changed
+    hash: 785591749aba
+    id: concurrency.race-conditions
+    questions:
+    - What state is shared, and where is it mutated?
+    - Is the read-and-write sequence atomic as one step?
+    - Can two workers observe the same value as unclaimed?
+    - What happens if the check and the action are interleaved?
+    relevance: two threads update the same counter
+    risks:
+    - check-then-act on shared state without atomicity
+    - locks held across slow I/O
+    - assuming tests expose the interleaving
+    summary: 'A race condition is a flaw in timing: the outcome depends on the order
+      in which concurrent operations happen to interleave. Any check-then-act sequence
+      that is not atomic can observe stale state and make a wrong decision.
+
+      '
+    version: 1
+  - does_not_imply:
+    - durability across power loss without an fsync
+    - that directory metadata is also flushed
+    - that concurrent writers are safe
+    - that the new content is valid
+    hash: 4c5573dcd875
+    id: python.files.atomic-replacement
+    questions:
+    - Is the temp file created in the same directory as the target?
+    - Is the data flushed before the rename?
+    - What happens to the temp file if the write fails?
+    - Can two writers both rename over the target?
+    relevance: write the config file atomically
+    risks:
+    - renaming across filesystems, which is not atomic
+    - omitting fsync and losing data on power loss
+    - leftover temp files after a crash
+    - a config file replaced with an invalid new version
+    summary: 'Update a file by writing a temporary file in the same directory, flushing
+      it, and renaming it over the target. The rename is atomic on POSIX, so readers
+      see either the old or the new content, never a truncated middle state.
+
+      '
+    version: 1
+  supporting:
+  - does_not_imply:
+    - that a TTL alone keeps the cache correct
+    - that invalidation is free
+    - that a short TTL fixes a wrong key
+    - that every reader needs the newest value
+    hash: 9dcaeca5d909
+    id: performance.cache-invalidation
+    questions:
+    - What identifies a cached entry, and does it include the source version?
+    - What invalidates the entry, and is that tied to the source change?
+    - What does a reader see between the source change and the invalidation?
+    - What happens when the cache is empty and many readers arrive at once?
+    relevance: the cache is not cleared after an update
+    risks:
+    - keys that do not change when the source changes
+    - invalidation running before the write is durable
+    - unbounded staleness from out-of-band source updates
+    - thundering herd on expiry
+    summary: 'A cache is only correct while its invalidation is correct. The decision
+      is what identifies a cached entry and what changes when the source changes;
+      without an explicit invalidation rule, a cache silently serves the old answer
+      forever.
+
+      '
+    version: 1
+context_pack_hash: aebf503e4e8c
+knowledge_revision: 96bf58e88848
+request:
+  original: Write a function that updates a shared counter. Two workers may update
+    it at the same time; choose a locking or conflict-detection strategy so that no
+    update is ever lost.
+retrieval_backend: fts5
+trace:
+  excluded:
+  - reliability.dead-letter-queue
+  - reliability.retry-semantics
+  - reliability.circuit-breaker
+  - observability.correlation-id
+  - security.input-validation
+  selected:
+  - concurrency.locking-strategy
+  - concurrency.race-conditions
+  - python.files.atomic-replacement
+  - performance.cache-invalidation
+  truncated: true

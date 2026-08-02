@@ -54,6 +54,8 @@ RUBRIC_FILES = {
     "e4": "e4_circuit_breaker.yaml",
     "e5": "e5_correlation_id.yaml",
     "e6": "e6_unsupported_claims.yaml",
+    "e7": "e7_locking_strategy.yaml",
+    "e8": "e8_cache_invalidation.yaml",
 }
 
 ARMS = ("control", "treatment", "placebo")
