@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .canonical import canonical_bytes, sha256_prefix
-from .loader import Node, load_yaml_file
+from .loader import Node, corpus_revision, load_yaml_file
 from .words import count_words
 
 MAX_ANSWER_WORDS = 40
@@ -36,31 +36,52 @@ def verify_report(
     report_path: Path,
     pack_path: Path,
     nodes: List[Node],
-) -> Tuple[bool, List[Dict[str, str]]]:
+) -> Tuple[bool, List[Dict[str, str]], Dict[str, Any]]:
     """Verify an Application Report against its context pack.
 
-    Returns ``(ok, failures)`` where ``failures`` is a machine-readable list
-    of ``{"code", "detail"}`` dicts. ``ok`` is True iff the list is empty.
+    Primary truth is the **supplied pack** (Slice 2): pack hash and
+    ``knowledge_revision`` binding, node presence, versions and hashes as
+    recorded in the pack, questions as bound by the pack's node hashes, and
+    every pack node disposed exactly once. Verification is stable against
+    corpus growth: a historical pack stays verifiable after the corpus moves
+    on, so past reports are never retroactively invalidated by a node edit.
+
+    Returns ``(ok, failures, corpus)``:
+    - ``ok``/``failures`` cover only the pack-bound checks above;
+    - ``corpus`` is a **separate, non-fatal** cross-check against the current
+      corpus: ``{"status": "current" | "drifted" | "stale" | "unknown",
+      "details": [...]}``. It runs fully only when the report's
+      ``knowledge_revision`` equals the current corpus revision; otherwise
+      it reports ``stale`` (the corpus has moved on) and never fails the
+      report. The report is bound to the pack it was written against, not to
+      a corpus that may have changed since.
+
+    Where the pack records no questions (``compact`` detail), question-level
+    checks fall back to the corpus questions only while the pack-recorded
+    hash still matches the current corpus node; otherwise those checks are
+    skipped and noted in ``corpus.details``.
     """
     failures: List[Dict[str, str]] = []
+    corpus: Dict[str, Any] = {"status": "unknown", "details": []}
     node_by_id = {node.id: node for node in nodes}
+    current_revision = corpus_revision(nodes)
 
     try:
         report = _load_yaml(report_path)
         pack = _load_yaml(pack_path)
     except (OSError, ValueError) as exc:
-        return False, [{"code": "unreadable", "detail": str(exc)}]
+        return False, [{"code": "unreadable", "detail": str(exc)}], corpus
     except (yaml.YAMLError, RecursionError) as exc:
-        return False, [{"code": "invalid_yaml", "detail": str(exc)}]
+        return False, [{"code": "invalid_yaml", "detail": str(exc)}], corpus
 
     if not isinstance(report, dict) or not isinstance(report.get("application_report"), dict):
         _fail(failures, "missing_application_report", "report has no application_report mapping")
-        return False, failures
+        return False, failures, corpus
     app = report["application_report"]
 
     if not isinstance(pack, dict):
         _fail(failures, "invalid_pack", "pack file is not a mapping")
-        return False, failures
+        return False, failures, corpus
 
     # --- binding to the pack --------------------------------------------
     if app.get("context_pack_hash") != pack.get("context_pack_hash"):
@@ -92,13 +113,13 @@ def verify_report(
     context_pack = pack.get("context_pack")
     if not isinstance(context_pack, dict):
         _fail(failures, "invalid_pack", "pack has no context_pack mapping")
-        return False, failures
-    pack_node_ids = []
+        return False, failures, corpus
+    pack_entries: Dict[str, Dict[str, Any]] = {}
     for section in ("primary", "supporting"):
         for entry in context_pack.get(section, []) or []:
             if isinstance(entry, dict) and "id" in entry:
-                pack_node_ids.append(entry["id"])
-    pack_node_set = set(pack_node_ids)
+                pack_entries[entry["id"]] = entry
+    pack_node_set = set(pack_entries)
 
     applied = app.get("applied", []) or []
     not_applied = app.get("not_applied", []) or []
@@ -139,49 +160,64 @@ def verify_report(
             f"{node_id} is in the pack but neither applied nor not_applied",
         )
 
-    # --- binding to the corpus -------------------------------------------
-    for disposition, entries in (("applied", applied), ("not_applied", not_applied)):
-        for entry in entries:
-            node_id = _node_id(entry)
-            if node_id is None:
-                continue
-            corpus_node = node_by_id.get(node_id)
-            if corpus_node is None:
-                _fail(failures, "unknown_node", f"{node_id} does not exist in the corpus")
-                continue
-            if disposition == "applied":
-                if entry.get("version") != corpus_node.version:
-                    _fail(
-                        failures,
-                        "wrong_version",
-                        f"{node_id}: version {entry.get('version')} != corpus {corpus_node.version}",
-                    )
-                if entry.get("hash") != corpus_node.content_hash:
-                    _fail(
-                        failures,
-                        "wrong_hash",
-                        f"{node_id}: hash {entry.get('hash')} != corpus {corpus_node.content_hash}",
-                    )
-
-    # --- binding to the node content -------------------------------------
-    corpus_questions: Dict[str, List[str]] = {
-        node.id: [str(q) for q in (node.data.get("questions", []) or [])]
-        for node in nodes
-    }
+    # --- applied version/hash against the PACK-recorded values -----------
+    # The report echoes what the pack recorded at composition time; the
+    # current corpus may have moved on and must not invalidate that.
     for entry in applied:
         node_id = _node_id(entry)
-        if node_id is None or node_id not in corpus_questions:
+        if node_id is None or node_id not in pack_entries:
             continue
+        recorded = pack_entries[node_id]
+        if entry.get("version") != recorded.get("version"):
+            _fail(
+                failures,
+                "wrong_version",
+                f"{node_id}: version {entry.get('version')} != pack-recorded {recorded.get('version')}",
+            )
+        if entry.get("hash") != recorded.get("hash"):
+            _fail(
+                failures,
+                "wrong_hash",
+                f"{node_id}: hash {entry.get('hash')} != pack-recorded {recorded.get('hash')}",
+            )
+
+    # --- questions bound by the pack's node hashes -------------------------
+    def questions_for(node_id: str) -> Optional[List[str]]:
+        """The authoritative question list for a pack node.
+
+        Pack-recorded questions win where the pack carries them
+        (``guidance``/``full``). For a ``compact`` pack (no questions) the
+        corpus questions are used only while the pack-recorded hash still
+        matches the current corpus node — i.e. the corpus content is what the
+        pack recorded. Otherwise the pack binds no question content.
+        """
+        entry = pack_entries.get(node_id)
+        if entry is None:
+            return None
+        if isinstance(entry.get("questions"), list):
+            return [str(q) for q in entry["questions"]]
+        corpus_node = node_by_id.get(node_id)
+        if corpus_node is not None and entry.get("hash") == corpus_node.content_hash:
+            return [str(q) for q in (corpus_node.data.get("questions", []) or [])]
+        return None
+
+    for entry in applied:
+        node_id = _node_id(entry)
+        if node_id is None or node_id not in pack_entries:
+            continue
+        questions = questions_for(node_id)
+        if questions is None:
+            corpus["details"].append(
+                f"questions not verified for {node_id}: the pack records no "
+                "questions and the corpus no longer matches the pack-recorded hash"
+            )
+        # answers and locations are validated against the report's own
+        # content regardless of the authoritative question set
         for question in entry.get("questions_answered", []) or []:
-            q = question.get("question") if isinstance(question, dict) else None
-            if q is not None and q not in corpus_questions[node_id]:
-                _fail(
-                    failures,
-                    "altered_question",
-                    f"{node_id}: question {q!r} is not a question of this node",
-                )
-            answer = question.get("answer") if isinstance(question, dict) else None
-            location = question.get("location") if isinstance(question, dict) else None
+            if not isinstance(question, dict):
+                continue
+            answer = question.get("answer")
+            location = question.get("location")
             if not (isinstance(answer, str) and answer.strip()):
                 _fail(failures, "empty_answer", f"{node_id}: answer must be non-empty")
             elif count_words(str(answer)) > MAX_ANSWER_WORDS:
@@ -192,6 +228,17 @@ def verify_report(
                 )
             if not (isinstance(location, str) and location.strip()):
                 _fail(failures, "empty_location", f"{node_id}: location must be non-empty")
+        if questions is None:
+            continue
+        question_set = set(questions)
+        for question in entry.get("questions_answered", []) or []:
+            q = question.get("question") if isinstance(question, dict) else None
+            if q is not None and q not in question_set:
+                _fail(
+                    failures,
+                    "altered_question",
+                    f"{node_id}: question {q!r} is not a question of this node",
+                )
 
         # every question of an applied node must be answered or marked unanswered
         answered = {
@@ -227,7 +274,7 @@ def verify_report(
                             f"{node_id}: question {q!r} repeated in {label}",
                         )
                     seen.add(q)
-        for question in corpus_questions[node_id]:
+        for question in questions:
             if question not in answered and question not in unanswered:
                 _fail(
                     failures,
@@ -236,7 +283,7 @@ def verify_report(
                 )
         for entry_un in entry.get("unanswered", []) or []:
             q = entry_un.get("question") if isinstance(entry_un, dict) else None
-            if q is not None and q not in corpus_questions[node_id]:
+            if q is not None and q not in question_set:
                 _fail(
                     failures,
                     "altered_question",
@@ -248,4 +295,31 @@ def verify_report(
         if not (isinstance(reason, str) and reason.strip()):
             _fail(failures, "empty_reason", "not_applied entry lacks a non-empty reason")
 
-    return (not failures, failures)
+    # --- current-corpus cross-check (separate, conditional, non-fatal) ----
+    report_revision = app.get("knowledge_revision")
+    if report_revision == current_revision:
+        drifted = []
+        for node_id in sorted(pack_entries):
+            corpus_node = node_by_id.get(node_id)
+            recorded = pack_entries[node_id]
+            if corpus_node is None:
+                drifted.append(f"{node_id}: missing from corpus")
+            elif recorded.get("hash") != corpus_node.content_hash:
+                drifted.append(
+                    f"{node_id}: corpus hash {corpus_node.content_hash} "
+                    f"!= pack-recorded {recorded.get('hash')}"
+                )
+        corpus = {
+            "status": "current" if not drifted else "drifted",
+            "details": drifted,
+        }
+    else:
+        corpus = {
+            "status": "stale",
+            "details": [
+                f"corpus revision {current_revision} != report revision "
+                f"{report_revision!r}; the corpus has moved on"
+            ],
+        }
+
+    return (not failures, failures, corpus)

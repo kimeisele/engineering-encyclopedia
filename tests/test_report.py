@@ -78,10 +78,10 @@ class TestVerifyReport(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _write_and_verify(self, report=None):
+    def _write_and_verify(self, report=None, nodes=None):
         path = self.report_path
         path.write_text(yaml.safe_dump(report or self.report, sort_keys=True), encoding="utf-8")
-        return verify_report(path, self.pack_path, self.nodes)
+        return verify_report(path, self.pack_path, nodes if nodes is not None else self.nodes)
 
     def _mutate(self, mutator):
         report = yaml.safe_load(yaml.safe_dump(self.report))  # deep copy
@@ -91,9 +91,10 @@ class TestVerifyReport(unittest.TestCase):
     # -- positive case -----------------------------------------------------
 
     def test_accepts_well_formed_report(self):
-        ok, failures = self._write_and_verify()
+        ok, failures, corpus = self._write_and_verify()
         self.assertTrue(ok, msg=failures)
         self.assertEqual(failures, [])
+        self.assertEqual(corpus["status"], "current")
 
     # -- binding to the pack ------------------------------------------------
 
@@ -101,7 +102,7 @@ class TestVerifyReport(unittest.TestCase):
         report = self._mutate(
             lambda r: r["application_report"].__setitem__("context_pack_hash", "000000000000")
         )
-        ok, failures = self._write_and_verify(report)
+        ok, failures, _corpus = self._write_and_verify(report)
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "context_pack_hash_mismatch" for f in failures))
 
@@ -109,7 +110,7 @@ class TestVerifyReport(unittest.TestCase):
         report = self._mutate(
             lambda r: r["application_report"].__setitem__("knowledge_revision", "000000000000")
         )
-        ok, failures = self._write_and_verify(report)
+        ok, failures, _corpus = self._write_and_verify(report)
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "knowledge_revision_mismatch" for f in failures))
 
@@ -117,7 +118,7 @@ class TestVerifyReport(unittest.TestCase):
         def mutate(r):
             entry = r["application_report"]["not_applied"].pop()
             del entry
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "omitted_pack_node" for f in failures))
 
@@ -134,7 +135,7 @@ class TestVerifyReport(unittest.TestCase):
             r["application_report"]["not_applied"].append(
                 {"node": absent, "reason": "extra"}
             )
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "node_not_in_pack" for f in failures))
 
@@ -143,7 +144,7 @@ class TestVerifyReport(unittest.TestCase):
             r["application_report"]["not_applied"].append(
                 dict(r["application_report"]["not_applied"][0])
             )
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "duplicate_disposition" for f in failures))
 
@@ -153,7 +154,7 @@ class TestVerifyReport(unittest.TestCase):
             r["application_report"]["not_applied"].append(
                 {"node": first, "reason": "also not applied"}
             )
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "duplicate_disposition" for f in failures))
 
@@ -164,7 +165,7 @@ class TestVerifyReport(unittest.TestCase):
             applied = r["application_report"]["applied"][0]
             question = applied["questions_answered"][0]["question"]
             applied["unanswered"].append({"question": question, "reason": "not really"})
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "contradictory_disposition" for f in failures))
 
@@ -174,7 +175,7 @@ class TestVerifyReport(unittest.TestCase):
             applied["questions_answered"].append(
                 dict(applied["questions_answered"][0])
             )
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "duplicate_question" for f in failures))
 
@@ -185,22 +186,127 @@ class TestVerifyReport(unittest.TestCase):
             r["application_report"]["not_applied"].append(
                 {"node": "no.such.node", "reason": "extra"}
             )
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
-        self.assertTrue(any(f["code"] == "unknown_node" for f in failures))
         self.assertTrue(any(f["code"] == "node_not_in_pack" for f in failures))
+        self.assertFalse(any(f["code"] == "unknown_node" for f in failures))
+
+    # -- binding to the corpus (Slice 2: pack is primary truth) ---------------
+
+    def test_old_pack_verifies_after_corpus_grows(self):
+        # A pack composed against a subset corpus (an "old" corpus) must stay
+        # verifiable when verified against the grown corpus: the report is
+        # bound to the pack, and the corpus cross-check reports stale
+        # non-fatally instead of failing.
+        old_ids = [
+            "reliability.idempotency",
+            "reliability.retry-semantics",
+            "concurrency.race-conditions",
+            "python.files.atomic-replacement",
+            "python.processes.subprocess-safety",
+        ]
+        old_nodes = [n for n in load_nodes() if n.id in old_ids]
+        old_index = RetrievalIndex(old_nodes)
+        old_pack = compose_pack(old_nodes, old_index, E1, PackOptions())
+        old_pack_path = self.tmpdir / "old_pack.yaml"
+        old_pack_path.write_text(
+            yaml.safe_dump(old_pack, sort_keys=True), encoding="utf-8"
+        )
+        old_report = build_report(old_pack, old_nodes)
+        old_report_path = self.tmpdir / "old_report.yaml"
+        old_report_path.write_text(
+            yaml.safe_dump(old_report, sort_keys=True), encoding="utf-8"
+        )
+        # verify against the full, grown corpus
+        ok, failures, corpus = verify_report(
+            old_report_path, old_pack_path, load_nodes()
+        )
+        self.assertTrue(ok, msg=failures)
+        self.assertEqual(failures, [])
+        self.assertEqual(corpus["status"], "stale")
+        self.assertTrue(any("corpus has moved on" in d for d in corpus["details"]))
+
+    def test_edited_node_pack_still_verifies_against_pack_questions(self):
+        # A pack whose node has since been edited (different questions,
+        # version, hash) verifies against the pack's recorded questions —
+        # not against the current corpus — and reports corpus drift
+        # non-fatally.
+        nodes = load_nodes()
+        index = RetrievalIndex(nodes)
+        pack = compose_pack(nodes, index, E1, PackOptions())
+        pack_path = self.tmpdir / "pack.yaml"
+        pack_path.write_text(yaml.safe_dump(pack, sort_keys=True), encoding="utf-8")
+        report = build_report(pack, nodes)
+        report_path = self.tmpdir / "report.yaml"
+        report_path.write_text(yaml.safe_dump(report, sort_keys=True), encoding="utf-8")
+
+        first_id = pack["context_pack"]["primary"][0]["id"]
+        edited = self._edited_node(next(n for n in nodes if n.id == first_id))
+        edited_corpus = [
+            edited if n.id == first_id else n for n in nodes
+        ]
+        ok, failures, corpus = verify_report(report_path, pack_path, edited_corpus)
+        self.assertTrue(ok, msg=failures)
+        self.assertEqual(failures, [])
+        # the edited corpus has a different revision, so the cross-check is
+        # stale (a per-node "drifted" report is unreachable by construction:
+        # any node edit changes corpus_revision, and report.knowledge_revision
+        # must equal the pack's)
+        self.assertEqual(corpus["status"], "stale")
+        self.assertTrue(
+            any("corpus has moved on" in d for d in corpus["details"])
+        )
+
+        # and an answer to a question from the EDITED node (not in the pack)
+        # is still rejected — questions bind to the pack, not the corpus
+        report2 = yaml.safe_load(yaml.safe_dump(report))
+        edited_question = edited.data["questions"][-1]
+        report2["application_report"]["applied"][0]["questions_answered"].append(
+            {
+                "question": edited_question,
+                "answer": "from the edited corpus",
+                "location": "tests/test_report.py:1",
+            }
+        )
+        report_path.write_text(
+            yaml.safe_dump(report2, sort_keys=True), encoding="utf-8"
+        )
+        ok2, failures2, _c = verify_report(report_path, pack_path, edited_corpus)
+        self.assertFalse(ok2)
+        self.assertTrue(any(f["code"] == "altered_question" for f in failures2))
+
+    @staticmethod
+    def _edited_node(base):
+        from encyclopedia.canonical import node_content_hash
+        from encyclopedia.loader import Node
+
+        data = dict(base.data)
+        data["questions"] = list(data.get("questions", []) or []) + [
+            "A question only the edited corpus has?"
+        ]
+        data["version"] = int(data.get("version", 1)) + 1
+        return Node(
+            id=base.id,
+            version=data["version"],
+            title=base.title,
+            kind=base.kind,
+            status=base.status,
+            data=data,
+            content_hash=node_content_hash(data),
+            path=base.path,
+        )
 
     def test_wrong_version_rejected(self):
         def mutate(r):
             r["application_report"]["applied"][0]["version"] += 1
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "wrong_version" for f in failures))
 
     def test_wrong_content_hash_rejected(self):
         def mutate(r):
             r["application_report"]["applied"][0]["hash"] = "deadbeef0000"
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "wrong_hash" for f in failures))
 
@@ -210,21 +316,21 @@ class TestVerifyReport(unittest.TestCase):
         def mutate(r):
             qa = r["application_report"]["applied"][0]["questions_answered"][0]
             qa["question"] = qa["question"] + " and something else?"
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "altered_question" for f in failures))
 
     def test_omitted_question_rejected(self):
         def mutate(r):
             r["application_report"]["applied"][0]["questions_answered"].pop()
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "omitted_question" for f in failures))
 
     def test_empty_answer_rejected(self):
         def mutate(r):
             r["application_report"]["applied"][0]["questions_answered"][0]["answer"] = "   "
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "empty_answer" for f in failures))
 
@@ -233,21 +339,21 @@ class TestVerifyReport(unittest.TestCase):
             r["application_report"]["applied"][0]["questions_answered"][0]["answer"] = (
                 " ".join(["word"] * 41)
             )
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "answer_too_long" for f in failures))
 
     def test_empty_location_rejected(self):
         def mutate(r):
             r["application_report"]["applied"][0]["questions_answered"][0]["location"] = ""
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "empty_location" for f in failures))
 
     def test_empty_reason_rejected(self):
         def mutate(r):
             r["application_report"]["not_applied"][0]["reason"] = ""
-        ok, failures = self._write_and_verify(self._mutate(mutate))
+        ok, failures, _corpus = self._write_and_verify(self._mutate(mutate))
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "empty_reason" for f in failures))
 
@@ -262,12 +368,12 @@ class TestVerifyReport(unittest.TestCase):
         report_path.write_text(
             yaml.safe_dump(self.report, sort_keys=True), encoding="utf-8"
         )
-        ok, failures = verify_report(report_path, tampered_path, self.nodes)
+        ok, failures, _corpus = verify_report(report_path, tampered_path, self.nodes)
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "pack_hash_mismatch" for f in failures))
 
     def test_missing_pack_is_hard_error(self):
-        ok, failures = verify_report(self.report_path, self.tmpdir / "nope.yaml", self.nodes)
+        ok, failures, _corpus = verify_report(self.report_path, self.tmpdir / "nope.yaml", self.nodes)
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "unreadable" for f in failures))
 
@@ -276,7 +382,7 @@ class TestVerifyReport(unittest.TestCase):
     def test_oversized_report_rejected_cleanly(self):
         # > 2 MiB report must fail with a clean error, not exhaust memory.
         self.report_path.write_text("x" * (2 * 1024 * 1024 + 1), encoding="utf-8")
-        ok, failures = verify_report(self.report_path, self.pack_path, self.nodes)
+        ok, failures, _corpus = verify_report(self.report_path, self.pack_path, self.nodes)
         self.assertFalse(ok)
         self.assertTrue(any(f["code"] == "unreadable" for f in failures))
 
@@ -284,7 +390,7 @@ class TestVerifyReport(unittest.TestCase):
         # deep nesting must surface as a clean validation failure, not an
         # uncaught RecursionError traceback.
         self.report_path.write_text("[" * 10_000 + "]" * 10_000, encoding="utf-8")
-        ok, failures = verify_report(self.report_path, self.pack_path, self.nodes)
+        ok, failures, _corpus = verify_report(self.report_path, self.pack_path, self.nodes)
         self.assertFalse(ok)
         codes = [f["code"] for f in failures]
         self.assertTrue(any(c in ("unreadable", "invalid_yaml") for c in codes), codes)
