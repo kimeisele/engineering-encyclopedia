@@ -1,16 +1,19 @@
 # What distinguishes the one working cell
 
-Item 1 of the closing phase. Both predictors are dead (the corpus rule; the
-baseline-headroom hypothesis — falsified by E6-Mistral having the lowest
-unaided baseline and showing no effect). No third hypothesis is proposed
-from theory. This is a concrete, evidence-only description of what the pack
-did in the working cell (e4-Mistral) that it did not do in the failing
-cells (e5 both providers; E6 both providers).
+Item 1 of the closing phase. Neither predictor is supported: the corpus
+rule is unsupported out-of-sample (retained as a hypothesis, not
+falsified), and the baseline-headroom hypothesis is falsified by
+E6-Mistral having the lowest unaided baseline and showing no effect. No
+third hypothesis is proposed from theory. This is a concrete,
+evidence-only description of what the pack did in the working cell
+(e4-Mistral) that it did not do in the failing cells (e5 both providers;
+E6 both providers).
 
 ## The working cell: e4-Mistral
 
-The pack's content became the artifact, verbatim, and was entirely absent
-unaided.
+The pack's guidance became the artifact: the treatment implements the
+state machine the node's questions and techniques point at, and the
+unaided control contains none of it.
 
 Treatment run-1 (score 6/6):
 ```
@@ -47,12 +50,13 @@ teaches is present without it. Control means 5.07 (DeepSeek) / 5.33
 could see, because the metric could already see the construct.
 
 **E6 (both providers): the pack's questions were echoed in prose, but the
-measured output did not move.** Mistral treatment run-1 names the claims
-with locations ("... at worker.py:5", "... at worker.py:15"), but its
-resolvable-location count is 2, identical to control (2.00): the unaided
-control already cites the same two diff-locatable claims. The pack changed
-the review's phrasing, not the number of resolvable locations. (The E6
-measurement was itself repaired in the audit — `docs/OOS_E6_AUDIT.md` —
+resolvable-location count did not move.** Mistral treatment run-1 names the
+claims with locations ("... at worker.py:5", "... at worker.py:15"), but
+its resolvable-location count is 2, identical to control (2.00): the
+unaided control already cites the same two diff-locatable claims. The pack
+changed the review's phrasing and raised the rubric (Mistral treatment
+2.80 → 3.60 after repair), but not the number of resolvable locations. (The
+E6 measurement was itself repaired in the audit — `docs/OOS_E6_AUDIT.md` —
 and the null survived.)
 
 ## The description, and its limit
