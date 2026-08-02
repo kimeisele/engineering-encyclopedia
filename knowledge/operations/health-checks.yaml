@@ -1,0 +1,74 @@
+id: operations.health-checks
+version: 1
+title: Health checks
+kind: pattern
+status: established
+
+summary: >
+  Liveness asks whether the process is alive; readiness asks whether it can
+  serve traffic. Liveness must never depend on external dependencies, and
+  readiness must include the dependencies a request actually needs.
+
+intent_signals:
+  - health check
+  - readiness
+  - liveness
+  - health endpoint
+  - is the service up
+  - ping endpoint
+  - startup check
+
+applies_when:
+  - a process runs behind a scheduler or load balancer that probes it
+  - readiness and liveness can differ
+
+does_not_apply_when:
+  - a single long-running process with no orchestrator probing it
+
+does_not_imply:
+  - that a green health check means correct behavior
+  - that readiness and liveness are the same endpoint
+  - that dependency checks are free
+  - that a failing liveness check restarts anything by itself
+
+questions:
+  - Is liveness independent of dependencies, so it cannot flap on a blip?
+  - Does readiness include the dependencies a request actually needs?
+  - Do the checks have their own timeout and error handling?
+  - Is the check cheap enough to be called frequently?
+
+techniques:
+  - liveness returns ok when the process can answer at all
+  - readiness probes the request-path dependencies
+  - separate endpoints with their own timeouts
+  - no side effects or heavy work inside a check
+
+risks:
+  - liveness tied to a database that blips
+  - readiness missing the real dependency
+  - expensive checks on the probe path
+  - checks that never fail and prove nothing
+
+relations:
+  related:
+    - apis.http-status-semantics
+  requires_consideration_of:
+    - apis.request-timeouts
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, automation]
+  lifecycle_stages: [implementation, operation]
+
+provenance:
+  origin: curated
+  rationale: >
+    Liveness-versus-readiness confusion is a recurring orchestration
+    failure: dependency flapping restarts healthy processes, or readiness
+    misses the actual bottleneck. The questions force the two probes to be
+    named separately.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [health checks, readiness, liveness, probes, health endpoint]

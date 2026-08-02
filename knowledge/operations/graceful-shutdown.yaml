@@ -1,0 +1,74 @@
+id: operations.graceful-shutdown
+version: 1
+title: Graceful shutdown
+kind: pattern
+status: established
+
+summary: >
+  On shutdown a worker stops taking new work, finishes in-flight work
+  within a bounded deadline, then exits. Abandoning in-flight work mid-
+  effect is the failure; so is a drain that never ends.
+
+intent_signals:
+  - graceful shutdown
+  - sigterm
+  - drain
+  - stop taking new jobs
+  - shutdown hook
+  - finish in flight
+  - stop the worker
+
+applies_when:
+  - a process receives SIGTERM or an equivalent stop signal
+  - in-flight work has effects that should not be interrupted
+
+does_not_apply_when:
+  - a stateless request handler where dropping requests is acceptable
+
+does_not_imply:
+  - that a signal handler makes shutdown correct by itself
+  - that a deadline removes the need for resumability
+  - that in-flight work always completes on a hard kill
+  - that shutdown is part of the happy path automatically
+
+questions:
+  - Does shutdown stop accepting new work before draining in-flight work?
+  - Is the drain bounded by a deadline, or can it hang forever?
+  - Are in-flight effects completed, or explicitly marked for recovery on restart?
+  - Is the shutdown path exercised by a test?
+
+techniques:
+  - signal handler that stops intake first, then drains
+  - a bounded drain deadline with a hard exit after it
+  - idempotent work so a restart can resume interrupted effects
+  - a tested shutdown path, not an ad hoc hook
+
+risks:
+  - abandoning in-flight work on SIGTERM
+  - an unbounded drain that ignores the deadline
+  - new work racing into a shutting-down worker
+  - kill -9 becoming the only reliable stop
+
+relations:
+  related:
+    - reliability.idempotency
+  requires_consideration_of:
+    - reliability.dead-letter-queue
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, automation]
+  lifecycle_stages: [implementation, review, operation]
+
+provenance:
+  origin: curated
+  rationale: >
+    Abandoned in-flight work on shutdown is a recurring reliability
+    failure, and the bounded-drain choice is a design decision. The
+    idempotency relation records that interrupted effects must be
+    resumable, not just reported.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [graceful shutdown, sigterm, drain, in-flight work, worker stop]
