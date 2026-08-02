@@ -112,10 +112,10 @@ class TestPackLimits(unittest.TestCase):
     def test_frozen_experiment_packs_match_corpus(self):
         # The frozen treatment packs are evidence of the corpus the Section 8
         # experiment ran against: the original eight nodes. The corpus has
-        # since grown to ten (docs/CORPUS_RULE.md, DEVIATIONS D10), so this
-        # test recomposes against the pinned experiment corpus — an edit to
-        # any of those eight nodes still fails loudly instead of silently
-        # breaking verify-report of the recorded runs.
+        # since grown (docs/CORPUS_RULE.md), so this test recomposes against
+        # the pinned experiment corpus — an edit to any of those eight nodes
+        # still fails loudly instead of silently breaking verify-report of
+        # the recorded runs.
         experiment_ids = {
             "reliability.idempotency",
             "reliability.retry-semantics",

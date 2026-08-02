@@ -30,7 +30,8 @@ encyclopedia verify-report <report> --pack <pack>   # verify an application repo
   hashes), `canonical` (deterministic serialisation + hashing), `validate`
   (schema + hard limits), `retrieval` (FTS5 with token-overlap fallback),
   `pack` (context pack composer), `report` (`verify-report`), `cli`.
-- `knowledge/<area>/<name>.yaml` — the sixteen nodes. `knowledge/LICENSE` is CC
+- `knowledge/<area>/<name>.yaml` — the corpus nodes (count asserted in
+  `tests/test_nodes.py`). `knowledge/LICENSE` is CC
   BY 4.0, do not touch.
 - `taxonomy/` — enumerations (`node-kinds`, `contexts`, `relation-types`).
 - `evaluations/queries.yaml` — 10 regression queries with required /

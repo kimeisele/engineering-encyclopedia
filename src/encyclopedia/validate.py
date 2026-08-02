@@ -2,7 +2,8 @@
 
 The validator is the single place that enforces the schema rules and the
 hard numeric limits. Tests additionally assert the corpus is exactly the
-eight specified nodes; the validator itself checks quality, not quantity.
+current node set (see ``tests/test_nodes.py``); the validator itself checks
+quality, not quantity.
 """
 
 from __future__ import annotations
