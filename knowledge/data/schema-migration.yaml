@@ -1,0 +1,75 @@
+id: data.schema-migration
+version: 1
+title: Schema migration
+kind: principle
+status: established
+
+summary: >
+  Database schema changes are expand-contract: add the new shape first,
+  migrate data and code, then remove the old shape. In-place mutation of a
+  column while old code still reads it breaks rolling deploys.
+
+intent_signals:
+  - migration
+  - alter table
+  - add column
+  - change the schema
+  - rename column
+  - backfill
+  - schema change
+  - database upgrade
+
+applies_when:
+  - code and schema evolve with multiple running versions
+  - a deploy can roll forward or back
+
+does_not_apply_when:
+  - a single process owns both code and schema with no rolling deploy
+
+does_not_imply:
+  - that a migration tool makes a migration safe
+  - that adding a column is always backward compatible
+  - that backfills are instant
+  - that destructive changes can be reverted cheaply
+
+questions:
+  - Is the change additive first, with old code still reading old columns?
+  - When is the old shape removed, and what reads it until then?
+  - Is the data backfill completed before the new code reads the new shape?
+  - Can the migration be reversed, and is the reverse tested?
+
+techniques:
+  - expand-contract ordering with add, backfill, switch, then drop
+  - additive columns with defaults and nullable transitions
+  - backfills in bounded batches, not one giant update
+  - migration and rollback scripts tested in both directions
+
+risks:
+  - mutating a column in place during a rolling deploy
+  - a backfill that locks the table for hours
+  - dropping a column while old code still references it
+  - migrations that cannot be rolled back
+
+relations:
+  related:
+    - apis.versioning
+  requires_consideration_of:
+    - testing.coverage-limitations
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, automation]
+  lifecycle_stages: [design, implementation, operation]
+
+provenance:
+  origin: curated
+  rationale: >
+    In-place schema mutation during rolling deploys is a classic
+    availability failure; the expand-contract ordering is the decision this
+    node forces. The versioning relation records the parallel with API
+    contract evolution.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [migrations, schema change, expand contract, backfill, alter table]

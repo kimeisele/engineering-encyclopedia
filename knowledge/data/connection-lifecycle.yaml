@@ -1,0 +1,75 @@
+id: data.connection-lifecycle
+version: 1
+title: Connection lifecycle
+kind: guideline
+status: established
+
+summary: >
+  Every acquired connection, handle or client is closed on every path —
+  success and failure. An unclosed connection leaks the pool until the
+  process exhausts it and every request hangs.
+
+intent_signals:
+  - connection leak
+  - close the connection
+  - connection pool
+  - too many connections
+  - close the handle
+  - database connection
+  - acquire and release
+  - exhausted pool
+
+applies_when:
+  - code acquires a connection, file handle, or client per operation
+  - a shared pool exists with a finite size
+
+does_not_apply_when:
+  - a pool owns connections for the process lifetime with no per-request acquisition
+
+does_not_imply:
+  - that closing is enough without returning to the pool
+  - that an exception path closes automatically
+  - that a large pool fixes leaks
+  - that the OS eventually reclaims everything
+
+questions:
+  - Who owns the connection, and where is it closed on success?
+  - Where is it closed on every failure and exception path?
+  - Is acquisition and release scoped to one operation?
+  - Is the pool bounded, and is exhaustion visible?
+
+techniques:
+  - scoped acquire-release, with close in a finally-style block
+  - one connection per operation, not one per row
+  - bounded pools with a clear exhaustion signal
+  - lease and return semantics, never naked new connections
+
+risks:
+  - early returns or exceptions that skip the close
+  - acquiring a connection per row inside a loop
+  - unbounded pools that hide the leak until it bites
+  - timeouts that fire while the connection stays open
+
+relations:
+  related:
+    - apis.request-timeouts
+  requires_consideration_of:
+    - operations.graceful-shutdown
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, automation]
+  lifecycle_stages: [implementation, review, debugging]
+
+provenance:
+  origin: curated
+  rationale: >
+    Connection leaks are a recurring production failure that builds slowly
+    and surfaces as a total hang; ownership-and-close is the decision this
+    node forces. The timeout relation records that a leaked connection and
+    a hung call often arrive together.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [connection leaks, connection pools, close, handles, exhaustion]

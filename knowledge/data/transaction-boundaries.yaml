@@ -1,0 +1,85 @@
+id: data.transaction-boundaries
+version: 1
+title: Transaction boundaries
+kind: principle
+status: established
+
+summary: >
+  A transaction groups the writes that must succeed or fail together.
+  Decide the boundary explicitly: include every related write, commit as
+  late as possible, and never hold a transaction open across network I/O.
+
+intent_signals:
+  - transaction
+  - commit
+  - rollback
+  - atomic write
+  - save together
+  - partial write
+  - all or nothing
+  - autocommit
+
+applies_when:
+  - more than one write must be consistent with each other
+  - a failure between writes would leave partial state
+
+does_not_apply_when:
+  - a single independent write with no consistency coupling
+
+does_not_imply:
+  - that transactions prevent concurrent access
+  - that a transaction is durable by default in every store
+  - that long transactions are harmless
+  - that the file system provides the same guarantees
+
+questions:
+  - Which writes must succeed or fail together, and what is the failure point?
+  - Where is the commit, and is it as late as possible?
+  - Does any transaction span network I/O or user interaction?
+  - What happens to partial state if the process dies mid-transaction?
+
+techniques:
+  - one transaction per logical operation, committed at the boundary
+  - no network calls or long waits inside a transaction
+  - explicit commit points, never implicit autocommit surprises
+  - compensating actions when a true transaction is impossible
+
+risks:
+  - committing too early, then failing on the remaining writes
+  - holding a transaction across an HTTP call
+  - implicit commits that split a logical operation
+  - assuming atomicity where the store does not provide it
+
+tradeoffs:
+  - technique: short database transaction
+    benefit: strong consistency
+    cost: lock and contention time
+    choose_when: the store is transactional
+  - technique: eventual consistency with compensating actions
+    benefit: availability across systems
+    cost: reconciliation logic
+    choose_when: the operation crosses system boundaries
+
+relations:
+  related:
+    - reliability.idempotency
+  requires_consideration_of:
+    - concurrency.race-conditions
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, automation]
+  lifecycle_stages: [design, implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Wrong transaction boundaries are a recurring data-integrity failure:
+    writes committed piecemeal, or transactions held across I/O. The
+    boundary decision is exactly what this node forces; the idempotency
+    relation records that dedup records belong inside the same transaction.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [transactions, commit, rollback, atomic writes, consistency]
