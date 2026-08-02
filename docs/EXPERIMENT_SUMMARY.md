@@ -8,14 +8,17 @@ One page, no advocacy, no roadmap. Full numbers in
 
 ## What is established
 
-**In-sample convergence (the primary claim), placebo-controlled.** On
-three tasks (e1–e3) and two providers with a placebo arm, treatment
-converges the output: the between-provider gap collapses, the providers'
-criterion disagreements fall to 0/6 on four of six cells (e2, e3, e4, e6
-in the full re-analysis), and on e3/e4 both providers emit the same
-structural constructs where control had them completely apart. The placebo
-does not reproduce this, so it is not prompt structure. In-sample the pack
-also makes output better (treatment > control on all six cells).
+**In-sample convergence (the primary claim), placebo-controlled.** In the
+full convergence re-analysis of all six tasks' existing runs (in-sample
+e1–e3, plus the out-of-sample tasks e4–e6), treatment converges the
+output: **convergence holds on four of six tasks** (e2, e3, e4, e6), the
+providers' criterion disagreements fall to 0/6 on five of six tasks (all
+but e1), and on e3/e4 both providers emit the same structural constructs
+where control had them completely apart. The placebo does not reproduce
+this, so it is not prompt structure. In-sample the pack also makes output
+better (treatment > control on all six e1–e3 cells). The convergence claim
+is in-sample only (the pre-registered fresh-task test returned NULL,
+below).
 
 ## What is not established
 
@@ -28,8 +31,12 @@ also makes output better (treatment > control on all six cells).
 - **Out-of-sample quality: 1 of 6 cells clean** (e4-Mistral +3.07). The
   corpus rule is unsupported out-of-sample; `review.*` demonstrates no
   effect.
-- **The instrument was corrected three times**, two of which reversed a
-  result; every number is scored with the repaired instrument.
+
+## The instrument
+
+The measurement was corrected three times, two of which reversed a result;
+every number in this summary is scored with the repaired instrument,
+before/after recorded.
 
 ## The narrow shape of the record
 

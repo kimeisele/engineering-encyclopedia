@@ -23,16 +23,19 @@ becomes visible).
 ## What is established
 
 The primary claim is **convergence**: the pack makes agent output the same
-shape across vendors and runs. In-sample, on three tasks and two providers
-with a placebo control, **convergence holds on four of six
-task×provider cells** (e2, e3, e4, e6): treatment collapses the
-between-provider gap, drives the providers' criterion disagreements to
-0/6, and on e3/e4 makes both providers emit the same structural constructs
-where control had them completely apart. The placebo (a structurally
-identical pack with irrelevant content) does not reproduce any of it, so
-the convergence is not prompt structure. e1 is the exception; e5 was
-already converged. In-sample, the pack also makes output better (treatment
-out-scored control on all six cells) — but that is the secondary result.
+shape across vendors and runs. In the full convergence re-analysis of all
+six tasks' existing runs (in-sample e1–e3, plus the out-of-sample tasks
+e4–e6), **convergence holds on four of six tasks** (e2, e3, e4, e6):
+treatment collapses the between-provider gap, drives the providers'
+criterion disagreements to 0/6 on five of six tasks (all but e1), and on
+e3/e4 makes both providers emit the same structural constructs where
+control had them completely apart. The placebo (a structurally identical
+pack with irrelevant content) does not reproduce any of it, so the
+convergence is not prompt structure. e1 is the exception; e5 was already
+converged. In-sample, the pack also makes output better (treatment
+out-scored control on all six e1–e3 cells) — but that is the secondary
+result. The convergence claim is marked in-sample only: the pre-registered
+fresh-task test returned NULL (below).
 
 ## What is not established
 

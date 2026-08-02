@@ -226,12 +226,14 @@ without a resolvable location is not a finding.
 
 | Provider | Arm | Rubric mean | Resolvable locations mean |
 |---|---|---|---|
-| DeepSeek | control | 3.00 | 2.00 |
-| DeepSeek | treatment | 3.20 | 2.40 |
-| DeepSeek | placebo | 3.60 | 3.60 |
-| Mistral | control | 2.40 | 2.00 |
-| Mistral | treatment | 3.20 | 2.00 |
-| Mistral | placebo | 3.00 | 1.60 |
+| DeepSeek | control | 3.80 | 2.20 |
+| DeepSeek | treatment | 3.40 | 2.40 |
+| DeepSeek | placebo | 4.40 | 4.20 |
+| Mistral | control | 2.80 | 2.00 |
+| Mistral | treatment | 3.60 | 2.00 |
+| Mistral | placebo | 3.80 | 1.60 |
+
+(Repaired instrument; the pre-repair numbers are in the before → after table below.)
 
 Plain reading: **E6 is a null result, confirmed after a measurement audit**
 (`docs/OOS_E6_AUDIT.md`). The measurement was partially defective and was
@@ -251,12 +253,14 @@ at the meaningful ceiling. Before → after (same completions):
 | Mistral | treatment | 3.20 → 3.60 | 2.00 → 2.00 |
 | Mistral | placebo | 3.00 → 3.80 | 1.60 → 1.60 |
 
-The null survives the repair: the treatment beats control on neither
-metric, and the placebo outscored the treatment on DeepSeek (both metrics)
-and on Mistral's rubric. This is the **third instrument defect the project
-has caught**; unlike the first two, it confirms the result instead of
-reversing it. E6 is the third out-of-sample node without a clean effect,
-and `review.*` as a namespace does not demonstrate an effect.
+The null survives the repair: treatment does not beat control consistently
+on either metric across both providers — on DeepSeek the placebo outscored
+the treatment on both metrics (4.40 / 4.20 vs 3.40 / 2.40), and on Mistral
+the treatment's resolvable-location count equals control (2.00 = 2.00).
+This is the **third instrument defect the project has caught**; unlike the
+first two, it confirms the result instead of reversing it. E6 is the third
+out-of-sample node without a clean effect, and `review.*` as a namespace
+does not demonstrate an effect.
 
 ## Judgment (corpus rule, repaired instrument, n=15)
 
