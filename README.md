@@ -6,28 +6,38 @@ inspectable and provable.
 ## What is actually known
 
 This project was measured, and the measurement was itself audited three
-times. What is known, stated without advocacy:
+times. The primary claim is **convergence**: the pack makes agent output
+the same shape across vendors and runs, so that a non-technical operator
+and a second agent encounter the same structure of solution regardless of
+which model produced it. What is known, stated without advocacy:
 
-- **In-sample, the knowledge pack changes agent output.** On three tasks
-  (idempotency, subprocess safety, atomic file replacement), the treatment
-  arm out-scored control on all six provider×task cells across two
-  providers (DeepSeek, Mistral), and a placebo arm (a structurally
-  identical pack with irrelevant content) sat at or below control on four
-  of the six cells and only slightly above on the other two (Mistral e2
-  +0.40, Mistral e3 +0.20) — far below the treatment deltas — so the
-  in-sample effect is reproducible and is not prompt structure.
-- **Out-of-sample, it does not generalise.** Of six out-of-sample cells
-  (e4/e5 at n=15 on two providers, plus E6), exactly **one** shows a clean
-  knowledge effect (e4-Mistral, +3.07). One cell cannot carry a rule.
+- **In-sample, convergence holds on four of six tasks** (e2, e3, e4, e6):
+  the pack collapses the between-provider gap and the providers' criterion
+  disagreements (to 0/6) and, on e3/e4, makes both providers emit the same
+  structural constructs where control had them completely apart
+  (e3 markers 0.87 → 0.00, e4 0.85 → 0.10). e1 is the exception
+  (`docs/E1_EXCEPTION.md`); e5 was already converged.
+- **The mean result, beside it:** in-sample, treatment out-scored control
+  on all six provider×task cells with the placebo at or below control —
+  the pack does not just converge, it also (in-sample) makes output
+  better. **Out-of-sample, the mean effect does not generalise: exactly
+  one of six cells is clean** (e4-Mistral).
+- **The convergence claim is in-sample.** Its pre-registered out-of-sample
+  test (two fresh tasks, markers and decision rule committed before any
+  run, `docs/CONVERGENCE_PREREGISTRATION.md`) returned a **null**: e8
+  failed the pre-registered marker condition (the pack converged the means
+  but diverged the constructs), and the rule treats a failure on either
+  task as a null for the claim
+  (`docs/CONVERGENCE_PREREGISTRATION_RESULTS.md`).
 - **The corpus rule is unsupported out-of-sample**, and `review.*` does not
   demonstrate an effect. Both are retained only as hypotheses.
 - **The instrument was caught failing three times** (the report
   contaminating the scored artifact; a pattern crediting the wrong
   construct; the E6 parser and a criterion that never fired). Two of the
-  three reversed a result. Every number below is scored with the repaired
+  three reversed a result. Every number is scored with the repaired
   instrument.
 
-The full record — raw scores, before/after, the audit — is in
+The full record — raw scores, before/after, the audits — is in
 `experiments/RESULTS.md`; a one-page summary is in
 `docs/EXPERIMENT_SUMMARY.md`.
 
