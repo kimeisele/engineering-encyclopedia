@@ -1,0 +1,86 @@
+id: security.deserialization
+version: 1
+title: Deserialization safety
+kind: pitfall
+status: established
+
+summary: >
+  Deserializing untrusted data with a format that can construct arbitrary
+  objects — pickle, yaml.load, Java or PHP unserialize — is remote code
+  execution. Untrusted input is parsed with safe_load or a strict schema,
+  never with an executing format.
+
+intent_signals:
+  - unpickle
+  - yaml.load
+  - deserialize user input
+  - unserialize
+  - load untrusted data
+  - parse yaml from a request
+  - pickle
+  - read data from the client
+
+applies_when:
+  - input arrives from a network, a file upload, or another trust domain
+  - a format with object construction is available in the runtime
+
+does_not_apply_when:
+  - the data comes only from the process's own durable storage
+  - the format cannot construct objects (plain JSON with strict parsing)
+
+does_not_imply:
+  - that validation before deserialization makes an unsafe format safe
+  - that JSON is immune to malformed or huge documents
+  - that an allowlist of types is a sandbox
+  - that checking content length bounds nesting
+
+questions:
+  - Which format parses the input, and can it construct arbitrary objects?
+  - Is the input trusted (own storage) or untrusted (network or user)?
+  - Is the parsed structure validated against a strict schema afterward?
+  - Are size and nesting depth bounded before or during parsing?
+
+techniques:
+  - safe_load / strict schema parsers for all untrusted input
+  - JSON or typed formats with schema validation after parse
+  - explicit size and depth limits
+  - type allowlists only where object construction is unavoidable
+
+risks:
+  - pickle or yaml.load on user input
+  - alias expansion and billion-laughs documents
+  - unbounded nesting exhausting the parser
+  - treating validation as a substitute for a safe format
+
+tradeoffs:
+  - technique: safe parsers only
+    benefit: no code-execution surface
+    cost: fewer formats, manual schema checks
+    choose_when: input crosses a trust boundary
+  - technique: sandboxed or allowlisted object construction
+    benefit: keeps rich formats
+    cost: large and brittle defense surface
+    choose_when: a legacy format is mandatory
+
+relations:
+  related:
+    - security.input-validation
+  requires_consideration_of:
+    - security.injection
+
+contexts:
+  languages: [any]
+  project_types: [web-service, worker, cli, automation]
+  lifecycle_stages: [implementation, review, debugging]
+
+provenance:
+  origin: curated
+  rationale: >
+    Unsafe deserialization is a classic remote-code-execution class that
+    models reproduce when told to "load" data. The negative-knowledge
+    entries record the confusions that matter in practice.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [deserialization, pickle, yaml.load, unserialize, RCE, billion laughs]

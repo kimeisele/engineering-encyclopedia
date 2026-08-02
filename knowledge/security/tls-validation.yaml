@@ -1,0 +1,84 @@
+id: security.tls-validation
+version: 1
+title: TLS certificate validation
+kind: guideline
+status: established
+
+summary: >
+  Outbound TLS must verify certificates. Disabling verification —
+  verify=False, TLS_INSECURE, no-verify flags — makes interception
+  trivial and must not ship, including for internal hosts.
+
+intent_signals:
+  - verify=False
+  - disable ssl verification
+  - tls insecure
+  - skip certificate check
+  - self-signed accepted
+  - no-verify
+  - turn off tls validation
+  - trust all certs
+
+applies_when:
+  - the process makes any outbound TLS connection
+  - a flag or option exists to skip certificate checks
+
+does_not_apply_when:
+  - a local loopback channel with no network exposure
+
+does_not_imply:
+  - that verification defeats all interception (DNS or CA compromise)
+  - that internal hosts are exempt
+  - that certificate pinning is required
+  - that a valid certificate proves the server is authorized
+
+questions:
+  - Is certificate verification enabled on every outbound client?
+  - Which threat does disabling verification accept, and for whom?
+  - Are internal hosts verified with the same policy as external ones?
+  - Is the trust store system-default, or pinned for this service?
+
+techniques:
+  - keep verification enabled everywhere, including internal hosts
+  - test-only overrides that cannot reach production
+  - proper certificates or an internal CA for internal services
+  - client certificates where mutual TLS is required
+
+risks:
+  - verify=False shipped for a "temporary" problem
+  - globally accepting self-signed certificates
+  - inheriting a disabled-verification config from a template
+  - retrying certificate failures as if they were transient
+
+tradeoffs:
+  - technique: system default trust store
+    benefit: matches external PKI
+    cost: no control over which CAs are trusted
+    choose_when: public endpoints
+  - technique: pinned or private CA
+    benefit: precise trust for internal traffic
+    cost: rotation and distribution burden
+    choose_when: internal services with long-lived hosts
+
+relations:
+  related:
+    - security.secrets-handling
+  requires_consideration_of:
+    - reliability.retry-semantics
+
+contexts:
+  languages: [any]
+  project_types: [worker, web-service, cli, automation]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Disabled certificate verification is a recurring finding in generated
+    code, usually copied from test examples. The retry relation records
+    that a certificate failure is not transient.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [tls, ssl, certificate validation, verify, mitm, self-signed]
