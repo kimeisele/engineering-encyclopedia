@@ -129,8 +129,10 @@ e5 and e6, whose means were null.
   mean) but within-run variance increases on both providers, criterion
   disagreement stays at 2/6, and the structural profiles do not converge.
   On e1 the null stays null under this lens too. (The e1 placebo happens to
-  reach gap 0.20 and 0/6 disagreements — better than treatment on those two
-  numbers — which is why e1 is excluded rather than credited.)
+  reach 0/6 disagreements and a better marker overlap (0.20 vs 0.40) —
+  better than treatment on those two numbers — but that agreement is
+  agreement on the absence of the construct, and the treatment still wins
+  the gap (0.00 vs 0.20). See `docs/E1_EXCEPTION.md`.)
 
 The convergence claim is therefore supported on four of six tasks, absent
 on e1, and vacuous-but-not-negative on e5 — reported separately, not
