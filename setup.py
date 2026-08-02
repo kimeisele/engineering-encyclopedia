@@ -8,6 +8,7 @@ build artifact made at install time; the repository-root copies remain
 canonical and are what tests and source checkouts use (resolution order 2).
 """
 
+import shutil
 from pathlib import Path
 
 from setuptools import setup
@@ -24,13 +25,11 @@ class BuildPy(build_py):
             if not src.is_dir():
                 continue
             dst = dest / name
-            dst.mkdir(parents=True, exist_ok=True)
-            for item in src.rglob("*"):
-                if item.is_file():
-                    rel = item.relative_to(src)
-                    target = dst / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(item.read_bytes())
+            # non-additive: a file deleted from the repo since the last
+            # build must not linger in the wheel
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
 
 
 setup(cmdclass={"build_py": BuildPy})

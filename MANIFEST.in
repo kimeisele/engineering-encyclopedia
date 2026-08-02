@@ -1,0 +1,2 @@
+recursive-include knowledge *
+recursive-include taxonomy *
