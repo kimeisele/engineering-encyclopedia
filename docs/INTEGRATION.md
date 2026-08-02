@@ -14,7 +14,11 @@ this repository:
 pip install .
 ```
 
-The only runtime dependency is PyYAML; everything works offline.
+The only runtime dependency is PyYAML; everything works offline. The wheel
+carries the corpus (`knowledge/`, `taxonomy/`), so the installed
+`encyclopedia` works from any directory — including this repository's own.
+To use a different corpus, set `ENCYCLOPEDIA_ROOT` to a directory
+containing `knowledge/` and `taxonomy/`.
 
 ## 2. Generate a pack
 

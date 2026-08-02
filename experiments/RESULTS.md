@@ -13,6 +13,27 @@ with the repaired rubrics unless stated otherwise.
 across vendors and runs — and its status is recorded first; the mean
 (quality) results are reported honestly beside it.
 
+## Tasks
+
+What each measured task tests, one line:
+
+- **e1** — idempotency: a worker that charges a customer must never process
+  the same job twice.
+- **e2** — subprocess-safety: running git with a user-supplied branch name
+  must not interpolate it into a shell.
+- **e3** — atomic-replacement: updating a JSON config on disk must never
+  truncate it.
+- **e4** — circuit-breaker: calling a downstream API must not hammer it
+  while it is down.
+- **e5** — correlation-id: an error handler must let an operator trace one
+  request across two services.
+- **e6** — unsupported-claims: a review of a report against a diff and raw
+  output must return the located, unsupported claims.
+- **e7** — locking-strategy: a shared counter updated by two workers must
+  never lose an update.
+- **e8** — cache-invalidation: a cached value must never be stale after the
+  source changes.
+
 ## Primary claim: convergence
 
 - **In-sample (e1–e3, both providers):** convergence holds on **four of
