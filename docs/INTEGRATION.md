@@ -7,7 +7,8 @@ below was run exactly as written.
 
 ## 1. Install
 
-From this repository:
+Requires Python 3.12+ (matching the repository's `pyproject.toml`). From
+this repository:
 
 ```sh
 pip install .
@@ -23,10 +24,12 @@ encyclopedia query "make sure this worker doesn't process the same job twice" --
 
 The output is a context pack: the request, `knowledge_revision` (the
 corpus's identity), `context_pack_hash` (a SHA-256[:12] of the pack's
-content), `retrieval_backend`, and `context_pack` with `primary` and
-`supporting` nodes. Every node carries `id`, `version`, `hash`,
-`relevance`, `summary`, `questions`, `does_not_imply` and `risks`. A real
-excerpt (this run, corpus revision `96bf58e88848`):
+content), `retrieval_backend`, `trace` (which nodes were selected and
+excluded, and whether the budget truncated any), and `context_pack` with
+`primary` and `supporting` nodes. Every node carries `id`, `version`,
+`hash`, `relevance`, `summary`, `questions`, `does_not_imply` and `risks`.
+The excerpt below is abridged to the nodes and fields that matter here
+(this run: corpus revision `96bf58e88848`):
 
 ```yaml
 knowledge_revision: 96bf58e88848
@@ -45,7 +48,11 @@ context_pack:
 
 `context_pack_hash` is what binds the whole exchange: pass the pack to the
 agent **verbatim** (do not reformat it), and require the agent's report to
-echo it.
+echo it. The pack's exact content depends on the retrieval backend active
+in the generating environment (`retrieval_backend`: `fts5` or
+`token-overlap`); whichever backend produced the pack, the hash binds the
+pack you actually passed — verify against that file, not a regenerated
+one.
 
 ## 3. Ask the agent to return an application report
 

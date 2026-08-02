@@ -61,8 +61,10 @@ encyclopedia validate
 ```
 
 `main` is protected: pull requests required, force pushes blocked,
-deletion blocked, required status check `validate`. CI runs the four checks
-above.
+deletion blocked, required status check `validate`. CI runs the workflow
+`.github/workflows/validate.yml`: install, `compileall`, `unittest`, and
+`encyclopedia validate` plus a query smoke test — the same checks a
+contributor runs locally.
 
 ## Licensing
 
