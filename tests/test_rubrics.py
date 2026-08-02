@@ -162,6 +162,7 @@ FIXTURES = {
         },
         "order_parts_addressed": {
             "positive": "the order part about retries is unaddressed",
+            "positive2": "the claim is not supported by the diff",
             "negative": "the implementation is correct",
         },
         "alternatives_excluded": {
@@ -202,11 +203,13 @@ class TestRubricSelfTest(unittest.TestCase):
         for task in runner.RUBRIC_FILES:
             rubric = runner.rubric_for(task)
             for criterion in rubric["criteria"]:
-                snippet = FIXTURES[task][criterion["id"]]["positive"]
-                self.assertTrue(
-                    _criterion_satisfied(criterion, snippet),
-                    f"{task}/{criterion['id']}: positive fixture must satisfy",
-                )
+                fixtures = FIXTURES[task][criterion["id"]]
+                for key in [k for k in fixtures if k.startswith("positive")]:
+                    snippet = fixtures[key]
+                    self.assertTrue(
+                        _criterion_satisfied(criterion, snippet),
+                        f"{task}/{criterion['id']}: {key} fixture must satisfy",
+                    )
 
     def test_negative_fixtures_do_not_satisfy(self):
         for task in runner.RUBRIC_FILES:

@@ -189,20 +189,30 @@ without a resolvable location is not a finding.
 | Mistral | treatment | 3.20 | 2.00 |
 | Mistral | placebo | 3.00 | 1.60 |
 
-Plain reading: **E6 is a null result.** The treatment pack produced no
-measurable improvement on either metric. On DeepSeek the **placebo** arm
-scored highest on both the rubric and the resolvable-location count
-(3.60 / 3.60 vs treatment 3.20 / 2.40); on Mistral the treatment's
-resolvable-location count equals control (2.00 = 2.00). The treatment
-reviews do find the claims (e.g. DeepSeek treatment run-2 names all three
-and quotes the diff), but the machine-contract questions did not translate
-into higher location counts. The differences that exist are structural —
-any structured pack, placebo included, pushes more verbose, location-rich
-reviews — not knowledge. E6 is the third out-of-sample node without a clean
-effect, which further weakens the corpus rule and also the
-baseline-headroom hypothesis (E6 control baselines are low, 3.00 / 2.40,
-so headroom existed and the treatment still did not lift the metrics).
-e4-Mistral remains the sole clean effect in the out-of-sample set.
+Plain reading: **E6 is a null result, confirmed after a measurement audit**
+(`docs/OOS_E6_AUDIT.md`). The measurement was partially defective and was
+repaired: the location parser missed plural "lines N-M" citations (5 of 30
+completions), and `order_parts_addressed` never fired (0/30) because the
+pattern lacked the task's natural phrasing ("not supported"). The flat 2.00
+was largely arithmetic — only two of the three report claims are
+diff-locatable (claim 3 is contradicted by the raw output), so control sat
+at the meaningful ceiling. Before → after (same completions):
+
+| Provider | Arm | Rubric before → after | Locs before → after |
+|---|---|---|---|
+| DeepSeek | control | 3.00 → 3.80 | 2.00 → 2.20 |
+| DeepSeek | treatment | 3.20 → 3.40 | 2.40 → 2.40 |
+| DeepSeek | placebo | 3.60 → 4.40 | 3.60 → 4.20 |
+| Mistral | control | 2.40 → 2.80 | 2.00 → 2.00 |
+| Mistral | treatment | 3.20 → 3.60 | 2.00 → 2.00 |
+| Mistral | placebo | 3.00 → 3.80 | 1.60 → 1.60 |
+
+The null survives the repair: the treatment beats control on neither
+metric, and the placebo outscored the treatment on DeepSeek (both metrics)
+and on Mistral's rubric. This is the **third instrument defect the project
+has caught**; unlike the first two, it confirms the result instead of
+reversing it. E6 is the third out-of-sample node without a clean effect,
+and `review.*` as a namespace does not demonstrate an effect.
 
 ## Judgment (corpus rule, repaired instrument, n=15)
 
