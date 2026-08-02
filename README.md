@@ -20,6 +20,27 @@ inspectability, consistency across models, and anchoring against
 confabulation (a fixed, hashed text against which plausible invention
 becomes visible).
 
+## The tasks
+
+What each measured task tests, one line:
+
+- **e1** — idempotency: a worker that charges a customer must never process
+  the same job twice.
+- **e2** — subprocess-safety: running git with a user-supplied branch name
+  must not interpolate it into a shell.
+- **e3** — atomic-replacement: updating a JSON config on disk must never
+  truncate it.
+- **e4** — circuit-breaker: calling a downstream API must not hammer it
+  while it is down.
+- **e5** — correlation-id: an error handler must let an operator trace one
+  request across two services.
+- **e6** — unsupported-claims: a review of a report against a diff and raw
+  output must return the located, unsupported claims.
+- **e7** — locking-strategy: a shared counter updated by two workers must
+  never lose an update.
+- **e8** — cache-invalidation: a cached value must never be stale after the
+  source changes.
+
 ## What is established
 
 The primary claim is **convergence**: the pack makes agent output the same
@@ -114,7 +135,11 @@ verification instead of passing silently.
 ## Install and use
 
 Requires Python 3.12+; the only runtime dependency is PyYAML. Everything
-works offline.
+works offline. The wheel carries the corpus (`knowledge/`, `taxonomy/`), so
+an installed `encyclopedia` works from any directory — including inside
+another repository. To use a different corpus (or a corpus not bundled with
+the install), set `ENCYCLOPEDIA_ROOT` to a directory containing
+`knowledge/` and `taxonomy/`.
 
 ```sh
 pip install .

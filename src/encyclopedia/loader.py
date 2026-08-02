@@ -26,7 +26,10 @@ def _resolve_repo_root() -> Path:
     2. package-relative location — the source-checkout layout
        (<root>/src/encyclopedia/), used by tests and clean checkouts
     3. current working directory — an installed wheel run from the repo root
-    4. a clear error, never a silent guess
+    4. packaged corpus inside the installed package
+       (site-packages/encyclopedia/data/...) — an installed wheel used from
+       another repository, where the corpus travels with the wheel
+    5. a clear error, never a silent guess
     """
     env = os.environ.get("ENCYCLOPEDIA_ROOT")
     if env:
@@ -39,9 +42,13 @@ def _resolve_repo_root() -> Path:
     cwd = Path.cwd()
     if (cwd / "knowledge").is_dir() and (cwd / "taxonomy").is_dir():
         return cwd
+    packaged = Path(__file__).resolve().parent / "data"
+    if (packaged / "knowledge").is_dir() and (packaged / "taxonomy").is_dir():
+        return packaged
     raise FileNotFoundError(
         "cannot locate the corpus (knowledge/ and taxonomy/ directories): "
-        "run from the repository root or set ENCYCLOPEDIA_ROOT"
+        "run from the repository root, set ENCYCLOPEDIA_ROOT, or reinstall "
+        "the package (an installed wheel carries the corpus)"
     )
 
 
