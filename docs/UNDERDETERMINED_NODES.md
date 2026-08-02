@@ -9,17 +9,18 @@ without a shared direction.
 ## The e8 divergence
 
 On `performance.cache-invalidation` (e8), the pre-registered test showed
-DeepSeek adopting a version-in-key cache (0/10 → 5/10) while Mistral
-dropped its TTL (7/10 → 1/10) and moved to an internal-version/invalidate
+DeepSeek adopting a version-in-key cache (1/10 → 5/10) while Mistral
+dropped its TTL (10/10 → 1/10) and moved to an internal-version/invalidate
 design. Same node, opposite directions. From the completions:
 
 - DeepSeek treatment: "The cache key is a tuple of (user_key,
   source_version)" (run-2), "the cache key is (user_key, source_version)"
-  (run-3, run-5) — the version-in-key answer.
-- Mistral treatment: `self._version = 0`, `def invalidate(self, key)`,
-  `cached_value, cached_version = self._cache.get(key, (None, -1))` (runs
-  1–5) — the internal-version-and-invalidate answer, with **no**
-  version-in-key (0/10).
+  (run-3), "The key is a composite of (user_key, source_version)"
+  (run-5) — the version-in-key answer.
+- Mistral treatment: `self._version = 0` with an `invalidate(key)` method
+  (run-2, run-5), and `cached_value, cached_version = self._cache.get(key,
+  (None, -1))` (run-3) — the internal-version-and-invalidate answer, with
+  **no** version-in-key (0/10 treatment, as in control).
 
 ## Does the node state a decision, or list options?
 
@@ -46,8 +47,14 @@ divergence is explained by the node being underdetermined.**
   single half-open probe after a cooldown" — singular choices; both
   providers implemented the same state machine (markers 0.85 → 0.10).
 
-**Those nodes decide where this one lists.** e3 and e4 prescribe a single
-answer; e8 presents alternatives with conditions the task does not settle.
+**Those nodes decide where this one lists.** e3's and e4's techniques are
+headed by a singular prescribed primary (temp file + fsync + rename; a
+rolling-window failure threshold with a single half-open probe), so their
+questions have one answer the task must take; e8 presents a flat list of
+alternatives (version-in-key, explicit invalidation, TTL) with conditions
+the task does not settle, and different models pick different valid
+answers. (Both e3 and e4 also list secondary alternatives — a symlink-swap
+technique, a failure-rate tradeoff — but the primary technique decides.)
 
 ## The observation, recorded as such
 
