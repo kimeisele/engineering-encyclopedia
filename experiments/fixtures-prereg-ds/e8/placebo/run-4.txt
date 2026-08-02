@@ -1,0 +1,88 @@
+```python
+from typing import Callable, Hashable, Any
+import threading
+import time
+
+class SourceAwareCache:
+    """
+    A cache that invalidates entries when the source data changes.
+
+    The key insight is to pair each cached value with a snapshot of the
+    source's state (e.g. a version number, a hash, or a modification
+    timestamp). On every read, we re-check the source state; if it differs
+    from the snapshot, we treat the entry as stale and refresh it.
+    """
+
+    def __init__(self, source_getter: Callable[[], dict[Hashable, Any]],
+                 state_getter: Callable[[], Hashable]):
+        """
+        :param source_getter: returns the full source data as a dict,
+                              or a function that fetches just the value for key.
+        :param state_getter: returns a comparable snapshot of the source's
+                             state (e.g. version, mtime, hash). If the state
+                             changes, all cached entries for that source are stale.
+        """
+        self._source_getter = source_getter
+        self._state_getter = state_getter
+        self._cache: dict[Hashable, tuple[Hashable, Any]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: Hashable) -> Any:
+        """Return cached value for key, refreshing if source state changed."""
+        current_state = self._state_getter()
+        with self._lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                cached_state, value = cached
+                if cached_state == current_state:
+                    return value
+            # stale or missing: refresh from source
+            data = self._source_getter()
+            value = data[key]          # KeyError propagates to caller
+            self._cache[key] = (current_state, value)
+            return value
+
+# ----------------------------------------------------------------------
+# Example usage (demonstrates correctness; not part of the required API)
+#
+# source = {'a': 1, 'b': 2}
+# version = 0
+# def get_data():
+#     return source
+# def get_state():
+#     return version
+# c = SourceAwareCache(get_data, get_state)
+# assert c.get('a') == 1
+# version = 1  # source changed
+# source['a'] = 100
+# assert c.get('a') == 100  # not stale
+```
+
+---
+
+APPLICATION_REPORT
+
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 0fa6e8347e7d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "No error message is emitted by this function; KeyError from source propagates untouched."
+          location: "cache.py:35"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Not applicable — this is a cache utility, not a logging boundary; no job context exists."
+          location: "cache.py:36"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Not applicable — no messages constructed; source values are never logged or raised."
+          location: "cache.py:37"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Exceptions are not wrapped; original KeyError and its stack propagate with full context."
+          location: "cache.py:35"
+      unanswered: []
+  not_applied: []
+```

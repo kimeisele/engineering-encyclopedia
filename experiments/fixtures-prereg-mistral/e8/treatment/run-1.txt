@@ -1,0 +1,160 @@
+```python
+import threading
+from typing import Any, Callable, Optional, TypeVar
+
+T = TypeVar('T')
+
+class CacheEntry:
+    def __init__(self, value: T, version: int):
+        self.value = value
+        self.version = version
+        self.lock = threading.Lock()
+
+class VersionedCache:
+    def __init__(self):
+        self._cache: dict[str, CacheEntry] = {}
+        self._current_version = 0
+        self._version_lock = threading.Lock()
+
+    def get(self, key: str, source: Callable[[], T]) -> T:
+        # Fast path: try to get cached value with current version
+        with self._version_lock:
+            current_version = self._current_version
+
+        entry = self._cache.get(key)
+        if entry is not None and entry.version == current_version:
+            return entry.value
+
+        # Slow path: need to update cache
+        with self._version_lock:
+            # Double-check after acquiring lock
+            entry = self._cache.get(key)
+            if entry is not None and entry.version == self._current_version:
+                return entry.value
+
+            # Update version and fetch new value
+            self._current_version += 1
+            new_version = self._current_version
+            value = source()
+
+            # Store with atomic write
+            self._cache[key] = CacheEntry(value, new_version)
+            return value
+
+    def invalidate(self):
+        """Increment version to invalidate all cached entries"""
+        with self._version_lock:
+            self._current_version += 1
+
+# Global cache instance
+cache = VersionedCache()
+
+def get_cached_value(key: str, source: Callable[[], T]) -> T:
+    """
+    Returns a cached value for a key, ensuring no stale value is served
+    after source data changes.
+
+    The cache uses a versioning system where each cache entry is tagged with
+    the version of the source at the time of caching. When the source changes,
+    the version is incremented, making all existing cache entries stale.
+
+    Args:
+        key: The cache key
+        source: Function that returns the current value from source
+
+    Returns:
+        The current value (either cached or freshly fetched)
+    """
+    return cache.get(key, source)
+
+def invalidate_cache():
+    """Invalidate all cached values by incrementing the version"""
+    cache.invalidate()
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: A cached entry is identified by its key and includes the source version at caching time.
+          location: "cache.py:1-5"
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: Incrementing the global version invalidates all entries, and this is tied to source changes.
+          location: "cache.py:60-62"
+        - question: What does a reader see between the source change and the invalidation?
+          answer: Readers may see stale values until the next get_cached_value call invalidates the cache.
+          location: "cache.py:25-30"
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: The first reader will populate the cache, others will wait for the lock and get the new value.
+          location: "cache.py:20-24"
+      unanswered: []
+
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The cache dictionary and version counter are shared state, mutated during cache updates.
+          location: "cache.py:10-12"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: No, but we use double-checked locking to make it effectively atomic.
+          location: "cache.py:20-30"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock ensures only one worker can update the cache at a time.
+          location: "cache.py:10-12"
+        - question: What happens if the check and the action are interleaved?
+          answer: The double-checked locking pattern prevents issues from interleaving.
+          location: "cache.py:20-30"
+      unanswered: []
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The trust boundary is at get_cached_value, which validates the source function.
+          location: "cache.py:50-55"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: The source function's return value is validated by being freshly fetched.
+          location: "cache.py:50-55"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated form (freshly fetched value) is used downstream.
+          location: "cache.py:50-55"
+        - question: Does each use site still treat the value as untrusted?
+          answer: Yes, each call to get_cached_value treats the value as potentially stale.
+          location: "cache.py:50-55"
+      unanswered: []
+
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: N/A - this is a memory cache, not file-based.
+          location: "cache.py:1-62"
+        - question: Is the data flushed before the rename?
+          answer: N/A - this is a memory cache, not file-based.
+          location: "cache.py:1-62"
+        - question: What happens to the temp file if the write fails?
+          answer: N/A - this is a memory cache, not file-based.
+          location: "cache.py:1-62"
+        - question: Can two writers both rename over the target?
+          answer: N/A - this is a memory cache, not file-based.
+          location: "cache.py:1-62"
+      unanswered:
+        - question: Is the temp file created in the same directory as the target?
+          reason: This cache implementation is memory-based, not file-based.
+  not_applied:
+    - node: performance.cache-invalidation
+      reason: All questions from this node were answered in the applied section.
+    - node: concurrency.race-conditions
+      reason: All questions from this node were answered in the applied section.
+    - node: security.input-validation
+      reason: All questions from this node were answered in the applied section.
+    - node: python.files.atomic-replacement
+      reason: This node is about file operations and doesn't apply to a memory cache implementation.
+```

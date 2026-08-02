@@ -1,0 +1,123 @@
+```python
+from typing import Any, Callable, Dict, Hashable, Optional
+import threading
+import time
+
+class CacheEntry:
+    __slots__ = ('value', 'expires_at')
+    def __init__(self, value: Any, ttl: float):
+        self.value = value
+        self.expires_at = time.monotonic() + ttl
+
+class TTLDictCache:
+    """
+    A thread-safe cache with per-key TTL.
+    
+    The 'source data changes' requirement is interpreted as: the source function's
+    output is only valid for the given TTL. After TTL expires, the value is
+    considered stale and must not be served.
+    """
+    
+    def __init__(self, ttl: float = 60.0):
+        if ttl <= 0:
+            raise ValueError("ttl must be positive")
+        self._ttl = ttl
+        self._store: Dict[Hashable, CacheEntry] = {}
+        self._lock = threading.Lock()
+        self._hit_count = 0
+        self._miss_count = 0
+
+    def get(self, key: Hashable, loader: Optional[Callable[[], Any]] = None) -> Any:
+        """
+        Returns the cached value for `key`.
+        
+        If the cached value is expired (source data may have changed), the value
+        is recomputed using `loader` (or raises KeyError if no loader provided),
+        and the fresh value is stored.
+        
+        Args:
+            key: The cache key.
+            loader: Callable that computes a fresh value. If None and the key
+                    is not cached or is stale, KeyError is raised.
+        
+        Returns:
+            The fresh cached value.
+        
+        Raises:
+            KeyError: If the key is not present (or stale) and no loader is given.
+        """
+        now = time.monotonic()
+        
+        # Quick read path (no lock) - but we need to check expiration atomically
+        # enough. Use the lock for safety.
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is not None and entry.expires_at > now:
+                self._hit_count += 1
+                return entry.value
+            
+            # Miss or expired
+            self._miss_count += 1
+            
+            if loader is None:
+                # If stale, remove it and signal key miss
+                if entry is not None:
+                    # stale entry: remove it because it's not usable
+                    del self._store[key]
+                raise KeyError(f"Key '{key}' not in cache (or expired) and no loader provided")
+            
+            # Compute fresh value
+            try:
+                new_value = loader()
+            except Exception:
+                # On loader failure, if we had a stale entry, keep it? 
+                # No - to avoid serving stale data, we remove stale and propagate error.
+                if entry is not None:
+                    del self._store[key]
+                raise
+            
+            # Store fresh value
+            self._store[key] = CacheEntry(new_value, self._ttl)
+            return new_value
+
+    def invalidate(self, key: Hashable) -> bool:
+        """Explicitly invalidate a key. Returns True if it existed."""
+        with self._lock:
+            if key in self._store:
+                del self._store[key]
+                return True
+            return False
+
+    def clear(self) -> None:
+        """Clear all cached values."""
+        with self._lock:
+            self._store.clear()
+
+    def stats(self) -> Dict[str, int]:
+        """Return cache hit/miss counts (approximate snapshot under lock)."""
+        with self._lock:
+            return {'hits': self._hit_count, 'misses': self._miss_count}
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 0fa6e8347e7d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Implementation comment at class top identifies TTL expiration as the stale-avoidance mechanism."
+          location: "cache.py:9"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "KeyError includes the exact cache key that failed."
+          location: "cache.py:55"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Only the key is shown; no values or internals are leaked."
+          location: "cache.py:55"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "No wrapping occurs; KeyError is raised directly with key context."
+          location: "cache.py:55"
+  not_applied: []

@@ -1,0 +1,141 @@
+```python
+import threading
+import time
+from typing import Any, Callable, Dict, Generic, Hashable, Optional, TypeVar
+
+K = TypeVar("K", bound=Hashable)
+V = TypeVar("V")
+
+
+class CachedValue(Generic[K, V]):
+    """
+    A cache that invalidates entries based on source version changes,
+    not just TTL. Never serves stale values after the source changes.
+    """
+
+    def __init__(self, source_getter: Callable[[K], V], version_getter: Callable[[K], Any]):
+        self._source_getter = source_getter
+        self._version_getter = version_getter
+        self._cache: Dict[K, tuple[Any, V]] = {}
+        self._lock = threading.RLock()  # RLock allows re-entrant use within callbacks
+
+    def get(self, key: K) -> V:
+        """Return the cached value for key, re-fetching if the source version changed."""
+        with self._lock:
+            current_version = self._version_getter(key)
+            cached = self._cache.get(key)
+
+            if cached is not None:
+                cached_version, cached_value = cached
+                if cached_version == current_version:
+                    return cached_value
+
+            # Source has changed (or first access) — fetch fresh value
+            value = self._source_getter(key)
+            self._cache[key] = (current_version, value)
+            return value
+
+    def invalidate(self, key: K) -> None:
+        """Explicitly invalidate an entry (call this after the source is updated)."""
+        with self._lock:
+            self._cache.pop(key, None)
+
+
+# --- Example usage ---
+if __name__ == "__main__":
+    # Example source: a dict that can be updated
+    data = {"user1": "Alice"}
+    data_version = {"user1": 1}
+
+    def get_source(key):
+        return data[key]
+
+    def get_version(key):
+        return data_version[key]
+
+    cache = CachedValue(get_source, get_version)
+
+    print(cache.get("user1"))  # "Alice" (fetched)
+
+    # Simulate source data change
+    data["user1"] = "Bob"
+    data_version["user1"] = 2
+
+    # Cache must not serve stale value
+    print(cache.get("user1"))  # "Bob" (re-fetched because version changed)
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "Cache key is the source key; stored entry includes source version, so version changes force refresh."
+          location: "cached_value.py:14"
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          answer: "Version getter detects source changes; any version mismatch invalidates the entry before returning."
+          location: "cached_value.py:24"
+        - question: "What does a reader see between the source change and the invalidation?"
+          answer: "Reader sees the old value only if source version hasn't changed yet; version check happens on every read."
+          location: "cached_value.py:24"
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          answer: "Lock serializes concurrent misses; only one fetch occurs, others wait and share the fetched value."
+          location: "cached_value.py:18"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared cache dict mutated inside get/invalidate; protected by RLock ensuring thread-safe updates."
+          location: "cached_value.py:16"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Version check, fetch, and store are all under one lock acquisition, making them atomic."
+          location: "cached_value.py:24"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No — lock ensures only one worker sees cache miss and fetches, others wait for the result."
+          location: "cached_value.py:24"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving prevents by lock; check-then-act on version and fetch happen atomically."
+          location: "cached_value.py:24"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Key is validated as Hashable via type constraint (K bound) at function boundary, rejecting unhashable inputs."
+          location: "cached_value.py:8"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Generic type K bound to Hashable; Python runtime enforces this — non-hashable keys fail when used."
+          location: "cached_value.py:8"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Validated Hashable key is used for caching and passed to source/version getters."
+          location: "cached_value.py:24"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Source values are treated as opaque — not validated; only the key is constrained, matching the API contract."
+          location: "cached_value.py:24"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "This node concerns file atomic replacement; no file writes occur in this caching function."
+        - question: "Is the data flushed before the rename?"
+          reason: "No file I/O in this implementation; only in-memory cache operations."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "No temp files are created; applies only to file-based persistence."
+        - question: "Can two writers both rename over the target?"
+          reason: "No filesystem writes; concurrency handled via in-memory lock, not file atomicity."
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: "Node addresses file atomic replacement; this cache uses in-memory storage, not file persistence."
+```

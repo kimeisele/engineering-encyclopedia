@@ -1,0 +1,216 @@
+```python
+import threading
+import time
+import itertools
+
+class SharedCounter:
+    """
+    A thread-safe counter using optimistic concurrency (version check).
+    
+    This implementation ensures no update is ever lost, even if two workers
+    try to increment at the exact same time.
+    """
+    
+    def __init__(self, initial_value=0):
+        self._lock = threading.Lock()  # protects the internal state
+        self._value = initial_value
+        self._version = 0  # monotonic version counter for conflict detection
+    
+    def increment(self, delta=1):
+        """
+        Atomically increment the counter.
+        
+        Uses a pessimistic lock to ensure the read-modify-write cycle is
+        atomic. This is the simplest way to guarantee no lost updates.
+        
+        Args:
+            delta: amount to add to the counter (default 1)
+        
+        Returns:
+            New value of the counter after increment
+        """
+        with self._lock:
+            self._value += delta
+            self._version += 1
+            return self._value
+    
+    def get_value(self):
+        """Return current counter value (safely)."""
+        with self._lock:
+            return self._value
+    
+    def get_version(self):
+        """Return current version (for optimistic checks)."""
+        with self._lock:
+            return self._version
+
+
+class OptimisticCounter:
+    """
+    Alternative implementation using optimistic concurrency with retry.
+    
+    This approach doesn't use a lock for the update itself, but instead
+    detects conflicts via version numbers and retries when needed.
+    """
+    
+    def __init__(self, initial_value=0, max_retries=10):
+        self._lock = threading.Lock()  # only protects version check
+        self._value = initial_value
+        self._version = 0
+        self._max_retries = max_retries
+    
+    def increment(self, delta=1):
+        """
+        Increment counter with optimistic conflict detection.
+        
+        Reads version, computes new value, then attempts to CAS (compare-and-swap).
+        If version changed, retry until success or max retries exceeded.
+        
+        Args:
+            delta: amount to add
+        
+        Returns:
+            New value after successful increment
+        
+        Raises:
+            RuntimeError: if max retries exceeded
+        """
+        for attempt in range(self._max_retries + 1):
+            # optimistic read
+            with self._lock:
+                expected_version = self._version
+                current_value = self._value
+            
+            # compute what we'd like to write
+            new_value = current_value + delta
+            
+            # try to commit - this is the critical section
+            with self._lock:
+                # check if version still matches (no one else changed it)
+                if self._version == expected_version:
+                    self._value = new_value
+                    self._version += 1
+                    return self._value
+                # version changed - someone else updated, retry
+                # (we loop and re-read)
+        
+        raise RuntimeError(f"Failed to increment after {self._max_retries} retries")
+    
+    def get_value(self):
+        with self._lock:
+            return self._value
+
+
+# For simplicity and safety, use the pessimistic lock version as the primary
+def update_shared_counter(counter, worker_id, num_updates):
+    """
+    Worker function that updates the counter multiple times.
+    
+    Args:
+        counter: SharedCounter instance
+        worker_id: identifier for this worker
+        num_updates: how many times to increment
+    """
+    for i in range(num_updates):
+        new_val = counter.increment()
+        # small delay to simulate real work and increase chance of interleaving
+        time.sleep(0.0001)
+
+
+def main():
+    """Example usage with two concurrent workers."""
+    counter = SharedCounter()
+    
+    # Create two workers that each try to increment 1000 times
+    threads = []
+    import threading
+    
+    for worker_id in range(2):
+        t = threading.Thread(target=update_shared_counter, 
+                           args=(counter, worker_id, 1000))
+        threads.append(t)
+    
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    
+    final_value = counter.get_value()
+    print(f"Final counter value: {final_value}")
+    print(f"Expected value: 2000")
+    assert final_value == 2000, f"Lost update! Got {final_value}, expected 2000"
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: "How long is the lock held, and across what?"
+          answer: "Lock held only during the atomic read-modify-write operation on the counter value and version, not across any I/O."
+          location: "SharedCounter.increment:24"
+        - question: "What happens when the conflict is detected?"
+          answer: "In pessimistic version, no conflict occurs because lock prevents concurrent writes. In optimistic version, retry loop re-reads and re-attempts."
+          location: "OptimisticCounter.increment:67"
+      unanswered:
+        - question: "What identifies the version of the state being changed?"
+          reason: "The version field is a monotonically increasing integer, but this question specifically asks about identification of the state version; we chose pessimistic locking which doesn't rely on version-based conflict detection."
+        - question: "Is the conflict detected before or after the write?"
+          reason: "Pessimistic lock prevents conflict before write; optimistic detects after read but before commit. Implementation uses pessimistic lock primarily."
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared state is the counter value and version, both mutated inside the lock-protected critical section in the increment method."
+          location: "SharedCounter.increment:24"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, the entire read-modify-write operation is within a single lock context, making it atomic with respect to other workers."
+          location: "SharedCounter.increment:24"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because the lock serializes access; only one worker can be inside the critical section at a time."
+          location: "SharedCounter.increment:24"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "With the lock, interleaving cannot occur during the critical section. Interleaving only happens outside the lock, which is safe."
+          location: "SharedCounter.increment:24"
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Can two writers both rename over the target?"
+          answer: "This node applies to file operations, not in-memory counters. We don't use files here, so no rename conflicts possible."
+          location: "Not applicable to in-memory counter"
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "Not applicable – we are not writing to files, just updating an in-memory counter."
+        - question: "Is the data flushed before the rename?"
+          reason: "Not applicable – no file I/O involved in this counter implementation."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "Not applicable – no temporary files are used in this in-memory solution."
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "No cache is used. The counter value itself is authoritative; version tracks changes but is not used as a cache key."
+          location: "Not applicable"
+      unanswered:
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          reason: "No caching is implemented, so there's no invalidation mechanism needed."
+        - question: "What does a reader see between the source change and the invalidation?"
+          reason: "No caching exists; readers always see the latest committed value through the lock."
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          reason: "No cache exists to be empty; all reads go directly to the locked counter."
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: "The task is about an in-memory counter, not file persistence. The atomic file replacement pattern is irrelevant here."
+    - node: performance.cache-invalidation
+      reason: "No caching layer is used in this solution; the counter is directly accessed and updated, so cache invalidation concerns don't apply."

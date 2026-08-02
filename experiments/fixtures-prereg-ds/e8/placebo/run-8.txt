@@ -1,0 +1,112 @@
+```python
+from typing import Any, Callable, Dict, Hashable, Optional
+import threading
+import time
+
+
+class CacheWithVersioning:
+    """
+    A cache that stores each key with a version number. The source data
+    version is provided by a user-supplied `version_provider` callable.
+    If the version changes, the cached value is considered stale and must
+    be recomputed.
+    """
+
+    def __init__(
+        self,
+        load_func: Callable[[Hashable], Any],
+        version_provider: Callable[[], Any],
+        ttl: Optional[float] = None,
+    ):
+        """
+        :param load_func: Function that loads the value for a given key.
+        :param version_provider: Function returning a monotonic-ish version
+                                 identifier for the source data.
+        :param ttl: Optional time-to-live in seconds. If set, values older
+                    than this are considered stale even if version unchanged.
+        """
+        self._load_func = load_func
+        self._version_provider = version_provider
+        self._ttl = ttl
+        self._cache: Dict[Hashable, tuple[Any, Any, float]] = {}  # key -> (value, version, timestamp)
+        self._lock = threading.Lock()
+
+    def get(self, key: Hashable) -> Any:
+        """
+        Return the cached value for `key`, refreshing if stale.
+        """
+        current_version = self._version_provider()
+        now = time.monotonic()
+
+        with self._lock:
+            entry = self._cache.get(key)
+
+            if entry is not None:
+                value, cached_version, cached_time = entry
+                # Check version change first, then TTL
+                if cached_version == current_version:
+                    if self._ttl is None or (now - cached_time) < self._ttl:
+                        return value
+                    # TTL expired, need to refresh
+                # else: version changed, stale
+
+            # Cache miss or stale — load fresh value
+            fresh_value = self._load_func(key)
+            self._cache[key] = (fresh_value, current_version, now)
+            return fresh_value
+
+    def invalidate(self, key: Hashable) -> None:
+        """Force removal of a key from cache (optional API)."""
+        with self._lock:
+            self._cache.pop(key, None)
+
+
+# ========== Example usage ==========
+if __name__ == "__main__":
+    # Simulate a changing source
+    source_data = {"user:1": "Alice"}
+    source_version = [1]
+
+    def get_source_version():
+        return source_version[0]
+
+    def load_user(user_id):
+        # In real usage, fetch from DB/file/etc.
+        print(f"Loading {user_id} from source...")
+        return source_data[user_id]
+
+    cache = CacheWithVersioning(load_user, get_source_version)
+
+    print(cache.get("user:1"))  # → Loading... Alice
+    print(cache.get("user:1"))  # → Alice (cached)
+
+    # Source changes: update data and version
+    source_data["user:1"] = "Alicia"
+    source_version[0] += 1
+
+    print(cache.get("user:1"))  # → Loading... Alicia (stale not served)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 0fa6e8347e7d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Not applicable — no error messages produced in cache logic; load_func errors propagate unchanged."
+          location: "caching_solution.py:38"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Not applicable — no messages logged; function returns values directly, errors from load_func bubble up."
+          location: "caching_solution.py:38"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Not applicable — no messages logged; cache holds raw values, no logging of them implemented."
+          location: "caching_solution.py:38"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Not applicable — no exception wrapping in cache; load_func exceptions pass through unwrapped."
+          location: "caching_solution.py:38"
+      unanswered: []
+  not_applied: []

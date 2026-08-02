@@ -1,0 +1,60 @@
+```python
+from typing import Any, Callable, Dict
+import threading
+
+class CacheWithInvalidation:
+    """
+    A cache that stores a value per key and invokes a reload callback
+    when the key is accessed, ensuring the value is never stale.
+    """
+
+    def __init__(self, loader: Callable[[str], Any]):
+        self._loader = loader
+        self._cache: Dict[str, Any] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: str) -> Any:
+        """
+        Returns the cached value for the key, but always reloads from the
+        source (loader) to avoid serving stale data.
+        """
+        with self._lock:
+            # Always fetch fresh data from the source; no stale value is served.
+            fresh_value = self._loader(key)
+            self._cache[key] = fresh_value
+            return fresh_value
+
+    def get_cached_only(self, key: str) -> Any:
+        """
+        Returns only the cached value without hitting the source.
+        Raises KeyError if the key is not cached.
+        """
+        with self._lock:
+            return self._cache[key]
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 0fa6e8347e7d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Not applicable to caching logic; no error messages are generated in this function."
+          location: "solution.py:12"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Not applicable; no error messages or logging are emitted."
+          location: "solution.py:12"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Not applicable; no data is logged or included in messages."
+          location: "solution.py:12"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Not applicable; no exceptions are wrapped or raised in this function."
+          location: "solution.py:12"
+      unanswered: []
+  not_applied: []
+```

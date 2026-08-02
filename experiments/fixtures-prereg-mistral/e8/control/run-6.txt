@@ -1,0 +1,123 @@
+# Cached Value Function with Staleness Prevention
+
+Here's a Python function that implements a cache with strict consistency, ensuring it never serves stale values after the source data changes:
+
+```python
+from functools import wraps
+from threading import Lock
+
+def strict_cache(key_func):
+    """
+    Decorator that creates a cache where values are never stale after source changes.
+
+    Args:
+        key_func: Function that generates a cache key from function arguments
+
+    Returns:
+        A decorator that can be applied to functions to enable strict caching
+    """
+    cache = {}
+    cache_lock = Lock()
+    last_modified = {}  # Tracks when each cached item was last updated
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            key = key_func(*args, **kwargs)
+
+            # Check if we have a cached value
+            with cache_lock:
+                if key in cache:
+                    # Verify the cached value is still fresh
+                    if last_modified.get(key) == id(func):
+                        return cache[key]
+
+            # If not fresh or doesn't exist, compute and cache the new value
+            result = func(*args, **kwargs)
+
+            with cache_lock:
+                cache[key] = result
+                last_modified[key] = id(func)  # Mark as fresh
+
+            return result
+        return wrapper
+    return decorator
+```
+
+## How It Works
+
+1. **Cache Structure**: Maintains both cached values and a "last modified" marker for each key
+2. **Staleness Prevention**: Uses the function's identity (`id(func)`) as a version marker
+3. **Thread Safety**: Uses locks to ensure thread-safe cache operations
+4. **Strict Consistency**: Only returns cached values if they were produced by the current function version
+
+## Example Usage
+
+```python
+# Example function with strict caching
+@strict_cache(key_func=lambda x: x)
+def get_expensive_data(x):
+    print(f"Computing expensive data for {x}")
+    return x * x  # Some expensive computation
+
+# First call - computes and caches
+print(get_expensive_data(5))  # Output: Computing expensive data for 5 / 25
+
+# Subsequent calls - returns cached value
+print(get_expensive_data(5))  # Output: 25 (no computation)
+
+# If the function is redefined (simulating source change), cache is invalidated
+def get_expensive_data(x):
+    print(f"Computing NEW expensive data for {x}")
+    return x * x * 2
+
+print(get_expensive_data(5))  # Output: Computing NEW expensive data for 5 / 50
+```
+
+## Alternative Implementation (Time-based)
+
+If you prefer time-based invalidation instead of function identity:
+
+```python
+from functools import wraps
+from threading import Lock
+import time
+
+def strict_cache(timeout):
+    """
+    Time-based strict cache that invalidates after timeout.
+
+    Args:
+        timeout: Maximum age of cached values in seconds
+
+    Returns:
+        A decorator for strict caching with time-based invalidation
+    """
+    cache = {}
+    timestamps = {}
+    lock = Lock()
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            key = (func.__name__, args, frozenset(kwargs.items()))
+
+            with lock:
+                # Check if cached value exists and is fresh
+                if key in cache:
+                    if time.time() - timestamps[key] < timeout:
+                        return cache[key]
+
+            # Compute fresh value
+            result = func(*args, **kwargs)
+
+            with lock:
+                cache[key] = result
+                timestamps[key] = time.time()
+
+            return result
+        return wrapper
+    return decorator
+```
+
+Choose the implementation that best fits your consistency requirements. The first ensures cache invalidation when the function definition changes, while the second invalidates after a time period.

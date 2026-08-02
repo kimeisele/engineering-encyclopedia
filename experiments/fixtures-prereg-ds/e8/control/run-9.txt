@@ -1,0 +1,243 @@
+Here's a comprehensive solution for a cache that doesn't serve stale data:
+
+```python
+import time
+import threading
+from collections import OrderedDict
+from typing import Any, Callable, Optional
+
+class CacheWithValidation:
+    """
+    A cache that validates data freshness using a versioning mechanism.
+    Never serves stale data by checking if source has changed before serving.
+    """
+    
+    def __init__(self, version_checker: Callable[[], Any], 
+                 ttl: Optional[float] = None,
+                 max_size: Optional[int] = None):
+        """
+        Args:
+            version_checker: Callable that returns current version of source data
+            ttl: Time-to-live in seconds (optional)
+            max_size: Maximum cache entries (optional, uses LRU eviction)
+        """
+        self.version_checker = version_checker
+        self.ttl = ttl
+        self.max_size = max_size
+        self._cache = OrderedDict()  # key -> (value, version, timestamp)
+        self._lock = threading.Lock()
+    
+    def get(self, key: str, loader: Callable[[], Any]) -> Any:
+        """
+        Get cached value for key, loading if necessary.
+        Never returns stale data.
+        
+        Args:
+            key: Cache key
+            loader: Function to load the data if not cached or stale
+            
+        Returns:
+            Fresh cached value
+        """
+        current_version = self.version_checker()
+        
+        with self._lock:
+            # Check if we have a cached entry
+            if key in self._cache:
+                value, cached_version, timestamp = self._cache[key]
+                
+                # Check if version matches (source hasn't changed)
+                version_fresh = (cached_version == current_version)
+                
+                # Check if TTL hasn't expired
+                ttl_fresh = True
+                if self.ttl is not None:
+                    ttl_fresh = (time.time() - timestamp) < self.ttl
+                
+                # Only return cached value if both fresh conditions are met
+                if version_fresh and ttl_fresh:
+                    # Move to end (LRU)
+                    self._cache.move_to_end(key)
+                    return value
+            
+            # Load new data
+            new_value = loader()
+            
+            # Update cache
+            self._cache[key] = (new_value, current_version, time.time())
+            self._cache.move_to_end(key)
+            
+            # Handle max size (LRU eviction)
+            if self.max_size and len(self._cache) > self.max_size:
+                self._cache.popitem(last=False)
+            
+            return new_value
+    
+    def invalidate(self, key: str):
+        """Remove a specific key from cache"""
+        with self._lock:
+            self._cache.pop(key, None)
+    
+    def clear(self):
+        """Clear entire cache"""
+        with self._lock:
+            self._cache.clear()
+    
+    def cache_stats(self) -> dict:
+        """Return cache statistics"""
+        with self._lock:
+            return {
+                'size': len(self._cache),
+                'max_size': self.max_size,
+                'keys': list(self._cache.keys())
+            }
+
+
+# Alternative implementation using locking + revalidation
+class RevalidatingCache:
+    """
+    A cache that revalidates data before serving.
+    Uses a revalidation callback to check freshness.
+    """
+    
+    def __init__(self, revalidate_func: Callable[[Any], bool]):
+        """
+        Args:
+            revalidate_func: Function that takes cached data and returns 
+                            True if still valid, False if stale
+        """
+        self.revalidate_func = revalidate_func
+        self._cache = {}
+        self._lock = threading.Lock()
+    
+    def get(self, key: str, loader: Callable[[], Any]) -> Any:
+        """
+        Get value, revalidating before serving from cache.
+        Never returns stale data.
+        """
+        with self._lock:
+            if key in self._cache:
+                cached_value = self._cache[key]
+                
+                # Revalidate the cached data
+                if self.revalidate_func(cached_value):
+                    return cached_value
+                else:
+                    # Stale data, remove it
+                    del self._cache[key]
+            
+            # Load fresh data
+            new_value = loader()
+            self._cache[key] = new_value
+            return new_value
+
+
+# Simple example usage with database-like source
+class ExampleDatabase:
+    def __init__(self):
+        self.data = {"user_1": "Alice", "user_2": "Bob"}
+        self.version = 1
+    
+    def get_user(self, user_id):
+        """Simulate database query"""
+        time.sleep(0.1)  # Simulate latency
+        return self.data[user_id]
+    
+    def update_user(self, user_id, new_name):
+        """Simulate database update that changes version"""
+        self.data[user_id] = new_name
+        self.version += 1  # Version changes on update
+        return self.version
+    
+    def get_version(self):
+        """Version checker callback"""
+        return self.version
+
+
+# Usage examples
+def example_with_version_checking():
+    print("=== Version-based Cache ===")
+    db = ExampleDatabase()
+    
+    # Create cache with version checker
+    cache = CacheWithValidation(
+        version_checker=db.get_version,
+        ttl=30,  # 30 second TTL
+        max_size=100
+    )
+    
+    # First access - loads from source
+    user = cache.get("user_1", lambda: db.get_user("user_1"))
+    print(f"First access: {user}")  # Alice
+    
+    # Second access - should use cache (fast)
+    user = cache.get("user_1", lambda: db.get_user("user_1"))
+    print(f"Cached access: {user}")  # Alice
+    
+    # Simulate data change
+    db.update_user("user_1", "Alice Smith")
+    
+    # Next access - cache detects version change and reloads
+    user = cache.get("user_1", lambda: db.get_user("user_1"))
+    print(f"After update: {user}")  # Alice Smith (fresh data)
+    
+    print(f"Cache stats: {cache.cache_stats()}")
+
+
+def example_with_revalidation():
+    print("\n=== Revalidation-based Cache ===")
+    db = ExampleDatabase()
+    
+    # Track last known good data for revalidation
+    def revalidate(data):
+        """Check if data is still fresh"""
+        return data == db.data.get("user_1", data)  # Compare current value
+    
+    cache = RevalidatingCache(revalidate)
+    
+    # First access
+    user = cache.get("user_1", lambda: db.get_user("user_1"))
+    print(f"First access: {user}")  # Alice
+    
+    # Data changes without version tracking
+    db.data["user_1"] = "Alice Johnson"
+    
+    # Next access - revalidation catches the change
+    user = cache.get("user_1", lambda: db.get_user("user_1"))
+    print(f"After change: {user}")  # Alice Johnson (fresh data)
+
+
+if __name__ == "__main__":
+    example_with_version_checking()
+    example_with_revalidation()
+```
+
+**Key Features:**
+
+1. **Version-based approach** (`CacheWithValidation`):
+   - Uses a `version_checker` callback to get current source version
+   - Caches values with their version and timestamp
+   - On each access, compares cached version with current source version
+   - Immediately detects and reloads if source has changed
+
+2. **Revalidation approach** (`RevalidatingCache`):
+   - Uses a `revalidate_func` to check if cached data is still valid
+   - Revalidates before every read
+   - Never serves data that fails validation
+
+3. **Additional safety features**:
+   - Thread-safe with locks
+   - Optional TTL (time-to-live) expiration
+   - LRU eviction for bounded cache size
+   - Cache invalidation methods
+
+4. **Never serves stale data** because:
+   - Version check ensures source hasn't changed
+   - Revalidation validates data freshness
+   - TTL ensures data doesn't get too old
+   - All checks happen before serving from cache
+
+The implementation provides multiple strategies to guarantee freshness, and you can choose based on your specific needs:
+- Use version checking when you can track data modifications
+- Use revalidation when you need to validate content directly
+- Combine with TTL for additional safety

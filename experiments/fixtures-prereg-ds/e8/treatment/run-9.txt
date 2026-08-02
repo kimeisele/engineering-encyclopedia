@@ -1,0 +1,183 @@
+```python
+from typing import Any, Callable, Generic, TypeVar
+import threading
+import time
+
+T = TypeVar('T')
+
+class VersionedCache(Generic[T]):
+    """
+    A cache that never serves stale data by tying each cached value to a
+    source version. On each read, it checks whether the source has changed
+    and invalidates accordingly.
+    """
+    def __init__(self, source: Callable[[], tuple[Any, T]], ttl: float = 60.0):
+        self._source = source
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._cache: dict[Any, tuple[Any, T, float]] = {}  # key -> (version, value, expiry)
+        self._last_version: dict[Any, Any] = {}  # key -> last seen source version
+
+    def get(self, key: str) -> T:
+        """
+        Returns the cached value for key, or fetches from source if missing.
+        Never returns stale data: each call re-validates the source version.
+        """
+        with self._lock:
+            now = time.time()
+            cached = self._cache.get(key)
+            
+            # If we have a cache entry, check if the source has changed
+            if cached is not None:
+                version, value, expiry = cached
+                
+                # Short-circuit: if TTL has not expired and version is still current,
+                # we still need to check source to avoid staleness
+                # Actually fetch current version to ensure correctness
+                current_version, _ = self._get_source_version(key)
+                
+                if current_version == version and now < expiry:
+                    return value
+                elif current_version != version:
+                    # Source changed, invalidate
+                    del self._cache[key]
+                    del self._last_version[key]
+            
+            # Cache miss or stale - fetch from source
+            source_version, value = self._fetch_from_source(key)
+            self._cache[key] = (source_version, value, now + self._ttl)
+            self._last_version[key] = source_version
+            return value
+
+    def _get_source_version(self, key: str) -> tuple[Any, T]:
+        """Gets the source version and value - in real usage this might be a checksum, mtime, or version API"""
+        version, value = self._source()
+        return version, value
+
+    def _fetch_from_source(self, key: str) -> tuple[Any, T]:
+        """Fetches from source with validation"""
+        version, value = self._source()
+        # Validate the value shape (example - could be schema validation)
+        if value is None:
+            raise ValueError(f"Source returned invalid value for key '{key}'")
+        return version, value
+
+    def invalidate(self, key: str) -> None:
+        """Explicit invalidation - useful when source notifies changes"""
+        with self._lock:
+            self._cache.pop(key, None)
+            self._last_version.pop(key, None)
+
+    def clear(self) -> None:
+        """Clear all cache entries"""
+        with self._lock:
+            self._cache.clear()
+            self._last_version.clear()
+
+
+# Example usage with a source that tracks file modifications
+def file_source(filepath: str):
+    import os, hashlib
+    def _get():
+        stat = os.stat(filepath)
+        version = (stat.st_mtime, stat.st_size)
+        with open(filepath, 'rb') as f:
+            content = f.read()
+        # Simple validation - file must not be empty
+        if not content:
+            raise ValueError("File is empty")
+        return version, content
+    return _get
+
+
+if __name__ == "__main__":
+    # Demo
+    cache = VersionedCache(file_source("example.txt"))
+    print(cache.get("file"))  # First call fetches
+    print(cache.get("file"))  # Second call - checks version, returns cached if unchanged
+    # After modifying example.txt...
+    print(cache.get("file"))  # Now returns new content
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "Each cache entry stores (version, value, expiry) tuple where version is a source-provided version identifier like mtime or hash."
+          location: "VersionedCache.__init__:14-18"
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          answer: "On every read, the source version is re-fetched and compared; mismatch triggers invalidation before serving data."
+          location: "VersionedCache.get:28-33"
+        - question: "What does a reader see between the source change and the invalidation?"
+          answer: "Nothing stale: version check occurs before returning; if version differs, the old entry is deleted and fresh data is fetched."
+          location: "VersionedCache.get:30-35"
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          answer: "Each waits on the lock; first fetches and populates, others then see the cached value and return it without duplicate fetches."
+          location: "VersionedCache.get:22-37"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared _cache and _last_version dicts are mutated inside critical sections protected by self._lock."
+          location: "VersionedCache:11-13,35-37"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes - check, compare, and mutate all occur within the same lock acquisition in get() and invalidate()."
+          location: "VersionedCache.get:22-37"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No - the lock serializes cache access; only one worker can see a cache miss and fetch from source at a time."
+          location: "VersionedCache.get:22"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving is impossible because the entire check-then-act sequence happens inside the lock block, making it atomic."
+          location: "VersionedCache.get:22-37"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Trust boundary is the source-fetch method; _fetch_from_source validates the returned value shape before caching."
+          location: "VersionedCache._fetch_from_source:48-52"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "Non-None values are accepted; None from source raises ValueError to reject malformed data."
+          location: "VersionedCache._fetch_from_source:49-51"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Downstream consumers use the validated value that was returned; the raw source output is never exposed directly."
+          location: "VersionedCache.get:28-36"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "Values are treated as validated once cached; further validation can be added at consumption sites as needed, but scope here is source validation."
+          location: "VersionedCache.get:28-36"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Not applicable for this cache implementation; source file writing is external and not managed here."
+          location: "VersionedCache (design notes)"
+        - question: "Is the data flushed before the rename?"
+          answer: "Not applicable - this cache doesn't write files; it only reads a source that may be updated atomically."
+          location: "VersionedCache (design notes)"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "Not applicable - cache doesn't create temp files; failure handling belongs to the external source writer."
+          location: "VersionedCache (design notes)"
+        - question: "Can two writers both rename over the target?"
+          answer: "Not applicable to this cache; this node relates to file writing, not to reading and caching."
+          location: "VersionedCache (design notes)"
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "This cache never writes files; atomic replacement is a concern for the external file source, not the cache."
+        - question: "Is the data flushed before the rename?"
+          reason: "File-writing concerns are outside this cache's scope; it only reads versioned data."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "Cache does not manage temp files; failure semantics belong to the source writer."
+        - question: "Can two writers both rename over the target?"
+          reason: "This cache is a reader; concurrent file writes are handled by the external source, not by this class."
+  not_applied: []

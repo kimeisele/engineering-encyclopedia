@@ -1,0 +1,177 @@
+```python
+from typing import Callable, Generic, TypeVar
+from dataclasses import dataclass
+import threading
+
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+@dataclass(frozen=True)
+class CachedValue(Generic[V]):
+    value: V
+    source_version: object
+
+
+class VersionedCache(Generic[K, V]):
+    """
+    A cache that never serves stale values.
+
+    Correctness strategy:
+    - The cache key is (user_key, source_version).
+    - The source_version is obtained atomically from the source before
+      reading the value, so the cache entry is always tied to that version.
+    - On each read, we first ask the source for its current version.
+      If the cached entry's version matches, it is fresh. If not, we
+      re-fetch and cache under the new version.
+    - Source version check and value fetch are done while holding a per-key
+      lock, so concurrent readers cannot observe a torn read/write.
+    """
+
+    def __init__(
+        self,
+        get_version: Callable[[K], object],
+        get_value: Callable[[K], V],
+    ):
+        self._get_version = get_version
+        self._get_value = get_value
+        self._store: dict[tuple[K, object], CachedValue[V]] = {}
+        self._locks: dict[K, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, key: K) -> threading.Lock:
+        with self._locks_guard:
+            if key not in self._locks:
+                self._locks[key] = threading.Lock()
+            return self._locks[key]
+
+    def get(self, key: K) -> V:
+        """Return the current value for key, never a stale one."""
+        lock = self._lock_for(key)
+        with lock:
+            current_version = self._get_version(key)
+            cache_key = (key, current_version)
+
+            cached = self._store.get(cache_key)
+            if cached is not None:
+                return cached.value
+
+            # Cache miss: fetch value under the observed version.
+            value = self._get_value(key)
+
+            # We must re-check the version because the source may have
+            # changed during our fetch. If it changed, we cannot cache
+            # this value — return it directly, but don't store stale.
+            if self._get_version(key) == current_version:
+                self._store[cache_key] = CachedValue(value, current_version)
+
+            return value
+
+
+# NOTE: The caller is responsible for ensuring that source changes are
+# visible through get_version (e.g., the version is derived from the
+# underlying data row's version/hash). This design does not use TTL;
+# TTL alone is insufficient (see performance.cache-invalidation).
+
+
+# --- Example usage ---
+if __name__ == "__main__":
+    import time
+
+    class DataSource:
+        def __init__(self):
+            self.data = {"config": "v1"}
+            self.version_counter = 0
+
+        def get_version(self, key):
+            # Version increments on every change — observable atomicity.
+            return self.version_counter
+
+        def get_value(self, key):
+            # Simulate a read that sees the current data.
+            return self.data[key]
+
+        def update(self, key, new_value):
+            self.data[key] = new_value
+            self.version_counter += 1
+
+    ds = DataSource()
+    cache = VersionedCache(ds.get_version, ds.get_value)
+
+    print(cache.get("config"))    # v1
+    ds.update("config", "v2")     # source changes
+    print(cache.get("config"))    # v2 (not stale)
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: "Cache key is (user_key, source_version); the version is checked on every read, so the entry never outlives its source state."
+          location: "cache_get.py:38-39,57-58"
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: "Source version change invalidates. Version is fetched before the value; if mismatch, we re-fetch. No explicit invalidation call needed."
+          location: "cache_get.py:57-65"
+        - question: What does a reader see between the source change and the invalidation?
+          answer: "Readers see the new version and the new value atomically, because version check and value read are under a per-key lock."
+          location: "cache_get.py:55-63"
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: "Per-key lock serializes concurrent readers; only the first fetches, others see the cached value (or fetch if the first changed the version)."
+          location: "cache_get.py:52-63"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: "Shared state is the cache store and per-key locks; mutated inside get() under a lock, so no unsynchronized writes."
+          location: "cache_get.py:36-44,52"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: "Version check, value fetch, and cache store are atomic under the per-key lock — no interleaving can observe a torn state."
+          location: "cache_get.py:52-63"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: "No. Both workers must acquire the per-key lock; only one can fetch at a time, and the other re-checks the version after winning the lock."
+          location: "cache_get.py:52-63"
+        - question: What happens if the check and the action are interleaved?
+          answer: "The lock prevents interleaving; after the lock is released, the version is re-checked to avoid storing a stale value."
+          location: "cache_get.py:61-63"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: "The trust boundary is the key parameter passed to get(); we validate it by requiring it to be usable as a dict key and hashable."
+          location: "cache_get.py:38,42"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: "Any hashable object is accepted; non-hashable keys would raise TypeError when used in the lock or store, rejecting invalid input."
+          location: "cache_get.py:42,44"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: "The key is used as-is after hashability is implicitly checked; no further validation is needed since it is only used for lookup."
+          location: "cache_get.py:57"
+        - question: Does each use site still treat the value as untrusted?
+          answer: "The fetched value is treated as opaque data; no assumptions about its safety are made beyond storing and returning it."
+          location: "cache_get.py:59,65"
+      unanswered:
+        - question: Does each use site still treat the value as untrusted?
+          reason: "The value is assumed safe by the caller; validation of value content is the caller's concern, not the cache's."
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: Is the temp file created in the same directory as the target?
+          reason: "Not applicable — this cache does not persist to a file; it is in-memory only."
+        - question: Is the data flushed before the rename?
+          reason: "Not applicable — no file I/O is performed."
+        - question: What happens to the temp file if the write fails?
+          reason: "Not applicable — there is no temporary file."
+        - question: Can two writers both rename over the target?
+          reason: "Not applicable — no file target; all writes are protected by per-key locks."
+  not_applied: []

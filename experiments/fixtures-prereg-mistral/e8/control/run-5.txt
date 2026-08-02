@@ -1,0 +1,97 @@
+# Cache with Stale Value Prevention
+
+Here's a Python implementation of a cache that ensures it never serves stale values after the source data changes. This uses a combination of a cache dictionary and a version/timestamp system to track when the source data changes.
+
+```python
+import time
+from typing import Any, Callable, Optional
+
+class FreshCache:
+    def __init__(self):
+        self._cache = {}
+        self._version = 0
+        self._last_updated = 0
+
+    def get(self, key: str, fetch_func: Callable[[], Any], ttl: Optional[float] = None) -> Any:
+        """
+        Get a value from cache or fetch it fresh if needed.
+
+        Args:
+            key: The cache key
+            fetch_func: Function to call to get fresh data when needed
+            ttl: Time-to-live in seconds (None means no expiration)
+
+        Returns:
+            The cached or fresh value
+        """
+        current_time = time.time()
+
+        # Check if we have a valid cached value
+        if key in self._cache:
+            cached_value, cached_version, cached_time = self._cache[key]
+
+            # Check if cache is still valid (either no TTL or within TTL)
+            if ttl is None or (current_time - cached_time) <= ttl:
+                # Check if source data has changed since this was cached
+                if cached_version == self._version:
+                    return cached_value
+
+        # Need to fetch fresh data
+        fresh_value = fetch_func()
+
+        # Update cache
+        self._cache[key] = (fresh_value, self._version, current_time)
+
+        return fresh_value
+
+    def invalidate(self):
+        """Mark the source data as changed, invalidating all cached values"""
+        self._version += 1
+        self._last_updated = time.time()
+
+    def clear(self):
+        """Clear the entire cache"""
+        self._cache.clear()
+```
+
+## How It Works
+
+1. **Version Tracking**: Each time the source data changes, the version number increments.
+2. **Cache Validation**: When retrieving a value, the cache checks both:
+   - If the cached value is still within its TTL (if specified)
+   - If the version number matches the current version (ensuring no stale data)
+3. **Invalidation**: The `invalidate()` method is called whenever the source data changes.
+
+## Example Usage
+
+```python
+# Example usage
+cache = FreshCache()
+source_data = {"value": 1}
+
+def get_data():
+    return source_data["value"]
+
+# First access - fetches fresh data
+print(cache.get("key1", get_data))  # Output: 1
+
+# Modify source data
+source_data["value"] = 2
+cache.invalidate()  # Important! Marks data as changed
+
+# Next access - fetches fresh data again
+print(cache.get("key1", get_data))  # Output: 2
+
+# With TTL
+cache.clear()
+print(cache.get("key2", get_data, ttl=5))  # Will cache for 5 seconds
+```
+
+## Key Features
+
+- **Stale Prevention**: Never serves stale data after source changes
+- **TTL Support**: Optional time-to-live for cached values
+- **Manual Invalidation**: Explicit control over when to invalidate cache
+- **Thread Safety**: While not thread-safe in this basic implementation, could be extended with locks
+
+For production use, you might want to add thread safety and potentially more sophisticated cache eviction policies.

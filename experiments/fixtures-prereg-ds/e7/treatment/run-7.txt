@@ -1,0 +1,117 @@
+```python
+import threading
+import time
+
+class SharedCounter:
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def increment(self):
+        """Increment the counter safely. No update is ever lost."""
+        with self._lock:
+            old = self._value
+            # Simulate some work to increase the chance of interleaving
+            time.sleep(0.001)
+            self._value = old + 1
+
+    def get(self):
+        with self._lock:
+            return self._value
+
+
+# Example usage
+def worker(counter, iterations):
+    for _ in range(iterations):
+        counter.increment()
+
+if __name__ == "__main__":
+    counter = SharedCounter()
+    threads = []
+    for _ in range(2):
+        t = threading.Thread(target=worker, args=(counter, 100))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join()
+    print(f"Final count: {counter.get()}")  # Should be 200
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: "What identifies the version of the state being changed?"
+          answer: "The lock itself protects the counter; the value read under the lock is the authoritative version."
+          location: "SharedCounter.increment (line 14-17)"
+        - question: "Is the conflict detected before or after the write?"
+          answer: "Conflict is prevented before the write via mutual exclusion, not detected after."
+          location: "SharedCounter.increment (line 14-17)"
+        - question: "How long is the lock held, and across what?"
+          answer: "Lock is held only for the read-modify-write critical section, not across I/O."
+          location: "SharedCounter.increment (line 14-17)"
+        - question: "What happens when the conflict is detected?"
+          answer: "No conflict occurs because locking serializes access; threads wait for the lock."
+          location: "SharedCounter.increment (line 14-17)"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The counter value is shared and mutated inside increment(), protected by a lock."
+          location: "SharedCounter.increment (line 14-17)"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, both read and write occur while holding the lock, making the sequence atomic."
+          location: "SharedCounter.increment (line 14-17)"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, the lock ensures only one thread at a time can read the counter."
+          location: "SharedCounter.increment (line 14-17)"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "No interleaving is possible; the lock prevents any other thread from entering the critical section."
+          location: "SharedCounter.increment (line 14-17)"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Not applicable — this function updates a counter, not a file."
+          location: "Not applicable"
+        - question: "Is the data flushed before the rename?"
+          answer: "Not applicable — no file I/O is performed."
+          location: "Not applicable"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "Not applicable — no temp file is used."
+          location: "Not applicable"
+        - question: "Can two writers both rename over the target?"
+          answer: "Not applicable — no file operations occur; counter uses in-memory locking."
+          location: "Not applicable"
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "Node is about file atomicity; the task is a counter update, so file-specific concerns don't apply."
+        - question: "Is the data flushed before the rename?"
+          reason: "No files are written, so flush/rename mechanics are irrelevant."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "No temporary files exist in this counter implementation."
+        - question: "Can two writers both rename over the target?"
+          reason: "No file replacement occurs; the lock prevents counter races."
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered: []
+      unanswered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          reason: "No cache is used in this counter; the value is direct and always current."
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          reason: "No cache exists to invalidate."
+        - question: "What does a reader see between the source change and the invalidation?"
+          reason: "No caching layer exists; readers see the latest value under the lock."
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          reason: "No cache to populate; the counter is always available."
+  not_applied: []

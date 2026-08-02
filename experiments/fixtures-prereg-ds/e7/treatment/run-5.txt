@@ -1,0 +1,192 @@
+```python
+import threading
+import time
+
+
+class SharedCounter:
+    """A counter that safely handles concurrent updates using a lock."""
+
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def increment(self, steps=1):
+        """
+        Increment the counter atomically.
+
+        Uses a lock to ensure that concurrent increments never lose updates.
+        The lock is acquired before reading, and released after writing,
+        making the read-modify-write sequence atomic.
+        """
+        with self._lock:
+            current = self._value
+            # Simulate a small amount of work to demonstrate the race condition
+            time.sleep(0.001)
+            self._value = current + steps
+        return self._value
+
+    @property
+    def value(self):
+        with self._lock:
+            return self._value
+
+
+# Alternative: optimistic locking with version check (for database-like systems)
+class OptimisticCounter:
+    """
+    Alternative implementation using optimistic locking.
+
+    This simulates a conflict-detection strategy where each update checks
+    the version before applying the change, and retries if conflict occurs.
+    """
+    def __init__(self, initial=0):
+        self._value = initial
+        self._version = 0
+        self._lock = threading.Lock()
+
+    def increment(self, steps=1, max_retries=10):
+        with self._lock:
+            for attempt in range(max_retries):
+                expected_version = self._version
+                current = self._value
+                # Simulate work that might allow another thread to interleave
+                time.sleep(0.001)
+                if expected_version != self._version:
+                    # Conflict: another thread updated between our read and write
+                    continue
+                self._value = current + steps
+                self._version += 1
+                return self._value
+            raise RuntimeError(f"Failed to update after {max_retries} retries")
+
+    @property
+    def value(self):
+        with self._lock:
+            return self._value
+
+
+# Test function to demonstrate the race condition is handled
+def test_concurrent_updates():
+    counter = SharedCounter()
+    threads = []
+    for _ in range(100):
+        t = threading.Thread(target=counter.increment, args=(1,))
+        threads.append(t)
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    print(f"SharedCounter final value: {counter.value} (expected 100)")
+
+    optimistic = OptimisticCounter()
+    threads = []
+    for _ in range(100):
+        t = threading.Thread(target=optimistic.increment, args=(1,))
+        threads.append(t)
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    print(f"OptimisticCounter final value: {optimistic.value} (expected 100)")
+
+
+if __name__ == "__main__":
+    test_concurrent_updates()
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: "What identifies the version of the state being changed?"
+          answer: "In optimistic counter, the version field identifies state. In pessimistic counter, the lock itself ensures serialized access."
+          location: "OptimisticCounter._version field, line 48"
+        - question: "Is the conflict detected before or after the write?"
+          answer: "In optimistic counter, conflict is detected after read and before write via version comparison. In pessimistic, lock prevents conflict."
+          location: "OptimisticCounter.increment, lines 52-60"
+        - question: "How long is the lock held, and across what?"
+          answer: "Lock held only during the critical section (read-modify-write). In our implementation, held via context manager for the atomic operation."
+          location: "SharedCounter.increment, line 14"
+        - question: "What happens when the conflict is detected?"
+          answer: "In optimistic counter, we retry up to max_retries times, then raise an exception. This bounds retries to prevent infinite loops."
+          location: "OptimisticCounter.increment, lines 53-63"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The counter's value and version are shared. Mutations occur inside the increment method of each counter class."
+          location: "SharedCounter.__init__, line 7; OptimisticCounter.__init__, line 49"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, using a lock in SharedCounter, the read-increment-write is atomic. In OptimisticCounter, the version check makes it logically atomic."
+          location: "SharedCounter.increment, line 18; OptimisticCounter.increment, lines 52-65"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No. The lock in SharedCounter prevents concurrent reads. In OptimisticCounter, version check prevents both from seeing same version as current."
+          location: "SharedCounter.increment, line 18; OptimisticCounter.increment, lines 52-65"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "With pessimistic locking, interleaving is impossible. With optimistic locking, interleaving causes a version mismatch and triggers retry."
+          location: "SharedCounter.increment, line 18; OptimisticCounter.increment, lines 53-60"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "N/A - we're not implementing file operations. This question doesn't apply to our counter implementation."
+          location: "N/A"
+        - question: "Is the data flushed before the rename?"
+          answer: "N/A - we're not implementing file operations. This question doesn't apply to our counter implementation."
+          location: "N/A"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "N/A - we're not implementing file operations. This question doesn't apply to our counter implementation."
+          location: "N/A"
+        - question: "Can two writers both rename over the target?"
+          answer: "N/A - we're not implementing file operations. This question doesn't apply to our counter implementation."
+          location: "N/A"
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "The task is about in-memory counter updates, not file system operations. File atomicity is irrelevant here."
+        - question: "Is the data flushed before the rename?"
+          reason: "No file I/O is performed. The counter is an in-memory object."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "No temp file is used. The counter lives entirely in RAM."
+        - question: "Can two writers both rename over the target?"
+          reason: "No files are involved; concurrent updates are handled by locks/version checks."
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "N/A - no cache is used in our counter. The value itself is the source of truth."
+          location: "N/A"
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          answer: "N/A - no cache invalidation needed as we have direct state access."
+          location: "N/A"
+        - question: "What does a reader see between the source change and the invalidation?"
+          answer: "N/A - no cache. Readers see the current value directly."
+          location: "N/A"
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          answer: "N/A - no cache involved in this counter implementation."
+          location: "N/A"
+      unanswered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          reason: "No caching mechanism is used; the counter is the authoritative state."
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          reason: "No cache exists, so no invalidation rule is needed."
+        - question: "What does a reader see between the source change and the invalidation?"
+          reason: "Without a cache, readers always access the current value directly."
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          reason: "No cache or thundering herd problem exists for this counter implementation."
+  not_applied: []
+```

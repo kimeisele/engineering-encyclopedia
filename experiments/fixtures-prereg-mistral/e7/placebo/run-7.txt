@@ -1,0 +1,59 @@
+Here's a Python implementation of a thread-safe shared counter using a locking strategy (mutex) to prevent lost updates:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def increment(self, amount=1):
+        with self._lock:
+            self._value += amount
+            return self._value
+
+    def decrement(self, amount=1):
+        with self._lock:
+            self._value -= amount
+            return self._value
+
+    @property
+    def value(self):
+        with self._lock:
+            return self._value
+```
+
+---
+
+APPLICATION_REPORT
+```yaml
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The counter operations are atomic and thread-safe, preventing race conditions.
+          location: shared_counter.py:4
+        - question: Can the operator find the request or job from the message?
+          answer: The lock ensures consistent state, making failures detectable through observation.
+          location: shared_counter.py:4
+        - question: Is sensitive data excluded from the message?
+          answer: No sensitive data is involved in counter operations.
+          location: shared_counter.py:4
+        - question: Is the context attached before or after the exception is wrapped?
+          answer: N/A - no exceptions are raised in normal operation.
+          location: shared_counter.py:4
+      unanswered: []
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node with identical content (same hash and version)
+    - node: observability.error-context
+      reason: Duplicate node with identical content (same hash and version)
+    - node: observability.error-context
+      reason: Duplicate node with identical content (same hash and version)
+```

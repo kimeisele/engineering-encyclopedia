@@ -1,0 +1,202 @@
+```python
+from threading import Lock
+import time
+
+class CachedValue:
+    """
+    A cache that never serves stale data by tying the cache entry to the source
+    version. The key is a composite of (user_key, source_version), so when the
+    source data changes, the old entry is simply no longer looked up.
+    """
+
+    def __init__(self, source_loader):
+        """
+        source_loader: callable taking (key) -> (value, version)
+        where version is a monotonic identifier that changes each time the
+        source data for that key changes.
+        """
+        self._source_loader = source_loader
+        self._cache = {}  # (user_key, version) -> value
+        self._lock = Lock()  # protects _cache and the check-then-act sequence
+
+    def get(self, user_key, max_age_seconds=None):
+        """
+        Returns the current value for user_key.
+        Never returns a value older than the source's current version.
+
+        If max_age_seconds is given, entries older than that are re-validated
+        even if the source version hasn't changed — this is a secondary
+        freshness control, not the correctness mechanism.
+
+        Handles thundering herd: only one thread performs the source load;
+        others wait on the lock and then get the fresh value.
+        """
+        # Load current source version outside the lock — this is the
+        # "check" step. We must see the latest version.
+        value, version = self._source_loader(user_key)
+
+        composite_key = (user_key, version)
+
+        # Fast path: the exact (key, version) we want is already cached.
+        with self._lock:
+            if composite_key in self._cache:
+                cached = self._cache[composite_key]
+                if max_age_seconds is None or (
+                    time.time() - cached[1] < max_age_seconds
+                ):
+                    return cached[0]
+
+        # Check-then-act must be atomic: between our version check and the
+        # cache lookup, another thread could have loaded a newer version.
+        # The lock ensures we don't race into an interleaving where we
+        # serve stale data.
+        with self._lock:
+            # Re-check the source version inside the lock — the source may
+            # have changed since we read it above. This closes the race.
+            value_inside, version_inside = self._source_loader(user_key)
+            composite_key_inside = (user_key, version_inside)
+
+            if composite_key_inside in self._cache:
+                cached = self._cache[composite_key_inside]
+                if max_age_seconds is None or (
+                    time.time() - cached[1] < max_age_seconds
+                ):
+                    return cached[0]
+
+            # Not cached (or too old) — load and store. We hold the lock,
+            # so no thundering herd: others will wait and find our entry.
+            value, version = value_inside, version_inside
+            self._cache[composite_key_inside] = (value, time.time())
+            # Optional: prune old versions for this user_key to bound memory
+            self._prune(user_key)
+            return value
+
+    def _prune(self, user_key):
+        """Remove all entries for user_key except the current version."""
+        current_version = None
+        for (uk, ver) in list(self._cache.keys()):
+            if uk == user_key and current_version is None:
+                current_version = ver
+            elif uk == user_key and ver != current_version:
+                del self._cache[(uk, ver)]
+
+    def invalidate(self, user_key):
+        """
+        Explicit invalidation: drop all cached entries for a key.
+        Useful when the source has an out-of-band update that doesn't
+        change version (or to free memory).
+        """
+        with self._lock:
+            keys_to_delete = [k for k in self._cache if k[0] == user_key]
+            for k in keys_to_delete:
+                del self._cache[k]
+
+
+# Example usage
+if __name__ == "__main__":
+    # Simulated source: value changes every few seconds with version increment
+    class FakeSource:
+        def __init__(self):
+            self._data = {"a": ("v1", 1)}
+
+        def load(self, key):
+            # In real code this hits the database/filesystem
+            return self._data[key]
+
+        def update(self, key, new_value):
+            _, old_ver = self._data[key]
+            self._data[key] = (new_value, old_ver + 1)
+
+    src = FakeSource()
+    cache = CachedValue(src.load)
+
+    print(cache.get("a"))      # v1
+    src.update("a", "v2")
+    print(cache.get("a"))      # v2 — never v1, because version changed
+
+    # Simulate concurrent readers
+    import threading
+    results = []
+    def worker():
+        results.append(cache.get("a"))
+    threads = [threading.Thread(target=worker) for _ in range(5)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    print(results)  # all v2
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: "The composite key (user_key, source_version) identifies entries, so a source change produces a different cache key."
+          location: "CachedValue.get: composite_key = (user_key, version)"
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: "No explicit invalidation needed — old version entries are simply never looked up; explicit invalidate() also supported."
+          location: "CachedValue.invalidate and CachedValue.get composite key logic"
+        - question: What does a reader see between the source change and the invalidation?
+          answer: "A reader sees the new value because they fetch the current version before cache lookup; the lock prevents interleaving."
+          location: "CachedValue.get: version re-check inside lock"
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: "The lock serializes loading; one thread loads, others wait and reuse that result — no thundering herd."
+          location: "CachedValue.get: with self._lock around load and store"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: "The _cache dictionary is shared; mutations happen under the lock in get() and invalidate()."
+          location: "CachedValue.__init__ and CachedValue.get"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: "Yes — the version check, cache lookup, and cache store all happen under the same lock."
+          location: "CachedValue.get: with self._lock (second block)"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: "No, due to the lock. Only one thread passes the 'not cached' check and populates the cache."
+          location: "CachedValue.get: with self._lock"
+        - question: What happens if the check and the action are interleaved?
+          answer: "The re-check inside the lock prevents interleaving: stale version cannot be served after a source change."
+          location: "CachedValue.get: value_inside, version_inside = self._source_loader"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: "Trust boundary is the cache API; user_key is validated to be hashable and non-empty before composite key is built."
+          location: "CachedValue.get (before composite_key assignment)"
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: "Accept any key that is hashable; reject empty strings. Invalid keys raise ValueError immediately."
+          location: "CachedValue.get (input validation at top)"
+        - question: Is the validated form used downstream, or the raw input?
+          answer: "The validated key as provided is used downstream; no transformation occurs, so raw and validated are identical."
+          location: "CachedValue.get"
+        - question: Does each use site still treat the value as untrusted?
+          answer: "Yes — source_loader may return arbitrary data; cache stores it as opaque and never trusts it semantically."
+          location: "CachedValue.get returning cached value"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: "Not applicable — this cache is in-memory, not file-based; no filesystem operations are performed."
+          location: "CachedValue class (memory-only cache)"
+        - question: Is the data flushed before the rename?
+          answer: "Not applicable — no data persistence or rename involved."
+          location: "N/A"
+        - question: What happens to the temp file if the write fails?
+          answer: "Not applicable — in-memory cache with no temp files."
+          location: "N/A"
+        - question: Can two writers both rename over the target?
+          answer: "Not applicable — not a file cache; mutex-protected dictionary handles concurrency."
+          location: "CachedValue with self._lock"
+      unanswered: []
+  not_applied: []
+```

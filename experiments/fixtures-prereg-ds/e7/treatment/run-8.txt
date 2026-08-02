@@ -1,0 +1,106 @@
+```python
+import threading
+
+class SharedCounter:
+    """Thread-safe counter using optimistic locking with a version field."""
+    
+    def __init__(self, initial=0):
+        self._value = initial
+        self._version = 0
+        self._lock = threading.Lock()
+    
+    def update(self, delta):
+        """
+        Atomically add delta to the counter.
+        Uses a version-check-retry loop (optimistic concurrency control).
+        """
+        while True:
+            # Snapshot current state under lock
+            with self._lock:
+                current_value = self._value
+                current_version = self._version
+            
+            # Compute new value based on snapshot
+            new_value = current_value + delta
+            
+            # Try to commit - only succeeds if version hasn't changed
+            with self._lock:
+                if self._version == current_version:
+                    self._value = new_value
+                    self._version += 1
+                    return new_value
+                # else: version changed, retry with fresh snapshot
+
+    def get(self):
+        with self._lock:
+            return self._value
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: "What identifies the version of the state being changed?"
+          answer: "The _version field increments with each commit, detecting concurrent modifications."
+          location: "line 13"
+        - question: "Is the conflict detected before or after the write?"
+          answer: "After the write attempt; we check version equality before committing the new value."
+          location: "line 24"
+        - question: "How long is the lock held, and across what?"
+          answer: "Briefly, only for snapshot reads and commit checks, never across retry loops."
+          location: "line 15-25"
+        - question: "What happens when the conflict is detected?"
+          answer: "Retry with fresh snapshot; loop continues until version matches at commit time."
+          location: "line 25"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "_value and _version are shared; mutation occurs in the commit section."
+          location: "line 24-26"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "No, but version check ensures only one commit succeeds per state version."
+          location: "line 22-25"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes at snapshot time, but only one commit passes the version check."
+          location: "line 15-19"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Version mismatch detected; the losing worker retries with fresh state."
+          location: "line 25-26"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Can two writers both rename over the target?"
+          answer: "This is an in-memory counter, not file-based; concurrency via locking prevents lost updates."
+          location: "line 1-27"
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "Not applicable; no file I/O in this counter implementation."
+        - question: "Is the data flushed before the rename?"
+          reason: "Not applicable; no file I/O in this counter implementation."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "Not applicable; no temp file is used."
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "No cache in this implementation; shared state is updated directly without caching."
+          location: "line 1-27"
+      unanswered:
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          reason: "No cache exists to invalidate in this counter implementation."
+        - question: "What does a reader see between the source change and the invalidation?"
+          reason: "No cache exists; readers see latest committed value immediately."
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          reason: "No cache exists; direct reads are always consistent."
+  not_applied: []

@@ -1,0 +1,374 @@
+Here's a comprehensive solution for a cache that doesn't serve stale data:
+
+```python
+import time
+import threading
+from typing import Any, Callable, Dict, Optional, Tuple
+from collections import OrderedDict
+import hashlib
+import json
+
+class DataSourceCache:
+    """
+    A cache that never serves stale data by tracking source data versions.
+    
+    Key features:
+    - Caches values with their source version
+    - Automatically invalidates when source data changes
+    - Thread-safe with optional TTL
+    - LRU eviction with maximum cache size
+    """
+    
+    def __init__(self, 
+                 source_function: Callable[[Any], Any],
+                 max_size: int = 100,
+                 ttl_seconds: Optional[float] = None,
+                 version_check_interval: float = 0.1):
+        """
+        Initialize the cache.
+        
+        Args:
+            source_function: Function that retrieves data from source
+            max_size: Maximum number of items to cache
+            ttl_seconds: Optional time-to-live for cached values
+            version_check_interval: How often to check source for changes
+        """
+        self._source_function = source_function
+        self._cache: OrderedDict[str, Tuple[Any, Any, float]] = OrderedDict()  # key -> (value, version, timestamp)
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = threading.Lock()
+        self._version_check_interval = version_check_interval
+        
+        # Track source data versions for each key
+        self._source_versions: Dict[str, Any] = {}
+        
+        # Background thread for version monitoring
+        self._stop_monitoring = False
+        self._monitor_thread = threading.Thread(target=self._monitor_versions, daemon=True)
+        self._monitor_thread.start()
+    
+    def _get_source_version(self, key: Any) -> Any:
+        """
+        Get the current version of source data for a key.
+        This could be a modification timestamp, hash, or version number.
+        """
+        # In real usage, you'd get this from your data source
+        # For demonstration, we'll get everything from source function
+        try:
+            data = self._get_source_data(key)
+            # Create a version hash from the actual data
+            return hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
+        except Exception:
+            return None
+    
+    def _get_source_data(self, key: Any) -> Any:
+        """Actually retrieve data from source."""
+        return self._source_function(key)
+    
+    def _monitor_versions(self):
+        """Background thread that periodically checks for source changes."""
+        while not self._stop_monitoring:
+            try:
+                # Check all cached keys for version changes
+                with self._lock:
+                    keys = list(self._cache.keys())
+                
+                for key in keys:
+                    current_version = self._get_source_version(key)
+                    with self._lock:
+                        if key in self._cache and key in self._source_versions:
+                            if current_version != self._source_versions[key]:
+                                # Source changed, invalidate cache entry
+                                self._invalidate_key(key)
+                
+                time.sleep(self._version_check_interval)
+            except Exception as e:
+                # Log error and continue
+                print(f"Version monitoring error: {e}")
+                time.sleep(self._version_check_interval)
+    
+    def _invalidate_key(self, key: str):
+        """Remove a specific key from cache."""
+        if key in self._cache:
+            del self._cache[key]
+        if key in self._source_versions:
+            del self._source_versions[key]
+    
+    def get(self, key: Any) -> Any:
+        """
+        Get value for key, ensuring it's up-to-date.
+        
+        Returns:
+            The current value for the key
+        """
+        cache_key = self._make_cache_key(key)
+        
+        with self._lock:
+            # Check if we have a valid cached value
+            if cache_key in self._cache:
+                value, cached_version, timestamp = self._cache[cache_key]
+                
+                # Check TTL if configured
+                if self._ttl and (time.time() - timestamp) > self._ttl:
+                    self._invalidate_key(cache_key)
+                else:
+                    # Verify the source hasn't changed
+                    current_version = self._get_source_version(key)
+                    
+                    if current_version == cached_version:
+                        # Cache is still valid
+                        self._cache.move_to_end(cache_key)
+                        return value
+                    else:
+                        # Source has changed, invalidate
+                        self._invalidate_key(cache_key)
+            
+            # Cache miss or invalidated - fetch from source
+            value = self._get_source_data(key)
+            current_version = self._get_source_version(key)
+            
+            # Store in cache
+            self._cache[cache_key] = (value, current_version, time.time())
+            self._source_versions[cache_key] = current_version
+            
+            # Enforce max size with LRU eviction
+            while len(self._cache) > self._max_size:
+                oldest_key, _ = self._cache.popitem(last=False)
+                if oldest_key in self._source_versions:
+                    del self._source_versions[oldest_key]
+            
+            self._cache.move_to_end(cache_key)
+            
+            return value
+    
+    def _make_cache_key(self, key: Any) -> str:
+        """Create a string key for caching."""
+        if isinstance(key, (str, int, float, bool, type(None))):
+            return str(key)
+        # For complex keys, hash them
+        return hashlib.md5(json.dumps(key, sort_keys=True).encode()).hexdigest()
+    
+    def clear(self):
+        """Clear all cached values."""
+        with self._lock:
+            self._cache.clear()
+            self._source_versions.clear()
+    
+    def discard(self, key: Any):
+        """Remove a specific key from cache."""
+        cache_key = self._make_cache_key(key)
+        with self._lock:
+            self._invalidate_key(cache_key)
+    
+    def stop(self):
+        """Stop the background monitoring thread."""
+        self._stop_monitoring = True
+    
+    def __del__(self):
+        """Cleanup on destruction."""
+        self.stop()
+
+
+# Alternative simplified version with automatic version validation on each access
+class AutoValidatingCache:
+    """
+    A simpler cache that validates against source on each read.
+    Uses a validation function to detect changes.
+    """
+    
+    def __init__(self, 
+                 source_function: Callable[[Any], Any],
+                 validation_function: Callable[[Any, Any], bool],
+                 max_size: int = 100):
+        """
+        Initialize cache.
+        
+        Args:
+            source_function: Function to fetch data
+            validation_function: Function(key, cached_data) -> bool
+                Returns True if cached data is still valid, False if needs refresh
+            max_size: Maximum cache entries
+        """
+        self._source_function = source_function
+        self._validation_function = validation_function
+        self._cache: Dict[Any, Tuple[Any, float]] = {}  # key -> (value, timestamp)
+        self._max_size = max_size
+        self._lock = threading.Lock()
+    
+    def get(self, key: Any) -> Any:
+        """Get value with automatic validation."""
+        with self._lock:
+            if key in self._cache:
+                value, _ = self._cache[key]
+                
+                # Validate against current source state
+                if self._validation_function(key, value):
+                    return value
+                else:
+                    # Data is stale, remove it
+                    del self._cache[key]
+            
+            # Fetch fresh data
+            value = self._source_function(key)
+            
+            # Store with current timestamp
+            self._cache[key] = (value, time.time())
+            
+            # Enforce size limit
+            if len(self._cache) > self._max_size:
+                # Simple eviction - remove oldest
+                oldest_key = min(self._cache.items(), key=lambda x: x[1][1])[0]
+                del self._cache[oldest_key]
+            
+            return value
+    
+    def clear(self):
+        """Clear cache."""
+        with self._lock:
+            self._cache.clear()
+
+
+# Example usage with a mutable data source
+class Database:
+    """Simulated database with version tracking."""
+    
+    def __init__(self):
+        self._data = {}
+        self._versions = {}
+        self._counter = 0
+    
+    def get_data(self, key):
+        """Get data and its version."""
+        if key not in self._data:
+            return None
+        return self._data[key], self._versions[key]
+    
+    def set_data(self, key, value):
+        """Update data, increment version."""
+        self._data[key] = value
+        self._counter += 1
+        self._versions[key] = self._counter
+    
+    def get_version(self, key):
+        """Get current version for key."""
+        return self._versions.get(key, 0)
+
+
+def example_usage():
+    """Demonstrate how to use the cache."""
+    
+    # Example 1: Using DataSourceCache with version tracking
+    print("=== Example 1: DataSourceCache ===")
+    
+    db = Database()
+    
+    def source_function(key):
+        """Fetch data from database."""
+        value, _ = db.get_data(key)
+        return value
+    
+    def version_function(key):
+        """Get version from database."""
+        _, version = db.get_data(key)
+        return version if version is not None else 0
+    
+    # Create cache with version function
+    cache = DataSourceCache(source_function)
+    
+    # Add some data to database
+    db.set_data('user1', {'name': 'Alice', 'age': 30})
+    
+    # Cache the value
+    value1 = cache.get('user1')
+    print(f"First read: {value1}")  # Should be {'name': 'Alice', 'age': 30}
+    
+    # Modify the source data
+    db.set_data('user1', {'name': 'Alice', 'age': 31})
+    
+    # Read again - should get fresh value, not stale
+    value2 = cache.get('user1')
+    print(f"After update: {value2}")  # Should be {'name': 'Alice', 'age': 31}
+    
+    print("\n=== Example 2: AutoValidatingCache ===")
+    
+    # Example with validation function
+    user_db = {}
+    
+    def fetch_user(user_id):
+        """Fetch user from database."""
+        return user_db.get(user_id)
+    
+    def validate_user(user_id, cached_user):
+        """Check if cached user is still valid."""
+        if user_id not in user_db:
+            return False
+        current_user = user_db[user_id]
+        return current_user == cached_user
+    
+    # Create cache with validation
+    user_cache = AutoValidatingCache(fetch_user, validate_user)
+    
+    # Initial data
+    user_db['user1'] = {'name': 'Bob', 'age': 25}
+    
+    # Cache the user
+    cached = user_cache.get('user1')
+    print(f"First read: {cached}")
+    
+    # Modify user
+    user_db['user1'] = {'name': 'Bob', 'age': 26}
+    
+    # Get again - should be fresh
+    fresh = user_cache.get('user1')
+    print(f"After update: {fresh}")
+    
+    print("\nCaching complete - no stale data served!")
+
+
+if __name__ == "__main__":
+    example_usage()
+```
+
+This solution provides two approaches:
+
+## Key Features:
+
+1. **Version Tracking**: The cache stores a version/hash of the source data with each cached value
+2. **Automatic Invalidation**: When source data changes, the cache automatically detects it
+3. **Thread-Safety**: Uses locks for concurrent access
+4. **TTL Support**: Optional time-based expiration
+5. **LRU Eviction**: Maintains maximum cache size
+
+## How It Works:
+
+### `DataSourceCache` (Recommended):
+- Actively monitors source for changes with a background thread
+- Always validates against source version before serving
+- Ideal for databases, APIs, or file systems where you can check versions
+
+### `AutoValidatingCache` (Simpler):
+- Validates on each read
+- Uses custom validation function to check if data is still current
+- Good for cases where you can compare values directly
+
+## Key Design Decision:
+The critical insight is that you **must track data provenance** (version/metadata) along with the cached value, not just the value itself. This way, you can always verify if the cached version matches the current source.
+
+## Usage:
+```python
+# Use case: Database table caching
+cache = DataSourceCache(
+    source_function=db_get_row,  # How to fetch data
+    ttl_seconds=300,              # Optional 5-minute TTL
+    max_size=1000                 # Maximum cached items
+)
+
+value = cache.get('user_123')     # Always fresh!
+```
+
+The cache never serves stale data because:
+1. Every read validates against source version
+2. Background monitoring detects changes even between reads
+3. TTL provides an additional safety layer
+4. Custom validation functions can implement any staleness rules

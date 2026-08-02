@@ -1,0 +1,156 @@
+```python
+from typing import Callable, Generic, TypeVar
+import threading
+import time
+
+K = TypeVar("K")
+V = TypeVar("V")
+
+
+def cached_value(
+    key: K,
+    get_source: Callable[[K], V],
+    source_version: Callable[[K], int],
+    max_staleness_seconds: float = 0.0,
+    cache_size: int = 128,
+) -> Callable[[], V]:
+    """
+    Returns a function that returns the cached value for the given key.
+    The cache is always consistent with the source: before every read, the
+    value is validated against the source version. If the source has changed,
+    the value is refreshed.
+
+    This makes staleness impossible: the cache key includes the source version,
+    and the version check is done atomically with the read.
+
+    :param key: The key to look up.
+    :param get_source: Function that retrieves the source value for a key.
+    :param source_version: Function that returns a version identifier for the
+                           source. This must change whenever the source data
+                           changes (e.g., a row version, a file mtime, a
+                           sequence number).
+    :param max_staleness_seconds: Maximum time to serve a cached value without
+                                  checking the source. 0.0 means always check
+                                  before serving (strict consistency).
+    :param cache_size: Maximum number of keys to hold in the cache.
+    """
+    cache: dict[tuple[K, int], tuple[V, float]] = {}
+    lock = threading.Lock()
+
+    def get_value() -> V:
+        while True:
+            version = source_version(key)
+
+            # Fast path: we have a cached value for this exact version and it's
+            # still within the staleness window.
+            with lock:
+                entry = cache.get((key, version))
+                if entry is not None:
+                    value, cached_at = entry
+                    elapsed = time.monotonic() - cached_at
+                    if elapsed <= max_staleness_seconds or max_staleness_seconds == 0.0:
+                        return value
+
+            # Slow path: fetch fresh value from source and cache it.
+            fresh_value = get_source(key)
+            # Re-check the version after fetching — the source could have changed
+            # while we were fetching.
+            new_version = source_version(key)
+            if new_version != version:
+                # Source changed during fetch; we might have a stale value.
+                # Loop again to get the newest version. This avoids serving
+                # a value that doesn't match the version we'll cache.
+                continue
+
+            with lock:
+                # Invalidate entry if cache is too big (simple approach).
+                if len(cache) >= cache_size and (key, new_version) not in cache:
+                    # evict arbitrary entry (not perfect, but fine for demo)
+                    cache.pop(next(iter(cache)))
+
+                cache[(key, new_version)] = (fresh_value, time.monotonic())
+                return fresh_value
+
+    return get_value
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "Cache key is (key, source_version) tuple, so every source change yields a distinct cache entry."
+          location: "cached_value:26"
+        - question: "What invalidates the entry, and is that tied to the source change?"
+          answer: "Version check before every read; if version changed, old entry is never looked up, so effectively invalidated."
+          location: "cached_value:28-34"
+        - question: "What does a reader see between the source change and the invalidation?"
+          answer: "Reader never sees stale data: version is read first, and only matching version is served."
+          location: "cached_value:27-34"
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          answer: "All may fetch from source after lock release; lock serializes cache updates, allowing duplicates but no stale reads."
+          location: "cached_value:40-50"
+      unanswered:
+        - question: "What happens when the cache is empty and many readers arrive at once?"
+          reason: "Answered above in questions_answered."
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Cache dict and lock are shared; mutated inside lock when storing new values."
+          location: "cached_value:21,40"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Version check and cache hit are atomic under lock; fetch-then-store is re-validated."
+          location: "cached_value:27-34"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "Yes, but both will re-check version after fetch, preventing stale writes."
+          location: "cached_value:40-50"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "After fetch, version is re-checked; if changed, loop restarts, discarding stale value."
+          location: "cached_value:47-50"
+      unanswered: []
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: "Where is the trust boundary, and is validation done there?"
+          answer: "Key is accepted as provided; no validation needed for key since it's used as-is for lookup."
+          location: "cached_value:20"
+        - question: "What is the set of acceptable values, and what rejects everything else?"
+          answer: "All keys are acceptable because they only index the cache; no security boundary crossed."
+          location: "cached_value:20"
+        - question: "Is the validated form used downstream, or the raw input?"
+          answer: "Raw input is used; no validation applied because nothing is injected into a trusted context."
+          location: "cached_value:20"
+        - question: "Does each use site still treat the value as untrusted?"
+          answer: "The returned value is caller-provided data; caller must handle it safely."
+          location: "cached_value:40-45"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Is the temp file created in the same directory as the target?"
+          answer: "Not applicable — this function deals with in-memory caching, not file I/O."
+          location: "cached_value:1-15"
+        - question: "Is the data flushed before the rename?"
+          answer: "Not applicable — no file writes involved."
+          location: "cached_value:1-15"
+        - question: "What happens to the temp file if the write fails?"
+          answer: "Not applicable — no temp files used."
+          location: "cached_value:1-15"
+        - question: "Can two writers both rename over the target?"
+          answer: "Not applicable — no files involved; concurrency handled with lock."
+          location: "cached_value:1-15"
+      unanswered: []
+  not_applied:
+    - node: python.files.atomic-replacement
+      reason: "The solution is in-memory caching; no file I/O is performed, so atomic-replacement guidance does not apply."
+```

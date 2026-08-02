@@ -1,0 +1,357 @@
+I'll provide a robust caching solution that ensures staleness is handled by using appropriate cache invalidation strategies. Here are several implementations, from basic to more sophisticated:
+
+## Solution 1: Cache with TTL (Time-to-Live)
+
+```python
+import time
+from typing import Any, Callable, Optional
+from collections import OrderedDict
+
+class TTLCache:
+    def __init__(self, ttl_seconds: float = 300):
+        self.ttl = ttl_seconds
+        self.cache = {}
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value if key exists and hasn't expired"""
+        if key in self.cache:
+            value, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                return value
+            else:
+                # Stale entry - remove it
+                del self.cache[key]
+        return None
+    
+    def set(self, key: str, value: Any):
+        """Set cache value with current timestamp"""
+        self.cache[key] = (value, time.time())
+    
+    def invalidate(self, key: str = None):
+        """Invalidate specific key or all cache"""
+        if key:
+            self.cache.pop(key, None)
+        else:
+            self.cache.clear()
+
+# Usage
+cache = TTLCache(ttl_seconds=30)  # 30 second TTL
+cache.set("user:123", {"name": "John"})
+result = cache.get("user:123")  # Returns value if not stale
+```
+
+## Solution 2: Cache with Version Checking
+
+```python
+import hashlib
+from typing import Any, Callable
+
+class VersionedCache:
+    """
+    Cache that tracks data source changes through version/hash checking
+    """
+    def __init__(self, source_processor: Callable[[], Any]):
+        self.source_processor = source_processor
+        self.cache = {}
+        self.source_hash = None
+    
+    def get_source_hash(self) -> str:
+        """Get hash of current source data"""
+        data = self.source_processor()
+        return hashlib.md5(str(data).encode()).hexdigest()
+    
+    def get(self, key: str) -> Any:
+        """Get value, validate source hasn't changed"""
+        current_hash = self.get_source_hash()
+        
+        # If source has changed, invalidate entire cache
+        if self.source_hash != current_hash:
+            self.cache.clear()
+            self.source_hash = current_hash
+        
+        return self.cache.get(key)
+    
+    def set(self, key: str, value: Any):
+        """Set value with current source hash"""
+        current_hash = self.get_source_hash()
+        if self.source_hash is None:
+            self.source_hash = current_hash
+        self.cache[key] = value
+
+# Usage
+def get_database_data():
+    # Simulate fetching source data
+    return {"version": 1, "items": ["apple", "banana"]}
+
+cache = VersionedCache(get_database_data)
+cache.set("items", ["apple", "banana"])
+result = cache.get("items")
+```
+
+## Solution 3: Multi-Level Cache with Expiry and Invalidation
+
+```python
+import threading
+import time
+from typing import Any, Optional, Dict, Callable
+from dataclasses import dataclass
+from enum import Enum
+
+class CacheState(Enum):
+    FRESH = "fresh"
+    STALE = "stale"
+    WRITE_PENDING = "write_pending"
+
+@dataclass
+class CacheEntry:
+    value: Any
+    timestamp: float
+    source_version: int
+    
+class SmartCache:
+    def __init__(self, 
+                 max_age_seconds: float = 300,
+                 check_interval: float = 60,
+                 source_loader: Optional[Callable[[str], Any]] = None):
+        self.max_age = max_age_seconds
+        self.check_interval = check_interval
+        self.source_loader = source_loader
+        self.cache: Dict[str, CacheEntry] = {}
+        self.lock = threading.Lock()
+        self.source_versions: Dict[str, int] = {}  # Track source versions
+        
+    def get(self, key: str, force_refresh: bool = False) -> Optional[Any]:
+        """Get value, automatically refresh if stale"""
+        with self.lock:
+            entry = self.cache.get(key)
+            
+            # Check if entry is stale
+            if entry and not force_refresh:
+                age = time.time() - entry.timestamp
+                
+                if age < self.max_age and not self.is_source_changed(key, entry.source_version):
+                    return entry.value
+                
+                # Stale - remove it
+                del self.cache[key]
+            
+            # Try to load fresh data
+            if self.source_loader:
+                try:
+                    value = self.source_loader(key)
+                    self.set(key, value)
+                    return value
+                except Exception as e:
+                    print(f"Failed to refresh: {e}")
+                    # Return stale data if refresh fails and we have it
+                    if entry:
+                        return entry.value
+            
+            return None
+    
+    def set(self, key: str, value: Any, source_version: Optional[int] = None):
+        """Set value with current source version"""
+        with self.lock:
+            version = source_version or self.get_source_version(key)
+            self.cache[key] = CacheEntry(value, time.time(), version)
+    
+    def get_source_version(self, key: str) -> int:
+        """Method to detect source changes - override this in subclass"""
+        # This should be replaced with actual version detection
+        # E.g., check database update timestamp, file modification time, etc.
+        return self.source_versions.get(key, 0)
+    
+    def is_source_changed(self, key: str, cached_version: int) -> bool:
+        """Check if source has changed from cached version"""
+        current_version = self.get_source_version(key)
+        return current_version != cached_version
+    
+    def invalidate(self, key: str = None):
+        """Explicitly invalidate cache entries"""
+        with self.lock:
+            if key:
+                self.cache.pop(key, None)
+            else:
+                self.cache.clear()
+
+# Usage with custom source version detection
+class FileCache(SmartCache):
+    def __init__(self, file_mapping: Dict[str, str]):
+        super().__init__()
+        self.file_mapping = file_mapping
+    
+    def get_source_version(self, key: str) -> int:
+        import os
+        file_path = self.file_mapping.get(key)
+        if file_path and os.path.exists(file_path):
+            return int(os.path.getmtime(file_path))
+        return -1
+
+# Usage
+file_cache = FileCache({"config": "/path/to/config.json"})
+file_cache.set("config", {"debug": True})
+result = file_cache.get("config")
+```
+
+## Solution 4: Database-backed Cache with Notification
+
+```python
+import asyncio
+import asyncpg
+from typing import Any, Dict
+
+class DatabaseBackedCache:
+    def __init__(self, pool, table_name: str = "cache_entries"):
+        self.pool = pool
+        self.table = table_name
+        self.cache: Dict[str, Any] = {}
+        self.last_updated: Dict[str, int] = {}
+        self.change_channel = None
+        asyncio.create_task(self.subscribe_to_changes())
+    
+    async def setup(self):
+        """Initialize database tables"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(f"""
+                CREATE TABLE IF NOT EXISTS {self.table} (
+                    key TEXT PRIMARY KEY,
+                    value JSONB,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+            """)
+            # Set up trigger for change notification
+            await conn.execute(f"""
+                CREATE OR REPLACE FUNCTION notify_cache_change()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    PERFORM pg_notify('cache_changes', json_build_object(
+                        'key', NEW.key,
+                        'timestamp', NOW()
+                    )::text);
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+                
+                DROP TRIGGER IF EXISTS trigger_cache_change ON {self.table};
+                CREATE TRIGGER trigger_cache_change
+                AFTER UPDATE ON {self.table}
+                FOR EACH ROW EXECUTE FUNCTION notify_cache_change();
+            """)
+    
+    async def subscribe_to_changes(self):
+        """Listen for database change notifications"""
+        conn = await self.pool.acquire()
+        try:
+            await conn.add_listener('cache_changes', self.handle_change)
+            while True:
+                await asyncio.sleep(1)
+        finally:
+            self.pool.release(conn)
+    
+    def handle_change(self, connection, pid, channel, payload):
+        """Handle database change notification"""
+        import json
+        data = json.loads(payload)
+        key = data['key']
+        # Invalidate cache for this key
+        if key in self.cache:
+            del self.cache[key]
+    
+    async def get(self, key: str) -> Any:
+        """Get value from cache or database"""
+        # Check in-memory cache (LRU suitable)
+        if key in self.cache:
+            return self.cache[key]
+        
+        # Fetch from database
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT value FROM {self.table} WHERE key = $1",
+                key
+            )
+            if row:
+                value = row['value']
+                self.cache[key] = value
+                return value
+        
+        return None
+    
+    async def set(self, key: str, value: Any):
+        """Set value in database and cache"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"""INSERT INTO {self.table} (key, value) 
+                    VALUES ($1, $2) 
+                    ON CONFLICT (key) 
+                    DO UPDATE SET value = $2, updated_at = NOW()""",
+                key, value
+            )
+        self.cache[key] = value
+
+# Usage
+async def main():
+    pool = await asyncpg.create_pool(database="mydb")
+    cache = DatabaseBackedCache(pool)
+    await cache.setup()
+    
+    # Get cached value
+    value = await cache.get("user:123")
+    print(value)
+```
+
+## Key Best Practices for Avoiding Stale Data:
+
+1. **Choose appropriate TTL** - Balance between freshness and performance
+2. **Implement invalidation mechanisms** - Push/pull approach for change detection
+3. **Use versioning** - Track source versions to detect changes
+4. **Monitor source changes** - Periodic checks or event-driven notifications
+5. **Graceful degradation** - Handle refresh failures without serving stale data
+6. **Consider concurrency** - Use appropriate locking mechanisms
+
+## Complete Example with All Features:
+
+```python
+class ProductionCache:
+    def __init__(self, 
+                 ttl_seconds=300,
+                 source_getter=None,
+                 source_version_getter=None):
+        self.ttl = ttl_seconds
+        self.source_getter = source_getter or self._default_source
+        self.version_getter = source_version_getter or self._default_version
+        self.data = {}
+        self.metadata = {}
+        
+    def get(self, key):
+        # Check if key exists and is fresh
+        if key in self.data:
+            entry = self.data[key]
+            if entry['ttl'] > time.time():
+                # Check source version
+                current_version = self.version_getter(key)
+                if current_version == entry['version']:
+                    return entry['value']
+                else:
+                    # Source changed - invalidate
+                    del self.data[key]
+                    
+        # Fetch new data
+        value = self.source_getter(key)
+        if value is not None:
+            self.set(key, value)
+        
+        return value
+    
+    def set(self, key, value):
+        self.data[key] = {
+            'value': value,
+            'ttl': time.time() + self.ttl,
+            'version': self.version_getter(key)
+        }
+```
+
+This comprehensive solution ensures that cached values are never stale by:
+- Checking TTL expiration
+- Verifying source data hasn't changed
+- Providing manual invalidation when needed
+- Automatically refreshing stale data when the source changes

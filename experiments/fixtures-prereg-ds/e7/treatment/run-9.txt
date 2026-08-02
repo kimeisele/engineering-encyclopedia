@@ -1,0 +1,77 @@
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self._value = initial_value
+        self._lock = threading.Lock()
+
+    def increment(self):
+        """Atomically increment the counter using a lock."""
+        with self._lock:
+            self._value += 1
+
+    def get_value(self):
+        """Return the current counter value."""
+        with self._lock:
+            return self._value
+```
+
+---APPLICATION_REPORT---
+```yaml
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: "Is the conflict detected before or after the write?"
+          answer: "After the write; the lock serialises access so increments happen one at a time. No conflict detection needed."
+          location: "counter_locking.py:10"
+        - question: "How long is the lock held, and across what?"
+          answer: "Held only for the increment operation, not across network or I/O. Critical section is the read-modify-write cycle."
+          location: "counter_locking.py:9-11"
+        - question: "What happens when the conflict is detected?"
+          answer: "No conflicts occur because the lock prevents simultaneous writes. Threads wait for the lock before incrementing."
+          location: "counter_locking.py:9"
+        - question: "What identifies the version of the state being changed?"
+          answer: "No version field needed as a pessimistic lock fully serialises access to the counter value."
+          location: "counter_locking.py:5"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "The counter value `_value` is shared and mutated via `increment()` which does a read-modify-write cycle."
+          location: "counter_locking.py:5,10"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, the `with self._lock` makes the read-modify-write sequence atomic. Two workers cannot interleave."
+          location: "counter_locking.py:9-11"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because the lock prevents one worker from reading while another is in a read-modify-write cycle."
+          location: "counter_locking.py:9"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "Interleaving is impossible; the lock serialises the entire increment. A check-then-act pattern is avoided."
+          location: "counter_locking.py:9"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: "Can two writers both rename over the target?"
+          answer: "Not applicable here as this code does not write files; it only updates an in-memory counter."
+          location: "counter_locking.py:0"
+      unanswered: []
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: "What identifies a cached entry, and does it include the source version?"
+          answer: "Not applicable; this code does not use a cache. The counter value itself is the source, not a cached copy."
+          location: "counter_locking.py:0"
+      unanswered: []
+  not_applied: []
+```

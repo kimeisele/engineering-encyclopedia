@@ -1,0 +1,97 @@
+# Shared Counter with Thread-Safe Updates
+
+Here's a Python implementation of a shared counter that uses threading locks to ensure atomic updates, preventing lost updates when multiple workers try to increment the counter simultaneously:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self.lock:
+            return self.value
+```
+
+## Alternative Implementation with Conflict Detection
+
+If you prefer a conflict-detection approach (like using atomic compare-and-swap operations), here's an alternative using Python's `threading` module with a retry mechanism:
+
+```python
+import threading
+import time
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+
+    def increment(self, amount=1):
+        """Thread-safe increment with retry on conflict"""
+        while True:
+            current_value = self.value
+            new_value = current_value + amount
+            # Simulate atomic compare-and-swap
+            if self._compare_and_swap(current_value, new_value):
+                return new_value
+            # If CAS failed, retry
+            time.sleep(0.001)  # Small delay to prevent busy waiting
+
+    def _compare_and_swap(self, expected, new):
+        """Simulate atomic compare-and-swap operation"""
+        if self.value == expected:
+            self.value = new
+            return True
+        return False
+
+    def get_value(self):
+        return self.value
+```
+
+## Usage Example
+
+```python
+import threading
+
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.increment()
+
+# Create a shared counter
+counter = SharedCounter()
+
+# Create and start multiple worker threads
+threads = []
+num_workers = 5
+increments_per_worker = 1000
+
+for _ in range(num_workers):
+    t = threading.Thread(target=worker, args=(counter, increments_per_worker))
+    threads.append(t)
+    t.start()
+
+# Wait for all threads to complete
+for t in threads:
+    t.join()
+
+# Verify the final count
+expected = num_workers * increments_per_worker
+actual = counter.get_value()
+print(f"Expected: {expected}, Actual: {actual}")
+assert expected == actual, "Counter value is incorrect!"
+```
+
+The first implementation using locks is generally preferred in Python because:
+1. It's simpler and more readable
+2. Python's GIL provides some protection against race conditions
+3. The lock ensures atomicity for the entire increment operation
+
+The second implementation demonstrates how you might implement a lock-free approach with retry logic, which is more common in lower-level languages but less necessary in Python due to the GIL.

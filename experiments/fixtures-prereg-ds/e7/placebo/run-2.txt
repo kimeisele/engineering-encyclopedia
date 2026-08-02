@@ -1,0 +1,60 @@
+We need a function that updates a shared counter safely when two workers may update concurrently. The classic solution is to use a lock (threading or multiprocessing) or atomic operations. Since this is a general function, I'll use a lock with a `with` statement.
+
+```python
+import threading
+
+# Shared counter and lock
+_counter = 0
+_counter_lock = threading.Lock()
+
+def update_shared_counter(increment=1):
+    """
+    Atomically increment the shared counter by the given amount.
+    Uses a lock to prevent lost updates from concurrent workers.
+    """
+    global _counter
+    with _counter_lock:
+        _counter += increment
+        return _counter
+
+# Example usage (simulating two workers)
+if __name__ == "__main__":
+    import time
+    results = []
+    def worker(n):
+        for _ in range(n):
+            update_shared_counter(1)
+
+    t1 = threading.Thread(target=worker, args=(1000,))
+    t2 = threading.Thread(target=worker, args=(1000,))
+    t1.start(); t2.start()
+    t1.join(); t2.join()
+    print(f"Final counter: {_counter}")  # Should be 2000
+```
+
+Alternatively, if you need process-level safety, use `multiprocessing.Lock` or a file lock. For a single process with threads, `threading.Lock` suffices.
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: a821c9b7b147
+  context_pack_hash: 1938393fce8d
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: "Does the message identify the operation and the failing step?"
+          answer: "Not applicable; no error handling used, only lock acquisition for updates."
+          location: "solution.py:10"
+        - question: "Can the operator find the request or job from the message?"
+          answer: "Not applicable; no errors generated in this simple counter function."
+          location: "solution.py:10"
+        - question: "Is sensitive data excluded from the message?"
+          answer: "Not applicable; no messages logged, counter values are not sensitive."
+          location: "solution.py:10"
+        - question: "Is the context attached before or after the exception is wrapped?"
+          answer: "Not applicable; no exceptions are anticipated or wrapped in this code."
+          location: "solution.py:10"
+      unanswered: []
+  not_applied: []
+---APPLICATION_REPORT---

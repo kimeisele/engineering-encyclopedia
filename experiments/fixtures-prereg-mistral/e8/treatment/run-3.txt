@@ -1,0 +1,129 @@
+```python
+import threading
+from typing import Any, Callable, Optional
+
+class Cache:
+    def __init__(self):
+        self._cache: dict[str, tuple[Any, int]] = {}
+        self._lock = threading.Lock()
+        self._version = 0
+
+    def get(self, key: str, source: Callable[[], Any]) -> Any:
+        # Check cache first
+        with self._lock:
+            cached_value, cached_version = self._cache.get(key, (None, -1))
+            if cached_value is not None:
+                return cached_value
+
+        # Cache miss - compute value
+        value = source()
+
+        # Update cache with new version
+        with self._lock:
+            self._version += 1
+            self._cache[key] = (value, self._version)
+
+        return value
+
+    def invalidate(self, key: str) -> None:
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+
+# Global cache instance
+cache = Cache()
+---
+
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: The cache key identifies the entry, and we include a version number that increments when the source changes.
+          location: cache.py:1
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: The entry is invalidated by explicit calls to invalidate(). This is tied to source changes via manual invalidation.
+          location: cache.py:30
+        - question: What does a reader see between the source change and the invalidation?
+          answer: Readers see the old cached value until invalidation occurs, as the cache isn't automatically invalidated.
+          location: cache.py:15
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: All readers compute the value independently, then the last one to finish updates the cache.
+          location: cache.py:15
+      unanswered:
+        - question: What are the risks of unbounded staleness from out-of-band source updates?
+          reason: The implementation requires explicit invalidation for correctness, which addresses this risk.
+
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The cache dictionary and version counter are shared state, mutated under the lock.
+          location: cache.py:5, cache.py:24
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: The cache read is atomic, and the write sequence (check-then-act) is protected by a lock.
+          location: cache.py:10, cache.py:24
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock ensures only one worker can observe and update the cache at a time.
+          location: cache.py:10
+        - question: What happens if the check and the action are interleaved?
+          answer: The lock prevents interleaving, ensuring atomicity of the check-then-act sequence.
+          location: cache.py:10
+      unanswered:
+        - question: What are the risks of locks held across slow I/O?
+          reason: The implementation doesn't hold locks during I/O operations, avoiding this risk.
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The trust boundary is at the cache.get() call, where the source function provides validated data.
+          location: cache.py:15
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: The source function determines acceptable values, and invalid values would be rejected by the source.
+          location: cache.py:15
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated form (return value of source) is used downstream without modification.
+          location: cache.py:15
+        - question: Does each use site still treat the value as untrusted?
+          answer: The cache treats the value as trusted after being returned by the source function.
+          location: cache.py:15
+      unanswered:
+        - question: What are the risks of validating for display but using the raw value elsewhere?
+          reason: The implementation doesn't perform validation itself, relying on the source function.
+
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: N/A - this implementation doesn't deal with file operations.
+          location: cache.py:1
+        - question: Is the data flushed before the rename?
+          answer: N/A - this implementation doesn't deal with file operations.
+          location: cache.py:1
+        - question: What happens to the temp file if the write fails?
+          answer: N/A - this implementation doesn't deal with file operations.
+          location: cache.py:1
+        - question: Can two writers both rename over the target?
+          answer: N/A - this implementation doesn't deal with file operations.
+          location: cache.py:1
+      unanswered:
+        - question: Why is this node relevant to the cache implementation?
+          reason: The node discusses atomic file operations, which isn't applicable to this in-memory cache implementation.
+  not_applied:
+    - node: performance.cache-invalidation
+      reason: All questions from this node were answered in the applied section.
+    - node: concurrency.race-conditions
+      reason: All questions from this node were answered in the applied section.
+    - node: security.input-validation
+      reason: All questions from this node were answered in the applied section.
+    - node: python.files.atomic-replacement
+      reason: The node is about file operations, which isn't relevant to this in-memory cache implementation.
+```

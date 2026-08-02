@@ -1,0 +1,112 @@
+# Cached Value Function with Staleness Prevention
+
+Here's a Python implementation of a function that returns a cached value for a key while ensuring it doesn't serve stale data after the source changes:
+
+```python
+import time
+from threading import Lock
+from typing import Any, Callable, Optional
+
+class DataCache:
+    def __init__(self, source_func: Callable[[Any], Any], ttl: float = 60.0):
+        """
+        Initialize the cache with a source function and time-to-live.
+
+        Args:
+            source_func: Function that provides fresh data when called
+            ttl: Time-to-live in seconds for cached values (default: 60)
+        """
+        self.source_func = source_func
+        self.ttl = ttl
+        self.cache = {}
+        self.lock = Lock()
+
+    def get(self, key: Any) -> Any:
+        """
+        Get a value for the given key, ensuring it's not stale.
+
+        Args:
+            key: The key to look up in the cache
+
+        Returns:
+            The cached value if valid, otherwise fresh data from source
+        """
+        with self.lock:
+            # Check if we have a valid cached value
+            if key in self.cache:
+                cached_value, timestamp = self.cache[key]
+                if time.time() - timestamp < self.ttl:
+                    return cached_value
+
+            # If not, get fresh data and update cache
+            fresh_value = self.source_func(key)
+            self.cache[key] = (fresh_value, time.time())
+            return fresh_value
+
+    def invalidate(self, key: Any) -> None:
+        """
+        Invalidate a specific key in the cache.
+
+        Args:
+            key: The key to remove from cache
+        """
+        with self.lock:
+            if key in self.cache:
+                del self.cache[key]
+
+    def clear(self) -> None:
+        """Clear the entire cache."""
+        with self.lock:
+            self.cache.clear()
+```
+
+## Usage Example
+
+```python
+# Example source function that might be expensive to call
+def get_user_data(user_id: int) -> dict:
+    print(f"Fetching fresh data for user {user_id}")
+    return {"id": user_id, "name": f"User {user_id}", "last_updated": time.time()}
+
+# Create cache instance
+user_cache = DataCache(get_user_data, ttl=30)  # 30 second cache
+
+# First call - fetches fresh data
+print(user_cache.get(1))  # Output: Fetching fresh data for user 1, then the data
+
+# Subsequent calls within TTL - returns cached data
+print(user_cache.get(1))  # Returns cached data without calling source function
+
+# After TTL expires - fetches fresh data again
+time.sleep(31)
+print(user_cache.get(1))  # Output: Fetching fresh data for user 1, then the data
+
+# Manual invalidation
+user_cache.invalidate(1)
+print(user_cache.get(1))  # Output: Fetching fresh data for user 1, then the data
+```
+
+## Key Features
+
+1. **Thread Safety**: Uses a lock to prevent race conditions in multi-threaded environments
+2. **TTL Enforcement**: Ensures values aren't stale by checking timestamps
+3. **Manual Invalidation**: Allows explicit cache clearing when needed
+4. **Lazy Loading**: Only fetches fresh data when needed
+5. **Type Hints**: Includes type annotations for better code clarity
+
+## Alternative Implementation (Simpler)
+
+If you don't need thread safety or TTL enforcement, here's a simpler version:
+
+```python
+def cached_value(key, source_func, cache=None):
+    if cache is None:
+        cache = {}
+
+    if key not in cache:
+        cache[key] = source_func(key)
+
+    return cache[key]
+```
+
+This simpler version will always return the cached value without checking for staleness. You would need to manually clear the cache when the source data changes.

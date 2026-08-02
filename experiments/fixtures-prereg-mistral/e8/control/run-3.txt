@@ -1,0 +1,119 @@
+# Cache with Stale Value Prevention
+
+Here's a function that implements a cache with a guarantee that it won't serve stale values after the source data changes. This is typically achieved using a combination of cache invalidation and version checking.
+
+```python
+import time
+from typing import Any, Callable, Optional
+
+class DataCache:
+    def __init__(self, data_source: Callable[[], Any], ttl: float = 60.0):
+        """
+        Initialize the cache with a data source and time-to-live.
+
+        Args:
+            data_source: A callable that returns the current data
+            ttl: Time-to-live in seconds before cache becomes stale
+        """
+        self.data_source = data_source
+        self.ttl = ttl
+        self._cache: Optional[Any] = None
+        self._last_updated = 0
+        self._version = 0  # Incremented whenever source data changes
+
+    def get(self) -> Any:
+        """
+        Get the cached value, ensuring it's not stale.
+        Returns the cached value if it's still valid, otherwise fetches fresh data.
+        """
+        current_time = time.time()
+
+        # If cache is empty or expired, fetch fresh data
+        if (self._cache is None or
+            current_time - self._last_updated > self.ttl):
+            self._fetch_and_update()
+        return self._cache
+
+    def _fetch_and_update(self) -> None:
+        """Fetch fresh data from source and update cache."""
+        fresh_data = self.data_source()
+
+        # Only update if data actually changed
+        if fresh_data != self._cache:
+            self._cache = fresh_data
+            self._last_updated = time.time()
+            self._version += 1
+
+    def invalidate(self) -> None:
+        """Force cache invalidation on next get() call."""
+        self._cache = None
+```
+
+## Usage Example
+
+```python
+# Example data source that might change
+def get_latest_data():
+    # In a real app, this might fetch from a database or API
+    return {"value": 42, "timestamp": time.time()}
+
+# Create cache with 5 second TTL
+cache = DataCache(get_latest_data, ttl=5.0)
+
+# First access - will fetch fresh data
+print(cache.get())  # {'value': 42, 'timestamp': ...}
+
+# Subsequent accesses within TTL - will use cache
+print(cache.get())  # Same as above
+
+# Wait for TTL to expire
+time.sleep(6)
+
+# Next access - will fetch fresh data
+print(cache.get())  # New data if source changed
+```
+
+## Key Features
+
+1. **Time-based expiration**: Cache entries expire after TTL seconds
+2. **Change detection**: Only updates cache if source data actually changes
+3. **Version tracking**: Internal version number increments when data changes
+4. **Manual invalidation**: Can force cache refresh with `invalidate()`
+
+## Alternative Implementation (Using Version Hash)
+
+For more complex data where direct comparison isn't feasible, you could use a hash of the data:
+
+```python
+import hashlib
+
+class HashBasedCache:
+    def __init__(self, data_source: Callable[[], Any], ttl: float = 60.0):
+        self.data_source = data_source
+        self.ttl = ttl
+        self._cache = None
+        self._last_updated = 0
+        self._data_hash = None
+
+    def get(self) -> Any:
+        current_time = time.time()
+
+        if (self._cache is None or
+            current_time - self._last_updated > self.ttl):
+            self._fetch_and_update()
+        return self._cache
+
+    def _fetch_and_update(self) -> None:
+        fresh_data = self.data_source()
+        fresh_hash = self._hash_data(fresh_data)
+
+        if fresh_hash != self._data_hash:
+            self._cache = fresh_data
+            self._last_updated = time.time()
+            self._data_hash = fresh_hash
+
+    def _hash_data(self, data: Any) -> str:
+        return hashlib.md5(str(data).encode()).hexdigest()
+```
+
+This ensures that even if the data structure changes in a way that wouldn't be caught by direct comparison, the cache will still refresh when the data changes.

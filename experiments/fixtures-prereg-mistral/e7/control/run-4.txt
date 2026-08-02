@@ -1,0 +1,92 @@
+# Thread-Safe Counter with Conflict Detection
+
+Here's a Python implementation of a shared counter that uses a locking strategy to ensure no updates are lost when multiple workers try to increment it simultaneously:
+
+```python
+import threading
+
+class SharedCounter:
+    def __init__(self, initial_value=0):
+        self.value = initial_value
+        self.lock = threading.Lock()
+
+    def increment(self, amount=1):
+        """Thread-safe increment operation"""
+        with self.lock:
+            self.value += amount
+            return self.value
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        with self.lock:
+            return self.value
+```
+
+## Alternative Implementation with Conflict Detection
+
+If you prefer a lock-free approach with conflict detection (using atomic compare-and-swap operations):
+
+```python
+import threading
+import ctypes
+
+class AtomicCounter:
+    def __init__(self, initial_value=0):
+        self.value = ctypes.c_long(initial_value)
+
+    def increment(self, amount=1):
+        """Thread-safe increment with conflict detection"""
+        while True:
+            current = self.value.value
+            new = current + amount
+            # Compare-and-swap operation
+            if ctypes.atomic_compare_exchange_long(
+                ctypes.byref(self.value),
+                ctypes.c_long(current),
+                ctypes.c_long(new)
+            ):
+                return new
+
+    def get_value(self):
+        """Thread-safe read operation"""
+        return self.value.value
+```
+
+## Usage Example
+
+```python
+def worker(counter, increments):
+    for _ in range(increments):
+        counter.increment()
+
+# Create a shared counter
+counter = SharedCounter(0)
+
+# Create and start multiple worker threads
+threads = []
+for _ in range(10):
+    t = threading.Thread(target=worker, args=(counter, 1000))
+    threads.append(t)
+    t.start()
+
+# Wait for all threads to complete
+for t in threads:
+    t.join()
+
+print(f"Final counter value: {counter.get_value()}")  # Should be 10,000
+```
+
+## Key Points
+
+1. **Locking Strategy**: The first implementation uses a mutex lock to ensure only one thread can modify the counter at a time.
+
+2. **Conflict Detection**: The second implementation uses atomic operations to detect and retry when conflicts occur.
+
+3. **Thread Safety**: Both implementations guarantee that:
+   - No increments are lost
+   - The final value is always correct
+   - No race conditions occur
+
+4. **Performance**: The locking approach is simpler but may have more contention. The atomic approach is more complex but can be more efficient in high-contention scenarios.
+
+Choose the approach that best fits your specific requirements and performance needs.

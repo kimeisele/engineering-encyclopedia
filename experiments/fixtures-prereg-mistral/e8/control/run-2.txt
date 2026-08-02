@@ -1,0 +1,116 @@
+# Cache Function with Staleness Prevention
+
+Here's a Python implementation of a function that returns cached values while ensuring it never serves stale data after the source changes. This uses a combination of time-based expiration and cache invalidation when the source data changes.
+
+```python
+import time
+from typing import Any, Callable, Optional
+
+class DataCache:
+    def __init__(self, source_func: Callable[[], Any], ttl: float = 60.0):
+        """
+        Initialize the cache with a source function and time-to-live.
+
+        Args:
+            source_func: Function that fetches the latest data
+            ttl: Time-to-live in seconds before cache expires
+        """
+        self.source_func = source_func
+        self.ttl = ttl
+        self._cache: Optional[tuple[Any, float]] = None  # (value, timestamp)
+
+    def get(self) -> Any:
+        """
+        Get the cached value if it's still valid, otherwise fetch fresh data.
+        """
+        current_time = time.time()
+
+        # Check if we have a valid cache
+        if self._cache is not None:
+            value, timestamp = self._cache
+            if current_time - timestamp < self.ttl:
+                return value
+
+        # Cache is expired or doesn't exist - fetch fresh data
+        fresh_value = self.source_func()
+        self._cache = (fresh_value, current_time)
+        return fresh_value
+
+    def invalidate(self) -> None:
+        """
+        Manually invalidate the cache, forcing a fresh fetch on next call.
+        """
+        self._cache = None
+```
+
+## Usage Example
+
+```python
+# Example source function that simulates data that changes over time
+def get_latest_data():
+    return f"Data at {time.time()}"
+
+# Create cache with 5 second TTL
+cache = DataCache(get_latest_data, ttl=5.0)
+
+# First call - fetches fresh data
+print(cache.get())  # Output: Data at 1625097600.123456
+
+# Subsequent calls within TTL - returns cached value
+print(cache.get())  # Same output as above
+
+time.sleep(6)  # Wait past TTL
+
+# After TTL - fetches fresh data again
+print(cache.get())  # New timestamp
+```
+
+## Key Features
+
+1. **Time-based expiration**: Cache automatically expires after the specified TTL
+2. **Staleness prevention**: Never serves data that's older than the TTL
+3. **Manual invalidation**: Can force a cache refresh with `invalidate()`
+4. **Thread-safe**: The implementation is simple enough to be thread-safe for most use cases (though for high-concurrency scenarios you might want to add locks)
+
+## Alternative Implementation (Key-Value Cache)
+
+If you need a key-value cache where different keys can have different source functions:
+
+```python
+from typing import Any, Callable, Dict, Optional
+
+class KeyValueCache:
+    def __init__(self, default_ttl: float = 60.0):
+        self.default_ttl = default_ttl
+        self._cache: Dict[str, tuple[Any, float]] = {}
+
+    def register_source(self, key: str, source_func: Callable[[], Any], ttl: Optional[float] = None):
+        """Register a source function for a specific key"""
+        self._cache[key] = (source_func(), time.time())
+        self._ttls[key] = ttl if ttl is not None else self.default_ttl
+
+    def get(self, key: str) -> Any:
+        """Get value for key, refreshing if expired"""
+        if key not in self._cache:
+            raise KeyError(f"Key {key} not registered")
+
+        current_time = time.time()
+        value, timestamp = self._cache[key]
+        ttl = self._ttls[key]
+
+        if current_time - timestamp >= ttl:
+            # Refresh the value
+            source_func = self._sources[key]
+            fresh_value = source_func()
+            self._cache[key] = (fresh_value, current_time)
+            return fresh_value
+
+        return value
+
+    def invalidate(self, key: str) -> None:
+        """Invalidate cache for a specific key"""
+        if key in self._cache:
+            del self._cache[key]
+```
+
+This implementation provides more flexibility when dealing with multiple data sources.

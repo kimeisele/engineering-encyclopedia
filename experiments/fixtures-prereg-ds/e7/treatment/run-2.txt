@@ -1,0 +1,117 @@
+```python
+import threading
+import time
+
+class SharedCounter:
+    """
+    A thread-safe counter using optimistic concurrency control with
+    conflict detection via compare-and-swap (CAS).
+    """
+    def __init__(self, initial=0):
+        self._value = initial
+        self._lock = threading.Lock()
+
+    def increment(self, n=1):
+        """
+        Atomically increment the counter by n.
+        Uses a lock-free approach with CAS, retrying on conflict.
+        """
+        while True:
+            # Read current value (snapshot)
+            with self._lock:
+                current = self._value
+            
+            # Compute new value
+            new_value = current + n
+            
+            # Attempt atomic compare-and-swap
+            with self._lock:
+                if self._value == current:
+                    self._value = new_value
+                    return new_value
+                # If conflict detected, loop and retry
+                # (another thread updated between our read and CAS attempt)
+            
+            # Small backoff to reduce contention
+            time.sleep(0)
+
+    def get(self):
+        with self._lock:
+            return self._value
+
+# Example usage with two worker threads
+def worker(counter, iterations=1000):
+    for _ in range(iterations):
+        counter.increment()
+
+if __name__ == "__main__":
+    counter = SharedCounter()
+    threads = [
+        threading.Thread(target=worker, args=(counter, 1000)),
+        threading.Thread(target=worker, args=(counter, 1000))
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert counter.get() == 2000, f"Lost updates! Final: {counter.get()}"
+    print(f"Final counter value: {counter.get()} (expected 2000)")
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: aebf503e4e8c
+  applied:
+    - node: concurrency.locking-strategy
+      version: 1
+      hash: 808d887672aa
+      questions_answered:
+        - question: "What identifies the version of the state being changed?"
+          answer: "The counter's current value read before each update serves as the version token for conflict detection."
+          location: "solution.py:16-17"
+        - question: "Is the conflict detected before or after the write?"
+          answer: "After attempting the write via compare-and-swap; if the value changed, we retry the operation."
+          location: "solution.py:20-26"
+        - question: "How long is the lock held, and across what?"
+          answer: "Lock is held only for each atomic read and CAS operation, not across network or slow I/O."
+          location: "solution.py:15-25"
+        - question: "What happens when the conflict is detected?"
+          answer: "The loop retries the increment with the fresh current value, preventing lost updates."
+          location: "solution.py:26-28"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: "What state is shared, and where is it mutated?"
+          answer: "Shared counter value '_value'; mutated inside protected CAS or update operations."
+          location: "solution.py:4-6,20-25"
+        - question: "Is the read-and-write sequence atomic as one step?"
+          answer: "Yes, via compare-and-swap where reading and conditional writing are atomic together."
+          location: "solution.py:20-25"
+        - question: "Can two workers observe the same value as unclaimed?"
+          answer: "No, because CAS ensures only one thread's update succeeds for any observed value."
+          location: "solution.py:20-25"
+        - question: "What happens if the check and the action are interleaved?"
+          answer: "CAS detects the mismatch and retries, so the interleaving cannot cause lost updates."
+          location: "solution.py:20-28"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered: []
+      unanswered:
+        - question: "Is the temp file created in the same directory as the target?"
+          reason: "Not applicable; this solution deals with an in-memory counter, not file I/O."
+        - question: "Is the data flushed before the rename?"
+          reason: "Not applicable; no file writes or renames are performed."
+        - question: "What happens to the temp file if the write fails?"
+          reason: "Not applicable; there is no temporary file in this counter implementation."
+        - question: "Can two writers both rename over the target?"
+          reason: "Not applicable; file updates are out of scope for a shared counter."
+  not_applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      reason: "The counter does not use a cache; it maintains direct state without caching layers."

@@ -1,0 +1,110 @@
+```python
+import time
+from threading import Lock
+from typing import Any, Callable, Optional
+
+class Cache:
+    def __init__(self):
+        self._cache: dict[Any, Any] = {}
+        self._lock = Lock()
+        self._version = 0
+
+    def get(self, key: Any, source: Callable[[], Any], version: int) -> Any:
+        with self._lock:
+            cached_value, cached_version = self._cache.get(key, (None, None))
+            if cached_value is not None and cached_version == version:
+                return cached_value
+            new_value = source()
+            self._cache[key] = (new_value, version)
+            return new_value
+
+def cached_value(cache: Cache, key: Any, source: Callable[[], Any]) -> Any:
+    version = cache._version
+    value = cache.get(key, source, version)
+    return value
+
+def invalidate_cache(cache: Cache) -> None:
+    with cache._lock:
+        cache._version += 1
+        cache._cache.clear()
+---
+APPLICATION_REPORT
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: The cached entry is identified by a key and includes a version number that matches the source version.
+          location: cache.py:12
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: Invalidation is tied to a version increment, which happens when the source data changes.
+          location: cache.py:30
+        - question: What does a reader see between the source change and the invalidation?
+          answer: Readers see the old cached value until the cache is invalidated and updated with the new value.
+          location: cache.py:12
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: The first reader populates the cache, subsequent readers get the cached value until invalidation.
+          location: cache.py:12
+      unanswered:
+        - question: What happens when the cache is empty and many readers arrive at once?
+          reason: Already answered in the applied section.
+
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: The cache dictionary and version are shared state, mutated under a lock.
+          location: cache.py:12, cache.py:30
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: Yes, the sequence is atomic due to the lock protecting all shared state access.
+          location: cache.py:12, cache.py:30
+        - question: Can two workers observe the same value as unclaimed?
+          answer: No, the lock ensures only one worker can read or write at a time.
+          location: cache.py:12
+        - question: What happens if the check and the action are interleaved?
+          answer: The lock prevents interleaving, ensuring check-then-act is atomic.
+          location: cache.py:12
+      unanswered: []
+
+    - node: security.input-validation
+      version: 1
+      hash: 5bce2610cc1c
+      questions_answered:
+        - question: Where is the trust boundary, and is validation done there?
+          answer: The trust boundary is at the source function call; validation is implicit in the source's correctness.
+          location: cache.py:20
+        - question: What is the set of acceptable values, and what rejects everything else?
+          answer: The source function defines acceptable values; invalid values are rejected by the source.
+          location: cache.py:20
+        - question: Is the validated form used downstream, or the raw input?
+          answer: The validated form from the source is used downstream.
+          location: cache.py:20
+        - question: Does each use site still treat the value as untrusted?
+          answer: Yes, the cache treats the value as untrusted until validated by the source.
+          location: cache.py:20
+      unanswered: []
+
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: Not applicable; the cache uses in-memory state, not file operations.
+          location: N/A
+        - question: Is the data flushed before the rename?
+          answer: Not applicable; no file operations are performed.
+          location: N/A
+        - question: What happens to the temp file if the write fails?
+          answer: Not applicable; no temp files are used.
+          location: N/A
+        - question: Can two writers both rename over the target?
+          answer: Not applicable; no file operations are performed.
+          location: N/A
+      unanswered: []
+  not_applied: []
+```

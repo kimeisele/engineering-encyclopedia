@@ -1,0 +1,118 @@
+# Cache Function with Staleness Prevention
+
+Here's a Python function that implements a cache with strict consistency - it will never serve stale values after the source data changes:
+
+```python
+from functools import wraps
+import time
+
+def strict_cache(max_age=None):
+    """
+    Decorator that caches function results with strict consistency.
+    Will not serve stale values after source data changes.
+
+    Args:
+        max_age: Optional maximum age in seconds for cached values.
+                 If None, values are cached indefinitely until source changes.
+    """
+    def decorator(func):
+        cache = {}
+        last_updated = {}
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Create a unique key for the function call
+            key = (args, frozenset(kwargs.items()))
+
+            # Check if we have a cached value
+            if key in cache:
+                # If max_age is set, check if value is too old
+                if max_age is not None:
+                    cached_time = last_updated.get(key, 0)
+                    if time.time() - cached_time > max_age:
+                        # Value is too old, remove from cache
+                        del cache[key]
+                        del last_updated[key]
+                    else:
+                        return cache[key]
+
+                # If we get here, we have a valid cached value
+                return cache[key]
+
+            # If not in cache, call the function and cache the result
+            result = func(*args, **kwargs)
+            cache[key] = result
+            last_updated[key] = time.time()
+            return result
+
+        return wrapper
+    return decorator
+```
+
+## How It Works
+
+1. **Strict Consistency**: The cache will only serve values that were generated after the last update to the source data.
+
+2. **Mechanism**:
+   - The decorator maintains two dictionaries: one for cached values and one for timestamps
+   - When a value is requested, it checks if the cached value exists and is still valid
+   - If the value is too old (based on `max_age`), it's removed from the cache
+   - New values are always fetched from the source function
+
+3. **Usage Example**:
+
+```python
+@strict_cache(max_age=300)  # Cache for 5 minutes
+def get_expensive_data(param1, param2):
+    # This would be your expensive data-fetching function
+    return f"Result for {param1} and {param2}"
+
+# First call - fetches from source
+print(get_expensive_data("a", "b"))
+
+# Subsequent calls within 5 minutes - returns cached value
+print(get_expensive_data("a", "b"))
+
+# After 5 minutes or if source data changes, next call will fetch fresh data
+```
+
+## Alternative Implementation (More Strict)
+
+If you need even stricter consistency where the cache is invalidated immediately when the source data changes (rather than just by time), you could implement a version that requires explicit cache invalidation:
+
+```python
+from functools import wraps
+
+def strict_cache_with_invalidation():
+    """
+    Decorator that caches function results but requires explicit invalidation.
+    """
+    def decorator(func):
+        cache = {}
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            key = (args, frozenset(kwargs.items()))
+            if key not in cache:
+                cache[key] = func(*args, **kwargs)
+            return cache[key]
+
+        def invalidate(*args, **kwargs):
+            key = (args, frozenset(kwargs.items()))
+            cache.pop(key, None)
+
+        wrapper.invalidate = invalidate
+        return wrapper
+    return decorator
+
+# Usage:
+@strict_cache_with_invalidation()
+def get_data(param):
+    return f"Data for {param}"
+
+print(get_data("x"))  # Fetches from source
+get_data.invalidate("x")  # Explicitly invalidate
+print(get_data("x"))  # Fetches from source again
+```
+
+Choose the implementation that best fits your consistency requirements.

@@ -1,0 +1,312 @@
+Here's a comprehensive solution that ensures cached values never become stale by implementing automatic invalidation:
+
+```python
+from typing import Any, Callable, Dict, Optional
+import time
+import threading
+from functools import wraps
+import hashlib
+import pickle
+
+class CacheWithVersioning:
+    """
+    A cache system that automatically detects when source data changes
+    and invalidates stale entries.
+    """
+    
+    def __init__(self, data_loader: Callable, ttl: Optional[float] = None):
+        """
+        Initialize cache with a data loader function
+        
+        Args:
+            data_loader: Function that fetches the source data
+            ttl: Time-to-live in seconds (if None, cache never expires by time)
+        """
+        self.data_loader = data_loader
+        self.ttl = ttl
+        self._cache: Dict[str, dict] = {}
+        self._lock = threading.Lock()
+        self._version_checkers: Dict[str, Callable] = {}
+        
+    def _compute_data_version(self, data: Any) -> str:
+        """
+        Compute a version/hash of the data to detect changes
+        """
+        return hashlib.md5(pickle.dumps(data)).hexdigest()
+    
+    def get(self, key: str, *args, **kwargs) -> Any:
+        """
+        Get cached value for key, refreshing if stale
+        
+        Args:
+            key: The cache key
+            *args, **kwargs: Arguments to pass to the data loader
+        
+        Returns:
+            The current value for the key
+        """
+        with self._lock:
+            # Check if cache entry exists
+            if key in self._cache:
+                cached_entry = self._cache[key]
+                
+                # Check TTL expiry
+                if self.ttl and (time.time() - cached_entry['timestamp'] > self.ttl):
+                    print(f"Cache TTL expired for key: {key}")
+                    return self._refresh(key, *args, **kwargs)
+                
+                # Check if data has changed by fetching fresh source
+                fresh_data = self.data_loader(key, *args, **kwargs)
+                current_version = self._compute_data_version(fresh_data)
+                
+                if current_version != cached_entry['version']:
+                    print(f"Data changed for key: {key}, refreshing cache")
+                    # Update cache with fresh data
+                    self._cache[key] = {
+                        'value': fresh_data,
+                        'version': current_version,
+                        'timestamp': time.time()
+                    }
+                    return fresh_data
+                else:
+                    # Data hasn't changed, return cached value
+                    return cached_entry['value']
+            else:
+                # No cache entry, load and cache
+                return self._refresh(key, *args, **kwargs)
+    
+    def _refresh(self, key: str, *args, **kwargs) -> Any:
+        """
+        Refresh cache entry for key
+        """
+        data = self.data_loader(key, *args, **kwargs)
+        version = self._compute_data_version(data)
+        
+        self._cache[key] = {
+            'value': data,
+            'version': version,
+            'timestamp': time.time()
+        }
+        
+        return data
+    
+    def invalidate(self, key: str):
+        """
+        Manually invalidate a cache entry
+        """
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                print(f"Cached entry invalidated for key: {key}")
+
+def cached_data_loader(timeout: float = 5.0):
+    """
+    Decorator version that creates a cached data loader
+    
+    Args:
+        timeout: Maximum time to wait for data loading in seconds
+    
+    Returns:
+        A decorator that adds caching with automatic invalidation
+    """
+    def decorator(func: Callable) -> Callable:
+        cache_dict: Dict[str, dict] = {}
+        
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Create a cache key from function name and arguments
+            cache_key = f"{func.__name__}:{args}:{kwargs}"
+            
+            # Check if we have cached data
+            if cache_key in cache_dict:
+                cached_entry = cache_dict[cache_key]
+                
+                # Always re-fetch to check if source changed
+                fresh_data = func(*args, **kwargs)
+                
+                # Compare versions
+                current_version = hashlib.md5(
+                    pickle.dumps(fresh_data)
+                ).hexdigest()
+                
+                if current_version != cached_entry['version']:
+                    # Data changed, update cache
+                    print(f"Data changed for {cache_key}")
+                    cache_dict[cache_key] = {
+                        'value': fresh_data,
+                        'version': current_version,
+                        'timestamp': time.time()
+                    }
+                    return fresh_data
+                else:
+                    # Return cached version (data unchanged)
+                    return cached_entry['value']
+            else:
+                # Load and cache initial data
+                data = func(*args, **kwargs)
+                version = hashlib.md5(pickle.dumps(data)).hexdigest()
+                cache_dict[cache_key] = {
+                    'value': data,
+                    'version': version,
+                    'timestamp': time.time()
+                }
+                return data
+        
+        # Add cache management methods
+        wrapper.clear_cache = lambda: cache_dict.clear()
+        wrapper.get_cache_size = lambda: len(cache_dict)
+        
+        return wrapper
+    
+    return decorator
+
+# Example usage and testing
+def simulate_data_source():
+    """
+    Simulates a data source that changes over time
+    """
+    data_store = {
+        'user': {'name': 'Alice', 'age': 30, 'timestamp': '2024-01-01'},
+        'product': {'id': 1, 'price': 100.0, 'stock': 50}
+    }
+    
+    def get_data(key):
+        # Simulate a database or external API call
+        # In practice, this would fetch from a real source
+        return data_store[key]
+    
+    return data_store, get_data
+
+def test_cache_implementation():
+    """
+    Test the cache implementation with example usage
+    """
+    # Create data source
+    data_store, get_data = simulate_data_source()
+    
+    # Create cache with automatic invalidation
+    cache = CacheWithVersioning(data_loader=get_data)
+    
+    # Initial fetch and cache
+    print("First call (caching):")
+    user_data = cache.get('user')
+    print(f"Retrieved: {user_data}")
+    
+    # Call again - should use cache if data unchanged
+    print("\nSecond call (checking cache):")
+    user_data_again = cache.get('user')
+    print(f"Retrieved (cached): {user_data_again}")
+    
+    # Simulate data change
+    print("\nSimulating data change...")
+    data_store['user'] = {'name': 'Alice', 'age': 31, 'timestamp': '2024-01-02'}
+    
+    # Fetch again - should detect the change and refresh
+    print("Call after data change:")
+    user_data_updated = cache.get('user')
+    print(f"Retrieved (updated): {user_data_updated}")
+    
+    # Test manual invalidation
+    print("\nManual invalidation:")
+    cache.invalidate('user')
+    user_data_fresh = cache.get('user')
+    print(f"Retrieved (after invalidation): {user_data_fresh}")
+    
+    # Test decorator version
+    print("\nTesting decorator version:")
+    
+    @cached_data_loader()
+    def get_user_info(user_id):
+        # Simulate expensive database call
+        return {
+            'user_id': user_id,
+            'name': f'User {user_id}',
+            'data': f'Some large data for user {user_id}'
+        }
+    
+    # First call
+    result1 = get_user_info(1)
+    print(f"First call: {result1}")
+    
+    # Second call (should use cache)
+    result2 = get_user_info(1)
+    print(f"Second call (same data): {result2}")
+    
+    # Simulate data change by modifying the function
+    # In practice, you'd use a real data source
+    # For testing, we can manually modify the cache
+    wrapper = get_user_info
+    cache_key = f"get_user_info:{1}:{ }"
+    
+    print(f"Cache size: {wrapper.get_cache_size()}")
+
+# Alternative implementation using a version-based approach
+class VersionedCache:
+    """
+    Cache that uses version checks to detect stale data
+    """
+    
+    def __init__(self, version_provider: Callable, data_loader: Callable):
+        """
+        Args:
+            version_provider: Function that returns a version/hash of the source
+            data_loader: Function that loads data for a key
+        """
+        self.version_provider = version_provider
+        self.data_loader = data_loader
+        self._cache = {}
+        self._lock = threading.Lock()
+    
+    def get(self, key: str) -> Any:
+        """
+        Get data for key, checking version first
+        """
+        with self._lock:
+            # Get current version of source data
+            current_version = self.version_provider(key)
+            
+            # Check if cache exists and version matches
+            if key in self._cache:
+                cached_version = self._cache[key]['version']
+                
+                if cached_version == current_version:
+                    # Version matches, return cached value
+                    return self._cache[key]['value']
+                else:
+                    print(f"Version changed for {key}: {cached_version} -> {current_version}")
+                    # Need to refresh
+                    data = self.data_loader(key)
+                    self._cache[key] = {
+                        'value': data,
+                        'version': current_version
+                    }
+                    return data
+            else:
+                # First request for this key
+                data = self.data_loader(key)
+                self._cache[key] = {
+                    'value': data,
+                    'version': current_version
+                }
+                return data
+
+if __name__ == "__main__":
+    test_cache_implementation()
+```
+
+This implementation provides several key features:
+
+1. **Automatic Invalidation**: The cache always checks if the source data has changed by comparing versions
+2. **TTL Support**: Optional time-based expiry
+3. **Thread Safety**: Uses locks to prevent race conditions
+4. **Version Comparison**: Uses hash values to detect changes
+5. **Both Class and Decorator**: Provides flexible usage patterns
+6. **Manual Invalidation**: Allows explicit cache clearing
+
+The key insight is that the cache **always** checks the source data version before serving cached values. If the version has changed, it automatically refreshes the cache. This ensures you never serve stale data.
+
+For production use, consider:
+- Using more sophisticated version tracking (e.g., timestamps, database triggers)
+- Implementing distributed caching for multi-instance deployments
+- Adding error handling and fallback strategies
+- Using async operations for large datasets

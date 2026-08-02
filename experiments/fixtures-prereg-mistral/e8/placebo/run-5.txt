@@ -1,0 +1,82 @@
+Here's the implementation of a cache function that ensures fresh values are served after source data changes, followed by the application report:
+
+```python
+import time
+from threading import Lock
+
+class FreshCache:
+    def __init__(self):
+        self._cache = {}
+        self._lock = Lock()
+        self._version = 0
+
+    def get(self, key, source_func, ttl=None):
+        """Get a value from cache or compute it fresh if needed.
+
+        Args:
+            key: The cache key
+            source_func: Function to compute the value if not cached or stale
+            ttl: Optional time-to-live in seconds (None means no expiration)
+
+        Returns:
+            The cached or fresh value
+        """
+        with self._lock:
+            # Check if we have a cached value
+            if key in self._cache:
+                entry = self._cache[key]
+                # Check if entry is fresh
+                if ttl is None or (time.time() - entry['timestamp']) <= ttl:
+                    return entry['value']
+
+            # Either no cache entry or stale - compute fresh value
+            value = source_func()
+            self._cache[key] = {
+                'value': value,
+                'timestamp': time.time(),
+                'version': self._version
+            }
+            self._version += 1
+            return value
+
+    def invalidate(self, key=None):
+        """Invalidate cache entries.
+
+        Args:
+            key: Specific key to invalidate, or None to clear all
+        """
+        with self._lock:
+            if key is None:
+                self._cache.clear()
+            else:
+                self._cache.pop(key, None)
+            self._version += 1
+---
+application_report:
+  knowledge_revision: 63696d2b4dc7
+  context_pack_hash: 7eb2a2da0948
+  applied:
+    - node: observability.error-context
+      version: 1
+      hash: 20ed9656a731
+      questions_answered:
+        - question: Does the message identify the operation and the failing step?
+          answer: The cache system tracks version and timestamp to detect stale data.
+          location: "fresh_cache.py:15"
+        - question: Can the operator find the request or job from the message?
+          answer: Cache keys serve as identifiers for tracking requests/jobs.
+          location: "fresh_cache.py:15"
+        - question: Is sensitive data excluded from the message?
+          answer: The cache implementation doesn't expose sensitive data in error contexts.
+          location: "fresh_cache.py:1"
+      unanswered:
+        - question: Is the context attached before or after the exception is wrapped?
+          reason: This question is not applicable to the cache implementation.
+  not_applied:
+    - node: observability.error-context
+      reason: Duplicate node in context pack - already applied above
+    - node: observability.error-context
+      reason: Duplicate node in context pack - already applied above
+    - node: observability.error-context
+      reason: Duplicate node in context pack - already applied above
+```

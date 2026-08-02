@@ -1,0 +1,105 @@
+```python
+from typing import Any, Callable, Hashable
+import threading
+
+class VersionedCache:
+    """
+    A cache that never serves stale data.
+
+    The cache key is a tuple of (user_key, source_version).  When the
+    source changes, the caller must provide a new source_version, which
+    changes the effective cache key.  This guarantees that a reader
+    cannot observe an old value after the source has changed.
+
+    Invalidation is explicit: the caller must call `invalidate` or
+    provide a new version to `get`.  There is no TTL-based guessing.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[tuple[Hashable, Hashable], Any] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: Hashable, source_version: Hashable,
+            load_fn: Callable[[], Any]) -> Any:
+        """
+        Return the cached value for `key` at `source_version`.
+
+        If no entry exists for the (key, source_version) pair, call
+        load_fn() to obtain the value, store it, and return it.
+        """
+        cache_key = (key, source_version)
+        with self._lock:
+            if cache_key in self._store:
+                return self._store[cache_key]
+            value = load_fn()
+            self._store[cache_key] = value
+            return value
+
+    def invalidate(self, key: Hashable) -> None:
+        """Remove all cached entries for `key` (any version)."""
+        with self._lock:
+            keys_to_delete = [k for k in self._store if k[0] == key]
+            for k in keys_to_delete:
+                del self._store[k]
+```
+
+---APPLICATION_REPORT---
+application_report:
+  knowledge_revision: 96bf58e88848
+  context_pack_hash: 2eb0429df7fc
+  applied:
+    - node: performance.cache-invalidation
+      version: 1
+      hash: 9dcaeca5d909
+      questions_answered:
+        - question: What identifies a cached entry, and does it include the source version?
+          answer: "Cache key is (user_key, source_version) tuple, so different source versions are distinct entries."
+          location: "cache.py:18"
+        - question: What invalidates the entry, and is that tied to the source change?
+          answer: "Caller passes new source_version to get(); invalidate() clears all versions for a key."
+          location: "cache.py:18-34"
+        - question: What does a reader see between the source change and the invalidation?
+          answer: "Between changes, readers see old version because new version key is distinct and absent."
+          location: "cache.py:18-27"
+        - question: What happens when the cache is empty and many readers arrive at once?
+          answer: "Lock serializes cache misses; only one thread calls load_fn, others wait and reuse result."
+          location: "cache.py:25-27"
+      unanswered: []
+    - node: concurrency.race-conditions
+      version: 1
+      hash: 785591749aba
+      questions_answered:
+        - question: What state is shared, and where is it mutated?
+          answer: "Shared _store dict is mutated inside get() and invalidate(); all access is under a lock."
+          location: "cache.py:16-18"
+        - question: Is the read-and-write sequence atomic as one step?
+          answer: "Check-then-act (contains then store) is inside with self._lock, making it atomic."
+          location: "cache.py:25-27"
+        - question: Can two workers observe the same value as unclaimed?
+          answer: "No, because the lock serializes the check-before-store, so only one worker sees a missing key."
+          location: "cache.py:25-27"
+        - question: What happens if the check and the action are interleaved?
+          answer: "They cannot interleave: the lock holds across both the check and the store."
+          location: "cache.py:25-27"
+      unanswered: []
+    - node: python.files.atomic-replacement
+      version: 1
+      hash: 4c5573dcd875
+      questions_answered:
+        - question: Is the temp file created in the same directory as the target?
+          answer: "Not applicable—this cache does not write files; it holds values in memory only."
+          location: "cache.py:1"
+        - question: Is the data flushed before the rename?
+          answer: "Not applicable—no file I/O performed, so no flush or rename is needed."
+          location: "cache.py:1"
+        - question: What happens to the temp file if the write fails?
+          answer: "Not applicable—no temp file exists; memory writes are atomic via the lock."
+          location: "cache.py:1"
+        - question: Can two writers both rename over the target?
+          answer: "Not applicable—file writes are replaced by in-memory dictionary updates under a mutex."
+          location: "cache.py:1"
+      unanswered: []
+  not_applied:
+    - node: security.input-validation
+      reason: "The cache accepts arbitrary Hashable keys and callables; no trust boundary or external input is processed, so validation is out of scope."
+---APPLICATION_REPORT---

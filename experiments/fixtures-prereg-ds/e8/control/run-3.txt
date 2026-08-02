@@ -1,0 +1,347 @@
+Here's a comprehensive solution for caching with automatic invalidation when source data changes:
+
+```python
+import time
+from typing import Any, Callable, Dict, Optional, Generic, TypeVar
+from datetime import datetime, timedelta
+import threading
+from collections import OrderedDict
+import hashlib
+import json
+
+T = TypeVar('T')
+
+class DataCache(Generic[T]):
+    """
+    A thread-safe cache that automatically invalidates entries when source data changes.
+    
+    Features:
+    - Tracks source data changes via a data version provider
+    - Automatically removes stale entries
+    - Supports TTL-based expiration as additional safety
+    - Thread-safe operations
+    - Optional LRU eviction for memory management
+    """
+    
+    def __init__(
+        self,
+        data_version_provider: Callable[[], Any],
+        ttl_seconds: Optional[int] = 3600,  # 1 hour default
+        max_size: Optional[int] = 1000,
+        check_interval: int = 30  # seconds between version checks for cleanup
+    ):
+        """
+        Args:
+            data_version_provider: Function that returns a current version/hash of the source data.
+                                   Called periodically to detect changes.
+            ttl_seconds: Maximum time an entry lives in cache (default 3600)
+            max_size: Maximum number of entries (None for unlimited)
+            check_interval: How often to check for stale entries (seconds)
+        """
+        self._cache: Dict[str, tuple[T, float, Any]] = {}  # key -> (value, expiry_time, source_version)
+        self._version_provider = data_version_provider
+        self._ttl = ttl_seconds
+        self._max_size = max_size
+        self._lock = threading.RLock()
+        
+        # Store current source version and when it was last checked
+        self._last_version_check = 0.0
+        self._current_version = self._get_current_version()
+        
+        # LRU tracking for eviction
+        self._lru_order = OrderedDict()
+        
+        # Start background cleanup thread if TTL is enabled
+        if ttl_seconds is not None:
+            self._cleanup_thread = threading.Thread(target=self._background_cleanup, daemon=True)
+            self._cleanup_thread.start()
+    
+    def _get_current_version(self) -> Any:
+        """Get the current version of the source data"""
+        try:
+            return self._version_provider()
+        except Exception:
+            # If version provider fails, use a null version to be safe
+            return None
+    
+    def _should_check_version(self) -> bool:
+        """Determine if we should re-check the source data version"""
+        current_time = time.time()
+        if current_time - self._last_version_check >= 30:  # Check every 30 seconds
+            self._last_version_check = current_time
+            return True
+        return False
+    
+    def _check_for_changes(self) -> bool:
+        """Check if source data has changed and invalidate if necessary"""
+        if self._should_check_version():
+            with self._lock:
+                new_version = self._get_current_version()
+                if new_version != self._current_version:
+                    # Source data has changed, invalidate all entries
+                    print(f"Source data changed from {self._current_version} to {new_version}")
+                    self._cache.clear()
+                    self._lru_order.clear()
+                    self._current_version = new_version
+                    return True
+        return False
+    
+    def _is_expired(self, entry: tuple[T, float, Any]) -> bool:
+        """Check if an entry has expired"""
+        value, expiry, version = entry
+        return expiry < time.time() or version != self._current_version
+    
+    def get(self, key: str) -> Optional[T]:
+        """
+        Get a cached value for the key.
+        Returns None if not found or stale.
+        
+        Args:
+            key: Cache key
+            
+        Returns:
+            Cached value or None if not found/stale
+        """
+        # Check for source data changes periodically
+        self._check_for_changes()
+        
+        with self._lock:
+            if key not in self._cache:
+                return None
+            
+            entry = self._cache[key]
+            if self._is_expired(entry):
+                # Remove stale entry
+                del self._cache[key]
+                self._lru_order.pop(key, None)
+                return None
+            
+            # Update LRU position
+            self._lru_order.pop(key, None)
+            self._lru_order[key] = None
+            
+            return entry[0]
+    
+    def set(self, key: str, value: T, ttl_override: Optional[int] = None) -> None:
+        """
+        Store a value in cache with the current source data version.
+        
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl_override: Custom TTL for this entry (overrides default)
+        """
+        with self._lock:
+            # Check if source data has changed before storing
+            self._check_for_changes()
+            
+            ttl = ttl_override if ttl_override is not None else self._ttl
+            expiry = time.time() + ttl if ttl else time.time() + 3600
+            
+            # Store with current source version
+            self._cache[key] = (value, expiry, self._current_version)
+            self._lru_order[key] = None
+            
+            # Handle cache size limit
+            if self._max_size and len(self._cache) > self._max_size:
+                # Evict least recently used
+                while len(self._cache) > self._max_size:
+                    oldest_key, _ = self._lru_order.popitem(last=False)
+                    del self._cache[oldest_key]
+    
+    def delete(self, key: str) -> None:
+        """Delete a specific key from cache"""
+        with self._lock:
+            self._cache.pop(key, None)
+            self._lru_order.pop(key, None)
+    
+    def clear(self) -> None:
+        """Clear all cached values"""
+        with self._lock:
+            self._cache.clear()
+            self._lru_order.clear()
+    
+    def get_or_set(self, key: str, value_factory: Callable[[], T], ttl_override: Optional[int] = None) -> T:
+        """
+        Get value from cache or compute and cache it if not available/stale.
+        
+        Args:
+            key: Cache key
+            value_factory: Function to compute the value if not cached
+            ttl_override: Optional custom TTL
+            
+        Returns:
+            The cached or computed value
+        """
+        # First check if we have it
+        cached = self.get(key)
+        if cached is not None:
+            return cached
+        
+        # Compute new value
+        # Use a lock to prevent duplicate computations
+        with self._lock:
+            # Double-check after acquiring lock
+            cached = self.get(key)
+            if cached is not None:
+                return cached
+            
+            value = value_factory()
+            self.set(key, value, ttl_override)
+            return value
+    
+    def _background_cleanup(self):
+        """Background thread that periodically cleans stale entries"""
+        while True:
+            time.sleep(self._check_interval)
+            self._check_for_changes()
+            
+            with self._lock:
+                current_time = time.time()
+                stale_keys = [
+                    k for k, (value, expiry, version) in self._cache.items()
+                    if expiry < current_time or version != self._current_version
+                ]
+                for k in stale_keys:
+                    del self._cache[k]
+                    self._lru_order.pop(k, None)
+    
+    def __len__(self):
+        return len(self._cache)
+    
+    def stats(self) -> dict:
+        """Return cache statistics"""
+        with self._lock:
+            return {
+                "size": len(self._cache),
+                "max_size": self._max_size,
+                "ttl_seconds": self._ttl,
+                "current_version": self._current_version,
+                "last_version_check": self._last_version_check
+            }
+
+# Example usage with a database
+class DatabaseCache:
+    """Example showing how to use DataCache with a database"""
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+        self.cache = DataCache(
+            data_version_provider=self.get_db_version,
+            ttl_seconds=300  # 5 minutes
+        )
+    
+    def get_db_version(self):
+        """Get a hash of the current database state"""
+        try:
+            # This could be a query like SELECT MAX(updated_at) FROM table
+            # Or a version number stored in the database
+            result = self.db.execute("SELECT MAX(updated_at) FROM data_table")
+            return result.fetchone()[0]
+        except Exception:
+            return None
+    
+    def get_user(self, user_id: int):
+        """Get user from cache or database"""
+        key = f"user:{user_id}"
+        
+        def fetch_user():
+            # Fetch from database
+            result = self.db.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            return result.fetchone()
+        
+        # Use get_or_set for atomic caching
+        return self.cache.get_or_set(key, fetch_user)
+    
+    def update_user(self, user_id: int, new_data: dict):
+        """Update user and invalidate cache"""
+        # Perform the update
+        self.db.execute("UPDATE users SET name = ? WHERE id = ?", 
+                       (new_data['name'], user_id))
+        self.db.commit()
+        
+        # The cache will automatically invalidate because
+        # the version provider will now return a different version
+
+# Example with file-based data
+class FileDataCache(DataCache):
+    """Example with file-based source data"""
+    
+    def __init__(self, file_path):
+        self.file_path = file_path
+        
+        # Compute file hash for version tracking
+        def get_file_version():
+            import hashlib
+            with open(self.file_path, 'rb') as f:
+                return hashlib.md5(f.read()).hexdigest()
+        
+        super().__init__(data_version_provider=get_file_version, ttl_seconds=None)
+    
+    def read_file(self):
+        """Read file content with caching"""
+        def fetch_content():
+            with open(self.file_path, 'r') as f:
+                return f.read()
+        
+        return self.get_or_set('file_content', fetch_content)
+
+# Usage example
+if __name__ == "__main__":
+    # Simulated database
+    class MockDB:
+        def __init__(self):
+            self.data = {'version': 1, 'users': {1: {'name': 'Alice'}}}
+        
+        def execute(self, query, params=None):
+            class Result:
+                def __init__(self, data):
+                    self.data = data
+                def fetchone(self):
+                    return self.data
+            return Result(self.data)
+    
+    db = MockDB()
+    cache = DatabaseCache(db)
+    
+    # First access - fetches from database
+    user = cache.get_user(1)
+    print(f"User: {user}")
+    
+    # Second access - served from cache
+    user_again = cache.get_user(1)
+    print(f"Cached user: {user_again}")
+    
+    # Simulate data change in database
+    db.data['version'] = 2
+    db.data['users'][1]['name'] = 'Bob'
+    
+    # When accessed again, cache will detect version change
+    # and fetch fresh data
+    user_updated = cache.get_user(1)
+    print(f"Updated user: {user_updated}")
+```
+
+This implementation provides:
+
+1. **Automatic invalidation**: Tracks the source data version and automatically invalidates all cached entries when the version changes.
+
+2. **Thread safety**: Uses reentrant locks for concurrent access.
+
+3. **Multiple invalidation strategies**:
+   - Version-based detection (primary)
+   - TTL-based expiration (fallback)
+   
+4. **Memory management**: Optional LRU eviction when cache exceeds size limit.
+
+5. **Background cleanup**: Periodically checks for stale entries and removes them.
+
+6. **Flexible version provider**: Can track database versions, file hashes, or any other change indicator.
+
+Key features:
+- `data_version_provider` is called periodically to check if source data has changed
+- When a change is detected, all cached entries are invalidated
+- `get_or_set` method provides atomic operation with locking
+- No danger of serving stale data - every access checks the version
+
+The cache checks for data changes every 30 seconds (configurable) and also on every `get` operation, ensuring that stale data is never returned once the source changes.
