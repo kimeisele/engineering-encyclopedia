@@ -3,60 +3,64 @@
 Versioned engineering knowledge nodes that make coding-agent reasoning
 inspectable and provable.
 
-## What is actually known
-
-This project was measured, and the measurement was itself audited three
-times. The primary claim is **convergence**: the pack makes agent output
-the same shape across vendors and runs, so that a non-technical operator
-and a second agent encounter the same structure of solution regardless of
-which model produced it. What is known, stated without advocacy:
-
-- **In-sample, convergence holds on four of six tasks** (e2, e3, e4, e6):
-  the pack collapses the between-provider gap and the providers' criterion
-  disagreements (to 0/6) and, on e3/e4, makes both providers emit the same
-  structural constructs where control had them completely apart
-  (e3 markers 0.87 → 0.00, e4 0.85 → 0.10). e1 is the exception
-  (`docs/E1_EXCEPTION.md`); e5 was already converged.
-- **The mean result, beside it:** in-sample, treatment out-scored control
-  on all six provider×task cells with the placebo at or below control —
-  the pack does not just converge, it also (in-sample) makes output
-  better. **Out-of-sample, the mean effect does not generalise: exactly
-  one of six cells is clean** (e4-Mistral).
-- **The convergence claim is in-sample.** Its pre-registered out-of-sample
-  test (two fresh tasks, markers and decision rule committed before any
-  run, `docs/CONVERGENCE_PREREGISTRATION.md`) returned a **null**: e8
-  failed the pre-registered marker condition (the pack converged the means
-  but diverged the constructs), and the rule treats a failure on either
-  task as a null for the claim
-  (`docs/CONVERGENCE_PREREGISTRATION_RESULTS.md`).
-- **The corpus rule is unsupported out-of-sample**, and `review.*` does not
-  demonstrate an effect. Both are retained only as hypotheses.
-- **The instrument was caught failing three times** (the report
-  contaminating the scored artifact; a pattern crediting the wrong
-  construct; the E6 parser and a criterion that never fired). Two of the
-  three reversed a result. Every number is scored with the repaired
-  instrument.
-
-The full record — raw scores, before/after, the audits — is in
-`experiments/RESULTS.md`; a one-page summary is in
-`docs/EXPERIMENT_SUMMARY.md`.
-
 ## What it is
 
 Coding agents already contain this knowledge; they fail anyway because it
 is stored in weights — activated probabilistically, not directly
-inspectable or patchable. This repository stores it as fixed, versioned, hashed YAML
-nodes, retrieves it deterministically (SQLite FTS5 with a pure-Python
-fallback), and composes a bounded context pack per request. The product is
-the **Application Report**: an agent names the node it applied, the
-question it answered, and where in the artifact it answered it. A
-human can read exactly which node the agent relied on and correct that
-node; a weight cannot be corrected.
+inspectable or patchable. This repository stores it as fixed, versioned,
+hashed YAML nodes, retrieves it deterministically (SQLite FTS5 with a
+pure-Python fallback), and composes a bounded context pack per request.
+The product is the **Application Report**: an agent names the node it
+applied, the question it answered, and where in the artifact it answered
+it. A human can read exactly which node the agent relied on and correct
+that node; a weight cannot be corrected.
 
 Four properties drive every design decision: reliable retrieval,
 inspectability, consistency across models, and anchoring against
 confabulation (a fixed, hashed text against which plausible invention
 becomes visible).
+
+## What is established
+
+The primary claim is **convergence**: the pack makes agent output the same
+shape across vendors and runs. In the full convergence re-analysis of all
+six tasks' existing runs (in-sample e1–e3, plus the out-of-sample tasks
+e4–e6), **convergence holds on four of six tasks** (e2, e3, e4, e6):
+treatment collapses the between-provider gap, drives the providers'
+criterion disagreements to 0/6 on five of six tasks (all but e1), and on
+e3/e4 makes both providers emit the same structural constructs where
+control had them completely apart. The placebo (a structurally identical
+pack with irrelevant content) does not reproduce any of it, so the
+convergence is not prompt structure. e1 is the exception; e5 was already
+converged. In-sample, the pack also makes output better (treatment
+out-scored control on all six e1–e3 cells) — but that is the secondary
+result. The convergence claim is marked in-sample only: the pre-registered
+fresh-task test returned NULL (below).
+
+## What is not established
+
+- **Out-of-sample convergence: NULL by pre-registered test.** Two fresh
+  tasks (e7 locking-strategy, e8 cache-invalidation), markers and decision
+  rule committed before any run: e7 passed both conditions, e8 failed the
+  marker condition — treatment converged the means but **diverged the
+  constructs** (DeepSeek adopted a version-in-key cache, Mistral dropped
+  its TTL). Per the pre-registered rule the convergence claim is
+  **in-sample only**. The e8 divergence is recorded as an observation,
+  not a plain null: the node lists valid answers without deciding between
+  them (`docs/UNDERDETERMINED_NODES.md`).
+- **The corpus rule is unsupported out-of-sample** (retained only as a
+  hypothesis), and `review.*` does not demonstrate an effect.
+- **Out-of-sample quality: exactly one of six cells is clean**
+  (e4-Mistral +3.07). The pack does not reliably make output better out of
+  sample.
+
+## The instrument
+
+The measurement was corrected three times: the Application Report
+contaminating the scored artifact; a pattern crediting the wrong construct;
+the E6 parser and a criterion that never fired. **Two of the three
+reversed a result.** Every number in this repository is scored with the
+repaired instrument, before/after recorded.
 
 ## For a non-technical operator: using node questions as review questions
 
@@ -128,10 +132,9 @@ Commands: `validate`, `list`, `show`, `search`, `related`, `query`,
 - **Knowledge content** (`knowledge/`, `taxonomy/`): CC BY 4.0 — see
   `knowledge/LICENSE`.
 
-## Governance and record
+## Record
 
 `main` is protected (pull requests required, force pushes blocked,
-deletion blocked, required status check `validate`). Judgement calls are
-recorded in `DEVIATIONS.md`; the corpus rule's status in
-`docs/CORPUS_RULE.md`; the one-cell analysis in
-`docs/WORKING_CELL_ANALYSIS.md`.
+deletion blocked, required status check `validate`). The full experiment
+record is in `experiments/RESULTS.md`; the one-page summary in
+`docs/EXPERIMENT_SUMMARY.md`; judgement calls in `DEVIATIONS.md`.
