@@ -1,0 +1,75 @@
+id: apis.http-status-semantics
+version: 1
+title: HTTP status semantics
+kind: guideline
+status: established
+
+summary: >
+  HTTP status codes tell the caller who owns the failure: 4xx is the
+  caller's error and must not be retried, 5xx is the server's and may be.
+  Never return 200 with an error body, and never let retry logic retry
+  4xx.
+
+intent_signals:
+  - status code
+  - return 200
+  - http 500
+  - error response
+  - retryable
+  - bad request
+  - correct status
+  - always return success
+
+applies_when:
+  - a service returns responses to callers over HTTP
+  - retry logic exists on the caller or in a client library
+
+does_not_apply_when:
+  - an internal function call with no HTTP boundary
+
+does_not_imply:
+  - that a correct status makes the body correct
+  - that 5xx guarantees the operation was not performed
+  - that status codes replace error context
+  - that a 4xx cannot be a server-side bug
+
+questions:
+  - Is each failure mapped to a status that names the owner of the error?
+  - Does any path return 200 for a failure, or an error body with 200?
+  - Is 4xx excluded from your retry logic, and 5xx included?
+  - Do error bodies carry a machine-readable code, not just prose?
+
+techniques:
+  - 4xx for caller errors, 5xx for server errors, and nothing else
+  - retry only on 5xx, timeouts, and network errors
+  - structured error bodies with a stable code
+  - 409 for conflicts, 422 for valid-but-unprocessable
+
+risks:
+  - 200-with-error-body breaking every client's error path
+  - 500 for validation errors, 400 for server failures
+  - retrying 4xx requests that will never succeed
+  - leaking internals through error details
+
+relations:
+  related:
+    - reliability.retry-semantics
+  requires_consideration_of:
+    - observability.error-context
+
+contexts:
+  languages: [any]
+  project_types: [web-service, automation]
+  lifecycle_stages: [implementation, review]
+
+provenance:
+  origin: curated
+  rationale: >
+    Status-code misuse is a recurring, contract-breaking class: 200-with-
+    error-body and retrying 4xx both mislead callers. The questions force
+    the ownership of each failure to be named.
+  created_at: 2026-08-02
+  last_verified_at: 2026-08-02
+  verification_interval_days: 1095
+
+keywords: [http status, 4xx, 5xx, error codes, retryable, status semantics]
