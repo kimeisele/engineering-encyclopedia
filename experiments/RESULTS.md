@@ -173,13 +173,15 @@ n=15 is at or below control on all four cells.
 ## Judgment (corpus rule, repaired instrument, n=15)
 
 With the repaired instrument and n=15 per out-of-sample arm, the corpus
-rule **survives out-of-sample in direction**, and that is the defensible
-claim: only one cell clears within-arm spread (e4-Mistral +3.07 with the
-placebo at control). e4-DeepSeek is a ceiling pair (control 5.40/6.00), and
-the two e5 cells (0.00, +0.27) are inside within-arm spread even at n=15 —
-"three of four positive" would overstate the data. The rule is supported,
-not proven, and control-arm headroom (the flat cell) remains the plainest
-caveat.
+rule is **not supported out-of-sample**. The only clean effect is a single
+cell (e4-Mistral +3.07 with the placebo below control), on one provider,
+on one node; e4-DeepSeek is a ceiling pair, and the two e5 cells are inside
+within-arm spread even at n=15. **A single cell cannot carry a rule.** The
+rule is not falsified (no cell is negative) and is retained as an
+**unsupported hypothesis**; the baseline-headroom alternative (the pack
+helps where the model's unaided baseline is weak) fits the data at least as
+well, and the data does not prefer one predictor over the other. This
+supersedes any earlier "survives in direction" wording.
 
 ## Limitation
 

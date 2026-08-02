@@ -52,8 +52,10 @@ n=15 per out-of-sample arm; see `experiments/RESULTS.md`,
 `docs/OOS_DIAGNOSIS.md`). Honest bounds: n=5 per arm in-sample, n=15 per
 arm out-of-sample, three in-sample and two out-of-sample tasks, two
 providers, one in-sample anomaly. The knowledge is **supported** by the
-in-sample result, never claimed as proven; out of sample the rule survives
-**in direction** on a single strong cell. Full detail, raw scores and
+in-sample result, never claimed as proven; **out of sample the corpus rule
+is not supported** — the only clean effect is a single cell (e4-Mistral,
+on one provider, on one node), which cannot carry a rule, so the rule is
+retained as an unsupported hypothesis. Full detail, raw scores and
 caveats: `experiments/RESULTS.md`.
 
 ## Repository layout

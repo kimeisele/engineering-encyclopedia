@@ -90,13 +90,16 @@ out-of-sample pass found a defect in the measurement, not in the knowledge
 (a rubric pattern — see `experiments/RESULTS.md`, instrument-repair section);
 this is the second time the project caught its own instrument.
 
-With the repaired rubrics, the out-of-sample result is: **one clear effect
-(e4-Mistral +3.20, placebo at control), one ceiling-limited flat cell
-(e4-DeepSeek, control 5.60/6.00), and two cells too small to call**
-(e5-DeepSeek +0.40, e5-Mistral +0.20 — both inside within-arm spread at
-n=5; e5-Mistral moved from −1.40 to +0.20 by rescoring alone, so it is not
-evidence in either direction). Judgment: the rule **survives out-of-sample
-in direction** — that is the defensible claim, resting on a single strong
-cell — and "three of four positive" would overstate the data. The rule
-remains supported, not proven, and the flat cell is the plainest reminder
-that a node is only testable when its task's control arm has headroom.
+With the repaired rubrics and n=15 per out-of-sample arm, the result is:
+**one clean effect (e4-Mistral +3.07, pooled sd 1.01, placebo −0.47 below
+control), on one provider, on one node**; e4-DeepSeek is a ceiling pair
+(control 5.40/6.00), and the two e5 cells (0.00, +0.27) are inside
+within-arm spread even at n=15. **A single cell cannot carry a rule.**
+
+Judgment: the corpus rule is **not supported out-of-sample**. It is not
+falsified either (no cell is negative), so it is retained — but as an
+**unsupported hypothesis**, not as a supported claim. The decision-vs-idiom
+distinction predicts no better than the baseline-headroom alternative (the
+pack helps where the model's unaided baseline is weak: e4-Mistral control
+2.80 vs e4-DeepSeek 5.40), and the data does not prefer one over the other.
+This section supersedes any earlier "survives in direction" wording.
