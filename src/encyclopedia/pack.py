@@ -140,13 +140,21 @@ def compose_pack(
 ) -> Dict[str, Any]:
     """Compose a context pack for *request* against *index*.
 
-    Selection: primary = top-ranked nodes (capped); supporting = graph
-    neighbours of primary at depth exactly 1 (capped), ordered by retrieval
-    rank. Budgets are enforced by deterministic truncation.
+    Selection: primary = top-ranked nodes with a positive score (capped);
+    supporting = graph neighbours of primary at depth exactly 1 (capped),
+    ordered by retrieval rank. Budgets are enforced by deterministic
+    truncation.
+
+    No-match rule (Slice 1): a node with score 0.0 is never selected as
+    primary — it carries no query relevance, and invented relevance is worse
+    than none (the placebo arm measured that). When no node scores above
+    zero, the pack is empty and marked ``trace.no_match: true`` with a reason;
+    both backends behave identically in this case.
     """
     node_by_id = {node.id: node for node in nodes}
     ranked = index.search(request)
     ranked_ids = [node_id for node_id, _ in ranked]
+    ranked_scores = {node_id: score for node_id, score in ranked}
     rank_position = {node_id: i for i, node_id in enumerate(ranked_ids)}
 
     if options.language is not None or options.project_type is not None:
@@ -156,7 +164,31 @@ def compose_pack(
             if _matches_context(node_by_id[node_id], options)
         ]
 
-    primary_ids = ranked_ids[: options.max_primary]
+    positive_ids = [
+        node_id for node_id in ranked_ids if ranked_scores.get(node_id, 0.0) > 0.0
+    ]
+    primary_ids = positive_ids[: options.max_primary]
+
+    if not primary_ids:
+        no_match_pack: Dict[str, Any] = {
+            "request": {"original": request},
+            "knowledge_revision": corpus_revision(nodes),
+            "context_pack_hash": "0" * 12,
+            "retrieval_backend": index.backend,
+            "context_pack": {"primary": [], "supporting": []},
+            "trace": {
+                "selected": [],
+                "excluded": [],
+                "truncated": False,
+                "no_match": True,
+                "reason": (
+                    "no node in the corpus matched any query token; nothing "
+                    "was selected rather than invent relevance"
+                ),
+            },
+        }
+        no_match_pack["context_pack_hash"] = _pack_hash(no_match_pack)
+        return no_match_pack
 
     adjacency = _neighbourhood(nodes)
     support_candidates: List[str] = []
