@@ -1,7 +1,7 @@
 # engineering-encyclopedia
 
-Versioned engineering knowledge nodes that make coding-agent reasoning
-inspectable and provable.
+Versioned engineering knowledge nodes, delivered as questions before the
+work, that change what coding agents write.
 
 ## What it is
 
@@ -10,10 +10,15 @@ is stored in weights — activated probabilistically, not directly
 inspectable or patchable. This repository stores it as fixed, versioned,
 hashed YAML nodes, retrieves it deterministically (SQLite FTS5 with a
 pure-Python fallback), and composes a bounded context pack per request.
-The product is the **Application Report**: an agent names the node it
-applied, the question it answered, and where in the artifact it answered
-it. A human can read exactly which node the agent relied on and correct
-that node; a weight cannot be corrected.
+
+The product is the **questions**. A pack delivered *before* the work
+changes what the model writes: on the atomic-replacement task, Mistral
+scored 0/10 unaided and 10/10 with the pack, placebo-controlled, with no
+report involved at any point. That is what was measured and that is the
+claim. The Application Report (`verify-report`, below) is an **optional**
+audit variant — still shipped, still tested, useful where auditable
+evidence is wanted, but it adds nothing measurable to the effect and is
+not required to get it.
 
 Four properties drive every design decision: reliable retrieval,
 inspectability, consistency across models, and anchoring against
@@ -85,6 +90,15 @@ repaired instrument, before/after recorded.
 
 ## For a non-technical operator: using node questions as review questions
 
+**The simple path.** Get a pack and hand it to the agent before the work:
+
+```sh
+encyclopedia query "make sure this worker doesn't process the same job twice"
+```
+
+That is the whole effect: the pack changes what the model writes. Nothing
+else is required.
+
 You do not need to read the code an agent produced to check whether it used
 the knowledge. Each node carries `questions` — concrete, answerable
 questions like "Where is completion recorded, and is that record durable
@@ -93,9 +107,10 @@ work you cannot read yourself: the agent must answer each question **with a
 location** (a file and a line where the answer can be found). An answer
 without a location is not an answer.
 
-`encyclopedia verify-report` makes this mechanical. It takes the agent's
-report and the exact pack the agent was given, and proves — offline, with
-no model involved — that:
+**Optional: auditable evidence.** Where you want proof, not just the
+effect, `encyclopedia verify-report` makes the checklist mechanical. It
+takes the agent's report and the exact pack the agent was given, and proves
+— offline, with no model involved — that:
 
 - the report is bound to the pack it claims (hashes must match),
 - every node in the pack appears exactly once, applied or explicitly
@@ -145,8 +160,10 @@ the install), set `ENCYCLOPEDIA_ROOT` to a directory containing
 pip install .
 encyclopedia validate
 encyclopedia query "make sure this worker doesn't process the same job twice"
-encyclopedia verify-report report.yaml --pack pack.yaml
 ```
+
+Optional audit flow (auditable evidence only):
+`encyclopedia verify-report report.yaml --pack pack.yaml`.
 
 Commands: `validate`, `list`, `show`, `search`, `related`, `query`,
 `verify-report`. No other commands.

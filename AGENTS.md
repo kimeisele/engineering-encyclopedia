@@ -7,8 +7,11 @@ Guidance for agents working in this repository. Read the founding brief
 
 A local-first, offline, deterministic knowledge base of versioned YAML
 engineering nodes, a keyword retrieval layer, a bounded context pack composer,
-a machine-checkable Application Report format, and a three-case experiment
-harness. The product is the Application Report, not the retrieval engine.
+a three-case experiment harness, and an optional machine-checkable
+Application Report format. The product is the questions: a pack delivered
+before the work changes what an agent writes — that is what was measured
+(experiments/RESULTS.md). The Application Report and `verify-report` are an
+optional audit variant, not the headline and not required for the effect.
 
 ## Commands
 
