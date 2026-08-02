@@ -12,8 +12,10 @@ times. What is known, stated without advocacy:
   (idempotency, subprocess safety, atomic file replacement), the treatment
   arm out-scored control on all six provider×task cells across two
   providers (DeepSeek, Mistral), and a placebo arm (a structurally
-  identical pack with irrelevant content) matched or under-scored control —
-  so the in-sample effect is reproducible and is not prompt structure.
+  identical pack with irrelevant content) sat at or below control on four
+  of the six cells and only slightly above on the other two (Mistral e2
+  +0.40, Mistral e3 +0.20) — far below the treatment deltas — so the
+  in-sample effect is reproducible and is not prompt structure.
 - **Out-of-sample, it does not generalise.** Of six out-of-sample cells
   (e4/e5 at n=15 on two providers, plus E6), exactly **one** shows a clean
   knowledge effect (e4-Mistral, +3.07). One cell cannot carry a rule.
@@ -32,8 +34,8 @@ The full record — raw scores, before/after, the audit — is in
 ## What it is
 
 Coding agents already contain this knowledge; they fail anyway because it
-is stored in weights — activated probabilistically, impossible to inspect
-or patch. This repository stores it as fixed, versioned, hashed YAML
+is stored in weights — activated probabilistically, not directly
+inspectable or patchable. This repository stores it as fixed, versioned, hashed YAML
 nodes, retrieves it deterministically (SQLite FTS5 with a pure-Python
 fallback), and composes a bounded context pack per request. The product is
 the **Application Report**: an agent names the node it applied, the
@@ -64,8 +66,7 @@ no model involved — that:
 - every node in the pack appears exactly once, applied or explicitly
   not-applied (a node cannot be silently dropped),
 - every question of an applied node is answered with a non-empty location,
-  or explicitly marked unanswered with a reason (**no question can be
-  skipped**),
+  or explicitly marked unanswered (**no question can be skipped**),
 - the questions are the node's own (altered wording fails).
 
 Worked example. An agent was given the `reliability.idempotency` node and
@@ -75,19 +76,26 @@ returns this report fragment:
 applied:
   - node: reliability.idempotency
     version: 1
-    hash: 59f0bc8c39bb
+    hash: 4cbc1598c0d7
     questions_answered:
       - question: Where is completion recorded, and is that record durable before the effect?
         answer: In the processed_jobs table, written in the same transaction as the charge.
         location: worker.py:41
-    unanswered: []
+    unanswered:
+      - question: What value identifies one logical operation, and where does it come from?
+        reason: The job id is the identity; no separate key is introduced.
+      - question: What state remains after a failure between effect and completion record?
+        reason: The failure path aborts before the charge; nothing to reconcile.
+      - question: Can two workers observe the same operation as not-yet-done simultaneously?
+        reason: Single-worker deployment in this task; not applicable.
 ```
 
-`verify-report` checks the hash against the node, checks `worker.py:41`
-answers the verbatim question, and confirms every other question of the
-node was either answered or explicitly marked unanswered — so a question
-that was skipped, or a claim without a location, fails verification
-instead of passing silently.
+`verify-report` checks the hash against the node, checks that the question
+is the node's own (altered wording fails) with a non-empty answer and a
+non-empty location such as `worker.py:41`, and confirms every other
+question of the node was either answered or explicitly marked unanswered —
+so a question that was skipped, or a claim without a location, fails
+verification instead of passing silently.
 
 ## Install and use
 
