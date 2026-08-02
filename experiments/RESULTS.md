@@ -170,6 +170,13 @@ e5-Mistral (+0.27 vs 0.73) remains too small to call. Extending to n=15 did
 rule still rests on a single node (circuit-breaker on Mistral). Placebo at
 n=15 is at or below control on all four cells.
 
+Note on the mean lens: "e4-DeepSeek: no effect, ceiling" was the wrong
+reading of that cell. Under the variance lens (the repository's actual
+claim — consistency, not better means), the same data shows the e4
+between-provider spread collapsing 2.53 → 0.33 with structural markers
+converging 0.85 → 0.10 and criterion agreement reaching 0/6 — see
+`docs/CONVERGENCE_ANALYSIS.md`.
+
 ## E6 — review.unsupported-claims (machine-checkable output)
 
 The first node whose own output is machine-checkable. The task provides a
