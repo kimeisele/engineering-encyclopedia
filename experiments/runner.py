@@ -180,13 +180,14 @@ E6_VALID_LOCATIONS = {("worker.py", n) for n in range(1, 23)}
 def e6_locations(artifact: str) -> Dict[str, int]:
     """Count cited and resolvable file:line locations in an E6 review.
 
-    A citation is ``worker.py:<n>`` (or a bare ``line <n>`` reference) and is
-    resolvable iff that exact line exists in the E6 diff's new file.
+    A citation is ``worker.py:<n>`` or a ``line <n>`` / ``lines <n>-<m>``
+    reference (audit fix: the plural range form was previously missed) and
+    is resolvable iff that exact line exists in the E6 diff's new file.
     """
     cited = set()
     for match in re.finditer(r"\bworker\.py\s*[:@]\s*(\d+)", artifact):
         cited.add(("worker.py", int(match.group(1))))
-    for match in re.finditer(r"\bline\s+(\d+)\b", artifact, re.IGNORECASE):
+    for match in re.finditer(r"\blines?\s+(\d+)\b", artifact, re.IGNORECASE):
         cited.add(("worker.py", int(match.group(1))))
     resolvable = {loc for loc in cited if loc in E6_VALID_LOCATIONS}
     return {"cited": len(cited), "resolvable": len(resolvable)}

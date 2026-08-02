@@ -22,9 +22,10 @@ criteria:
     kind: present
     pattern: "(raw output|stdout|\\blog\\b|output\\b|evidence|shown?\\s+in)"
   - id: order_parts_addressed
-    description: "unaddressed parts of the order are named"
+    description: "unaddressed parts of the order (or unsupported claims) are named"
     kind: present
-    pattern: "(unaddressed|not addressed|not covered|no part of the order)"
+    pattern: "(unaddressed|not addressed|not covered|no part of the order|not supported|unsupported)"
+    blind_to: "none known (audit fix: 'not supported'/'unsupported' — the natural phrasing for this task — were missing and the criterion never fired)"
   - id: alternatives_excluded
     description: "alternative explanations are named, not silently assumed away"
     kind: present
